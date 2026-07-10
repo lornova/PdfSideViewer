@@ -1,0 +1,266 @@
+#pragma once
+
+#include "DxResources.h"
+#include "engine/Document.h"
+#include "framework.h"
+#include "view/PageLayout.h"
+
+#include <map>
+#include <set>
+#include <tuple>
+
+// One side of the split view: a full single-document viewer presenting through
+// its own DXGI flip-model swapchain via Direct2D. Owns the Document (worker
+// thread), the continuous page layout and the view state (scroll, zoom).
+// Drawing happens in device pixels (D2D1_UNIT_MODE_PIXELS).
+class PaneWindow {
+public:
+    static void RegisterWindowClass(HINSTANCE hinst);
+
+    PaneWindow(DxResources& dx, PCWSTR placeholderHint);
+    ~PaneWindow();
+
+    PaneWindow(const PaneWindow&) = delete;
+    PaneWindow& operator=(const PaneWindow&) = delete;
+
+    void Create(HWND parent, int childId);
+    HWND Hwnd() const { return m_hwnd; }
+
+    // Fit modes are virtual zooms recomputed on every relayout (so also on
+    // pane resize and DPI change); any manual zoom gesture reverts to Manual.
+    enum class ZoomMode { Manual = 0, FitWidth = 1, FitPage = 2 };
+
+    void OpenDocument(std::wstring path);
+    // Like OpenDocument, but restores the given view once the document loads.
+    void OpenDocumentWithView(std::wstring path, float zoom, float scrollX, float scrollY,
+                              ZoomMode zoomMode);
+    void SetDarkMode(bool dark);
+    void OnDpiChanged(UINT dpi);
+    void SetZoomMode(ZoomMode mode);
+    ZoomMode GetZoomMode() const { return m_zoomMode; }
+
+    // ------------------------------------------------------------- sync API --
+    // Positions are in page units (pageIndex + fraction within the page),
+    // sampled at the viewport center: format- and zoom-independent, so two
+    // documents with different page sizes stay aligned page-for-page.
+    // FitZoomChanged: a fit recomputation moved the zoom without a user
+    // gesture (resize, splitter drag); sync must refresh anchors, not
+    // propagate, or the stale ratio causes discontinuous jumps.
+    enum class ViewEvent { Scrolled, Zoomed, DocumentOpened, FocusGained, FitZoomChanged };
+    using ViewChangedHandler = std::function<void(PaneWindow&, ViewEvent, float zoomRatio)>;
+    void SetViewChangedHandler(ViewChangedHandler handler) {
+        m_onViewChanged = std::move(handler);
+    }
+    void SetOpenSiblingHandler(std::function<void(std::wstring)> handler) {
+        m_openSibling = std::move(handler);
+    }
+    bool HasDocument() const { return m_state == State::Open && !m_layout.Empty(); }
+    double SyncPosition() const;
+    void ScrollToSyncPosition(double pos);
+    void ApplyZoomRatio(float ratio);
+
+    // ---------------------------------------------------------- text search --
+    using SearchStatusHandler =
+        std::function<void(PaneWindow&, int activeMatch, int totalMatches, bool done)>;
+    void SetSearchStatusHandler(SearchStatusHandler handler) {
+        m_onSearchStatus = std::move(handler);
+    }
+    void StartSearch(const std::wstring& needle);
+    void ClearSearch();
+    void GotoMatch(int delta); // +1 next, -1 previous; wraps around
+
+    // ------------------------------------------------------ persisted state --
+    const std::wstring& DocumentPath() const { return m_docPath; }
+    float Zoom() const { return m_zoom; }
+    float ScrollX() const { return m_scrollX; }
+    float ScrollY() const { return m_scrollY; }
+    // Unlike HasDocument(), a pane still opening (or that failed to open)
+    // keeps its intended document for persistence: the app has no "close
+    // document" command, so writing an empty path is always data loss.
+    bool HasPersistableDocument() const { return m_state != State::Empty && !m_docPath.empty(); }
+    // While a restore is pending the live zoom/scroll are the reset values;
+    // persist the parked restore view instead.
+    float PersistZoom() const { return m_hasRestoreView ? m_restoreZoom : m_zoom; }
+    float PersistScrollX() const { return m_hasRestoreView ? m_restoreScrollX : m_scrollX; }
+    float PersistScrollY() const { return m_hasRestoreView ? m_restoreScrollY : m_scrollY; }
+    ZoomMode PersistZoomMode() const {
+        return m_hasRestoreView ? m_restoreZoomMode : m_zoomMode;
+    }
+
+    // Document outline (flattened tree; empty when the document has none).
+    const std::vector<Document::OutlineItem>& Outline() const { return m_outline; }
+    void GotoOutlineItem(int index);
+
+private:
+    enum class State { Empty, Opening, Open, Error };
+
+    struct CachedBitmap {
+        ComPtr<ID2D1Bitmap> bitmap; // last completed render (previews may be stale-scale)
+        float bitmapScale = 0;
+        uint64_t lastUsed = 0;  // frame counter; untouched tiles get evicted
+        uint64_t pendingId = 0; // nonzero while a render request is in flight
+        float pendingScale = 0;
+        float failedScale = 0; // scale whose bitmap upload failed; do not re-request
+    };
+    struct TileKey {
+        int page;
+        int res;
+        int row;
+        int col;
+        friend bool operator<(const TileKey& a, const TileKey& b) {
+            return std::tie(a.page, a.res, a.row, a.col) < std::tie(b.page, b.res, b.row, b.col);
+        }
+    };
+
+    static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
+
+    // Graphics plumbing
+    void EnsureSwapChain();
+    void CreateTargetBitmap();
+    void ReleaseTarget();
+    void HandleDeviceLost();
+    void ScheduleRecovery();
+    void DropDeviceDependentPageBitmaps();
+    void OnResize(UINT width, UINT height);
+    void Render();
+    // m_hwnd may legitimately be null before Create(); InvalidateRect(NULL)
+    // would invalidate every window on the desktop.
+    void Invalidate() {
+        if (m_hwnd)
+            InvalidateRect(m_hwnd, nullptr, FALSE);
+    }
+
+    // Drawing
+    void DrawContent();
+    void DrawPlaceholder(ID2D1SolidColorBrush* brush);
+    void DrawDocument(ID2D1SolidColorBrush* brush);
+    void EnsureTextFormat();
+
+    // Document events (posted by the worker)
+    void OnDocOpened(std::unique_ptr<Document::OpenResult> result);
+    void OnPageRendered(std::unique_ptr<Document::RenderResult> result);
+    void OnTextPage(std::unique_ptr<Document::TextPageResult> result);
+    void OnLinks(std::unique_ptr<Document::LinksResult> result);
+    void OnSearchResult(std::unique_ptr<Document::SearchResult> result);
+
+    // Text, selection, links (all on UI-side models; no MuPDF calls)
+    struct CaretPos {
+        int page = 0;
+        int line = 0;
+        int ch = 0;
+        friend auto operator<=>(const CaretPos&, const CaretPos&) = default;
+    };
+    std::optional<PageLayout::PagePoint> PagePointAt(POINT client) const;
+    std::optional<CaretPos> CaretAt(POINT client, bool clampToNearest);
+    void EnsureTextPage(int page, bool urgent);
+    void EnsureLinks(int page);
+    bool TextAt(int page, float px, float py) const;
+    const Document::LinkInfo* LinkAt(int page, float px, float py) const;
+    void ActivateLink(const Document::LinkInfo& link);
+    void ClearSelection();
+    std::wstring SelectionText() const;
+    void CopySelection();
+    void DrawOverlays(ID2D1SolidColorBrush* brush, int page, const D2D1_RECT_F& dest,
+                      float scale);
+    void NotifySearchStatus();
+    void ScrollToMatch(const Document::SearchMatch& match);
+
+    // View state
+    float DesiredScale() const { return m_zoom * static_cast<float>(m_dpi) / 72.0f; }
+    float DipToPx(float dip) const { return dip * static_cast<float>(m_dpi) / 96.0f; }
+    SIZE ViewportPx() const;
+    D2D1_POINT_2F ContentOrigin() const;
+    void RelayoutDocument();
+    void UpdateFitZoom(); // recompute m_zoom for FitWidth/FitPage
+    void ClampScroll();
+    void ScrollTo(float x, float y);
+    void ScrollBy(float dx, float dy);
+    void ZoomAt(POINT viewPt, float newZoom);
+    void UpdateScrollBars();
+    void OnScrollMessage(UINT msg, WPARAM wParam);
+    void OnMouseWheel(WPARAM wParam, LPARAM lParam, bool horizontal);
+    bool OnKeyDown(WPARAM key);
+    static int TileResFor(float pageWpx, float pageHpx);
+    void EnsureRequested(CachedBitmap& entry, int page, float scale, int res, int row, int col,
+                         bool urgent);
+    void EvictStale(int firstKeep, int lastKeep);
+
+    static constexpr UINT_PTR kRecoveryTimer = 1;
+    static constexpr UINT kMaxRecoveryAttempts = 5;
+    static constexpr float kMinZoom = 0.125f;
+    static constexpr float kMaxZoom = 8.0f;
+    // Pages whose pixel size exceeds ~1.5x this (geometric mean) are split
+    // into a 2^res x 2^res tile grid; previews are capped to this size too.
+    static constexpr float kMaxTilePx = 2048.0f;
+
+    DxResources& m_dx;
+    HWND m_hwnd = nullptr;
+    UINT m_dpi = 96;
+    unsigned m_dxGeneration = 0; // DxResources::Generation() our resources were built on
+    UINT m_recoveryAttempts = 0; // consecutive graphics failures, reset on successful present
+    bool m_dark = false;
+    bool m_focused = false;
+    std::wstring m_hint;
+    std::wstring m_docPath;
+    std::wstring m_errorText;
+
+    ComPtr<IDXGISwapChain1> m_swapChain;
+    ComPtr<ID2D1DeviceContext> m_d2dContext;
+    ComPtr<ID2D1Bitmap1> m_targetBitmap;
+    ComPtr<IDWriteTextFormat> m_textFormat;
+    UINT m_textFormatDpi = 0;
+
+    State m_state = State::Empty;
+    Document m_doc;
+    PageLayout m_layout;
+    std::vector<Document::OutlineItem> m_outline;
+    ZoomMode m_zoomMode = ZoomMode::FitWidth;
+    float m_zoom = 1.0f;
+    float m_scrollX = 0; // content px
+    float m_scrollY = 0;
+    std::map<int, CachedBitmap> m_previews; // whole page, capped size; tile fallback
+    std::map<TileKey, CachedBitmap> m_tiles; // exact-scale tiles when res > 0
+    uint64_t m_frame = 0; // bumped per DrawDocument; drives tile eviction
+    uint64_t m_nextRequestId = 1;
+    uint64_t m_openGen = 0; // matches the pending OpenAsync; gates OnDocOpened
+
+    ViewChangedHandler m_onViewChanged;
+    std::function<void(std::wstring)> m_openSibling; // second file of a multi-drop
+
+    // UI-side text/link models for visible (and selection-spanning) pages.
+    std::map<int, std::vector<Document::TextLine>> m_textPages;
+    std::set<int> m_textPending;
+    std::map<int, std::vector<Document::LinkInfo>> m_links;
+    std::set<int> m_linksPending;
+
+    bool m_selecting = false; // mouse captured, dragging a selection
+    bool m_hasSelection = false;
+    CaretPos m_selAnchor;
+    CaretPos m_selFocus;
+    POINT m_dragStart{};
+    bool m_suppressLinkClick = false;  // armed by WM_LBUTTONDBLCLK
+    bool m_clickActivatedLink = false; // first click of a double-click navigated
+
+    SearchStatusHandler m_onSearchStatus;
+    std::wstring m_searchNeedle;
+    std::wstring m_pendingSearch; // typed while the document was still opening
+    uint64_t m_searchSeq = 0; // matches Document::StartSearch ids
+    std::vector<Document::SearchMatch> m_matches; // page order
+    int m_activeMatch = -1;
+    bool m_searchDone = true;
+
+    bool m_hasRestoreView = false; // view to apply when the pending open lands
+    float m_restoreZoom = 1.0f;
+    float m_restoreScrollX = 0;
+    float m_restoreScrollY = 0;
+    ZoomMode m_restoreZoomMode = ZoomMode::FitWidth;
+
+    // Last values pushed to SetScrollInfo, to avoid re-triggering WM_SIZE.
+    int m_sbV[3] = {-1, -1, -1}; // max, page, pos
+    int m_sbH[3] = {-1, -1, -1};
+    // Bumped on every UpdateScrollBars entry; detects the synchronous WM_SIZE
+    // re-entry caused by SetScrollInfo toggling a bar's visibility.
+    unsigned m_sbEpoch = 0;
+    int m_resizeDepth = 0; // belt-and-braces cap on WM_SIZE re-entry
+};

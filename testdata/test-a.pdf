@@ -1,0 +1,99 @@
+%PDF-1.4
+1 0 obj
+<< /Type /Catalog /Pages 2 0 R /Outlines 14 0 R >>
+endobj
+2 0 obj
+<< /Type /Pages /Kids [3 0 R 5 0 R 7 0 R 9 0 R] /Count 4 >>
+endobj
+3 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 4 0 R /Resources << /Font << /F1 11 0 R >> >> /Annots [12 0 R 13 0 R] >>
+endobj
+4 0 obj
+<< /Length 228 >>
+stream
+1 w 0.2 0.2 0.8 RG 20 20 555 802 re S
+BT /F1 48 Tf 40 742 Td (A - Pagina 1 (A4)) Tj ET
+BT /F1 18 Tf 40 421 Td (595 x 842 pt) Tj ET
+BT /F1 14 Tf 40 592 Td (Vai a pagina 3) Tj ET
+BT /F1 14 Tf 40 492 Td (https://example.com/) Tj ET
+endstream
+endobj
+5 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 842 595] /Contents 6 0 R /Resources << /Font << /F1 11 0 R >> >> >>
+endobj
+6 0 obj
+<< /Length 137 >>
+stream
+1 w 0.2 0.2 0.8 RG 20 20 802 555 re S
+BT /F1 48 Tf 40 495 Td (A - Pagina 2 (A4 orizz.)) Tj ET
+BT /F1 18 Tf 40 298 Td (842 x 595 pt) Tj ET
+endstream
+endobj
+7 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 420 595] /Contents 8 0 R /Resources << /Font << /F1 11 0 R >> >> >>
+endobj
+8 0 obj
+<< /Length 130 >>
+stream
+1 w 0.2 0.2 0.8 RG 20 20 380 555 re S
+BT /F1 48 Tf 40 495 Td (A - Pagina 3 (A5)) Tj ET
+BT /F1 18 Tf 40 298 Td (420 x 595 pt) Tj ET
+endstream
+endobj
+9 0 obj
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Contents 10 0 R /Resources << /Font << /F1 11 0 R >> >> >>
+endobj
+10 0 obj
+<< /Length 130 >>
+stream
+1 w 0.2 0.2 0.8 RG 20 20 555 802 re S
+BT /F1 48 Tf 40 742 Td (A - Pagina 4 (A4)) Tj ET
+BT /F1 18 Tf 40 421 Td (595 x 842 pt) Tj ET
+endstream
+endobj
+11 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+12 0 obj
+<< /Type /Annot /Subtype /Link /Rect [40 582 300 612] /Border [0 0 0] /A << /S /GoTo /D [7 0 R /Fit] >> >>
+endobj
+13 0 obj
+<< /Type /Annot /Subtype /Link /Rect [40 482 300 512] /Border [0 0 0] /A << /S /URI /URI (https://example.com/) >> >>
+endobj
+14 0 obj
+<< /Type /Outlines /First 15 0 R /Last 16 0 R /Count 3 >>
+endobj
+15 0 obj
+<< /Title (Capitolo 1) /Parent 14 0 R /Next 16 0 R /Dest [3 0 R /Fit] >>
+endobj
+16 0 obj
+<< /Title (Capitolo 2) /Parent 14 0 R /Prev 15 0 R /First 17 0 R /Last 17 0 R /Count 1 /Dest [5 0 R /Fit] >>
+endobj
+17 0 obj
+<< /Title (Sezione 2.1 - pagina 3) /Parent 16 0 R /Dest [7 0 R /Fit] >>
+endobj
+xref
+0 18
+0000000000 65535 f 
+0000000009 00000 n 
+0000000075 00000 n 
+0000000150 00000 n 
+0000000301 00000 n 
+0000000580 00000 n 
+0000000707 00000 n 
+0000000895 00000 n 
+0000001022 00000 n 
+0000001203 00000 n 
+0000001331 00000 n 
+0000001513 00000 n 
+0000001584 00000 n 
+0000001707 00000 n 
+0000001841 00000 n 
+0000001915 00000 n 
+0000002004 00000 n 
+0000002129 00000 n 
+trailer
+<< /Size 18 /Root 1 0 R >>
+startxref
+2217
+%%EOF

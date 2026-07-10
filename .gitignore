@@ -1,0 +1,8 @@
+# Build outputs
+build/
+.vs/
+*.user
+
+# MuPDF sources + build outputs: ~0.5 GB of upstream sources plus multi-GB
+# static libraries. Not tracked; run scripts/get-mupdf.ps1 to populate.
+vendor/

@@ -1,0 +1,26 @@
+PdfSideViewer
+Copyright (C) 2026 Lorenzo Novara
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version. See the LICENSE file for the full text.
+
+Third-party components
+----------------------
+
+MuPDF (https://mupdf.com)
+    Copyright (C) Artifex Software, Inc.
+    Licensed under the GNU Affero General Public License v3 (or later).
+    PdfSideViewer statically links MuPDF; per GPLv3 section 13 the combined
+    work is conveyed with both licenses satisfied. MuPDF is NOT tracked in
+    this repository: run scripts/get-mupdf.ps1 to download and unpack the
+    exact upstream source release (1.28.0) into vendor/mupdf, including its
+    own license texts and its bundled third-party libraries (FreeType,
+    HarfBuzz, libjpeg, OpenJPEG, zlib, and others, each under its own
+    permissive or copyleft license; see vendor/mupdf/COPYING and
+    vendor/mupdf/thirdparty after fetching).
+
+Binary releases of PdfSideViewer must be accompanied by (or reference) the
+complete corresponding source: this repository at the release tag, plus the
+upstream MuPDF 1.28.0 source archive fetched by scripts/get-mupdf.ps1.
