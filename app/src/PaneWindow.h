@@ -35,6 +35,13 @@ public:
     void OpenDocumentWithView(std::wstring path, float zoom, float scrollX, float scrollY,
                               ZoomMode zoomMode);
     void SetDarkMode(bool dark);
+    // Live language switch: the other placeholder texts are composed at paint
+    // time (so the repaint alone refreshes them), but the empty-state hint is
+    // captured at construction.
+    void SetPlaceholderHint(PCWSTR hint) {
+        m_hint = hint;
+        Invalidate();
+    }
     void OnDpiChanged(UINT dpi);
     void SetZoomMode(ZoomMode mode);
     ZoomMode GetZoomMode() const { return m_zoomMode; }
@@ -55,9 +62,11 @@ public:
         m_openSibling = std::move(handler);
     }
     bool HasDocument() const { return m_state == State::Open && !m_layout.Empty(); }
+    int PageCount() const { return m_layout.PageCount(); }
     double SyncPosition() const;
     void ScrollToSyncPosition(double pos);
     void ApplyZoomRatio(float ratio);
+    void SetManualZoom(float zoom);
 
     // ---------------------------------------------------------- text search --
     using SearchStatusHandler =
@@ -215,7 +224,7 @@ private:
     Document m_doc;
     PageLayout m_layout;
     std::vector<Document::OutlineItem> m_outline;
-    ZoomMode m_zoomMode = ZoomMode::FitWidth;
+    ZoomMode m_zoomMode = ZoomMode::FitPage;
     float m_zoom = 1.0f;
     float m_scrollX = 0; // content px
     float m_scrollY = 0;

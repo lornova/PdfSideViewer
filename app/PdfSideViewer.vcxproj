@@ -51,7 +51,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <PreprocessorDefinitions>UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir)src;$(SolutionDir)vendor\mupdf\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)res;$(SolutionDir)vendor\mupdf\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -59,7 +59,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <!-- Release dir as fallback: libresources (pure data) has no Debug config. -->
       <AdditionalLibraryDirectories>$(SolutionDir)vendor\mupdf\platform\win32\$(Platform)\$(Configuration)\;$(SolutionDir)vendor\mupdf\platform\win32\$(Platform)\Release\;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
-      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dwmapi.lib;comctl32.lib;libmupdf.lib;libthirdparty.lib;libresources.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dwmapi.lib;comctl32.lib;shlwapi.lib;libmupdf.lib;libthirdparty.lib;libresources.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)'=='Debug'">
@@ -87,7 +87,9 @@
     <ClCompile Include="src\PaneWindow.cpp" />
     <ClCompile Include="src\engine\Document.cpp" />
     <ClCompile Include="src\engine\MupdfLib.cpp" />
+    <ClCompile Include="src\util\GlyphIcons.cpp" />
     <ClCompile Include="src\util\Settings.cpp" />
+    <ClCompile Include="src\util\Strings.cpp" />
     <ClCompile Include="src\view\PageLayout.cpp" />
     <ClCompile Include="src\view\SyncController.cpp" />
   </ItemGroup>
@@ -99,9 +101,15 @@
     <ClInclude Include="src\engine\Document.h" />
     <ClInclude Include="src\engine\Mupdf.h" />
     <ClInclude Include="src\engine\MupdfLib.h" />
+    <ClInclude Include="src\util\GlyphIcons.h" />
     <ClInclude Include="src\util\Settings.h" />
+    <ClInclude Include="src\util\Strings.h" />
     <ClInclude Include="src\view\PageLayout.h" />
     <ClInclude Include="src\view\SyncController.h" />
+    <ClInclude Include="res\resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="res\PdfSideViewer.rc" />
   </ItemGroup>
   <ItemGroup>
     <Manifest Include="app.manifest" />

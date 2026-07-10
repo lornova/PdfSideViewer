@@ -1,9 +1,13 @@
 #include "MainWindow.h"
 
+#include "resource.h"
+#include "util/GlyphIcons.h"
 #include "util/Settings.h"
+#include "util/Strings.h"
 
 #include <commctrl.h> // SetWindowSubclass for the find-box keyboard handling
 #include <commdlg.h>  // excluded from windows.h by WIN32_LEAN_AND_MEAN
+#include <shlwapi.h>  // PathCompactPathExW for the MRU menu labels
 
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
@@ -17,6 +21,53 @@ constexpr int kInitialWidthDip = 1100;
 constexpr int kInitialHeightDip = 760;
 constexpr UINT_PTR kFindDebounceTimer = 2;
 constexpr PCWSTR kFindBarClass = L"PsvFindBar";
+
+// Command lines may carry relative paths; MRU entries must survive a cwd
+// change, so they are absolutized at record time.
+std::wstring NormalizePath(const std::wstring& path) {
+    wchar_t buffer[1024];
+    const DWORD n = GetFullPathNameW(path.c_str(), ARRAYSIZE(buffer), buffer, nullptr);
+    return (n == 0 || n >= ARRAYSIZE(buffer)) ? path : std::wstring(buffer, n);
+}
+
+std::wstring CompactPath(const std::wstring& path, UINT maxChars) {
+    wchar_t buffer[MAX_PATH];
+    if (maxChars >= ARRAYSIZE(buffer) || !PathCompactPathExW(buffer, path.c_str(), maxChars, 0))
+        return path;
+    return buffer;
+}
+
+// '&' in a file name would become a menu mnemonic.
+std::wstring EscapeMenuText(std::wstring s) {
+    size_t pos = 0;
+    while ((pos = s.find(L'&', pos)) != std::wstring::npos) {
+        s.insert(pos, 1, L'&');
+        pos += 2;
+    }
+    return s;
+}
+
+std::wstring MruMenuLabel(size_t index, const std::wstring& text) {
+    std::wstring label = L"&";
+    label += static_cast<wchar_t>(L'1' + index); // entries cap at 9: always one digit
+    label += L"  ";
+    label += EscapeMenuText(text);
+    return label;
+}
+
+// Segoe MDL2 Assets codepoints; the order is the imagelist order referenced
+// by the TBBUTTON iBitmap indices in CreateToolbar.
+constexpr wchar_t kToolbarGlyphs[] = {
+    0xE8A0, // 0 open left (arrow into the left pane)
+    0xE89F, // 1 open right
+    0xE71B, // 2 scroll sync (link)
+    0xE895, // 3 zoom sync (circular arrows)
+    0xE8AB, // 4 fit width (horizontal arrows)
+    0xE9A6, // 5 fit page
+    0xE721, // 6 find
+    0xE8FD, // 7 outline (bulleted list)
+    0xE740, // 8 full screen
+};
 
 // The find bar is a plain container: forward its children's notifications to
 // the main window, which owns all command handling.
@@ -53,7 +104,12 @@ void MainWindow::RegisterWindowClass(HINSTANCE hinst) {
     wc.style = CS_DBLCLKS;
     wc.lpfnWndProc = WndProc;
     wc.hInstance = hinst;
-    wc.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    wc.hIcon = static_cast<HICON>(LoadImageW(hinst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+                                             GetSystemMetrics(SM_CXICON),
+                                             GetSystemMetrics(SM_CYICON), LR_SHARED));
+    wc.hIconSm = static_cast<HICON>(LoadImageW(hinst, MAKEINTRESOURCEW(IDI_APP), IMAGE_ICON,
+                                               GetSystemMetrics(SM_CXSMICON),
+                                               GetSystemMetrics(SM_CYSMICON), LR_SHARED));
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = kClassName;
     RegisterClassExW(&wc);
@@ -71,17 +127,35 @@ void MainWindow::RegisterWindowClass(HINSTANCE hinst) {
 MainWindow::~MainWindow() {
     if (m_bgBrush)
         DeleteObject(m_bgBrush);
+    if (m_toolbarIcons)
+        ImageList_Destroy(m_toolbarIcons);
 }
 
 bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
                         std::wstring rightFile) {
     m_dx.EnsureCreated(); // fail fast in wWinMain if graphics init is impossible
-    m_left = std::make_unique<PaneWindow>(m_dx, L"Left pane\nCtrl+O to open a PDF");
-    m_right = std::make_unique<PaneWindow>(m_dx, L"Right pane\nCtrl+Shift+O to open a PDF");
+
+    // Loaded before any UI is built: the language drives the menu and the
+    // pane placeholders, and the bar visibility must be in place for the
+    // WM_CREATE Layout. A command line only overrides the documents; the UI
+    // preferences always apply.
+    const AppSettings session = AppSettings::Load();
+    SetUiLanguage(session.language == L"it" ? Lang::Italian : Lang::English);
+    m_toolbarVisible = session.toolbar;
+    m_statusVisible = session.statusbar;
+    m_outlineVisible = session.outline;
+    m_mruFiles = session.mruFiles;
+    m_mruPairs = session.mruPairs;
+
+    m_left = std::make_unique<PaneWindow>(m_dx, Str(StrId::PlaceholderLeft));
+    m_right = std::make_unique<PaneWindow>(m_dx, Str(StrId::PlaceholderRight));
     m_sync = std::make_unique<SyncController>(*m_left, *m_right);
 
+    // Attached before creation so the very first GetClientRect already
+    // excludes the menu band.
+    m_menu = BuildMenuBar();
     CreateWindowExW(0, kClassName, L"PdfSideViewer", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                    CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, nullptr, nullptr,
+                    CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, nullptr, m_menu,
                     hinst, this);
     if (!m_hwnd)
         return false;
@@ -99,12 +173,26 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
                 UpdateOutlineSidebar(&p);
             else
                 m_outlinePane = &p;
-            return;
+        } else {
+            m_sync->OnViewChanged(p, e, r);
+            if (e == PaneWindow::ViewEvent::DocumentOpened && m_outlineVisible &&
+                m_outlinePane == &p)
+                UpdateOutlineSidebar(&p);
+            // Every successful open funnels through here (dialog, MRU, drag &
+            // drop, command line, session restore), so this is the one MRU
+            // recording point. Error opens keep HasDocument() false.
+            if (e == PaneWindow::ViewEvent::DocumentOpened && p.HasDocument()) {
+                RecordMruFile(p.DocumentPath());
+                if (m_left->HasDocument() && m_right->HasDocument())
+                    RecordMruPair(m_left->DocumentPath(), m_right->DocumentPath());
+                RebuildMruMenus();
+            }
         }
-        m_sync->OnViewChanged(p, e, r);
-        if (e == PaneWindow::ViewEvent::DocumentOpened && m_outlineVisible &&
-            m_outlinePane == &p)
-            UpdateOutlineSidebar(&p);
+        UpdateStatusBar();
+        // Scroll ticks are too frequent for menu/toolbar churn; the checked
+        // state only depends on zoom mode and focus anyway.
+        if (e != PaneWindow::ViewEvent::Scrolled)
+            UpdateCommandUi();
     };
     m_left->SetViewChangedHandler(onViewChanged);
     m_right->SetViewChangedHandler(onViewChanged);
@@ -124,9 +212,8 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_left->SetSearchStatusHandler(onSearchStatus);
     m_right->SetSearchStatusHandler(onSearchStatus);
 
-    // Loaded even when the command line wins: the pane sessions seed the
-    // SaveSession fallbacks so an unopened pane never wipes saved state.
-    const AppSettings session = AppSettings::Load();
+    // The pane sessions seed the SaveSession fallbacks even when the command
+    // line wins, so an unopened pane never wipes saved state.
     const float dpiRatio = static_cast<float>(m_dpi) / static_cast<float>(session.dpi);
     m_fallbackLeft = session.left;
     m_fallbackLeft.scrollX *= dpiRatio;
@@ -135,16 +222,24 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_fallbackRight.scrollX *= dpiRatio;
     m_fallbackRight.scrollY *= dpiRatio;
 
+    if (m_outlineVisible)
+        UpdateOutlineSidebar(m_left.get()); // adopt a target; filled on DocumentOpened
+
     if (!leftFile.empty() || !rightFile.empty()) {
-        // Explicit command line wins over the saved session.
+        // Explicit command line wins over the saved session for the DOCUMENTS
+        // only; the sync preference applies to every launch path (same order
+        // as ApplySession: anchors recapture when the opens complete).
+        m_sync->SetZoomSync(session.zoomSync);
         if (!leftFile.empty())
             m_left->OpenDocument(std::move(leftFile));
         if (!rightFile.empty())
             m_right->OpenDocument(std::move(rightFile));
+        m_sync->SetScrollSync(session.scrollSync);
     } else {
         ApplySession(session);
     }
     UpdateTitle();
+    UpdateCommandUi();
 
     ShowWindow(m_hwnd, m_startMaximized ? SW_SHOWMAXIMIZED : nCmdShow);
     UpdateWindow(m_hwnd);
@@ -189,9 +284,11 @@ void MainWindow::ApplySession(const AppSettings& session) {
 
 void MainWindow::SaveSession() const {
     AppSettings s;
-    WINDOWPLACEMENT wp{};
+    // While full screen the live placement is the monitor rect written by the
+    // enter transition; the captured pre-fullscreen placement is the session.
+    WINDOWPLACEMENT wp = m_fsRestorePlacement;
     wp.length = sizeof(wp);
-    if (GetWindowPlacement(m_hwnd, &wp)) {
+    if (m_fullscreen || GetWindowPlacement(m_hwnd, &wp)) {
         s.hasPlacement = true;
         s.normalRect = wp.rcNormalPosition;
         s.maximized = wp.showCmd == SW_SHOWMAXIMIZED;
@@ -200,6 +297,12 @@ void MainWindow::SaveSession() const {
     s.scrollSync = m_sync->ScrollSync();
     s.zoomSync = m_sync->ZoomSync();
     s.dpi = m_dpi;
+    s.toolbar = m_toolbarVisible;
+    s.statusbar = m_statusVisible;
+    s.outline = m_outlineVisible;
+    s.language = UiLanguage() == Lang::Italian ? L"it" : L"en";
+    s.mruFiles = m_mruFiles;
+    s.mruPairs = m_mruPairs;
     s.left = m_left->HasPersistableDocument()
                  ? PaneSettings{m_left->DocumentPath(), m_left->PersistZoom(),
                                 m_left->PersistScrollX(), m_left->PersistScrollY(),
@@ -213,12 +316,368 @@ void MainWindow::SaveSession() const {
     s.Save();
 }
 
+PaneWindow* MainWindow::FocusedPane() const {
+    return GetFocus() == m_right->Hwnd() ? m_right.get() : m_left.get();
+}
+
+HMENU MainWindow::BuildMenuBar() {
+    const auto append = [](HMENU menu, UINT_PTR id, StrId text) {
+        AppendMenuW(menu, MF_STRING, id, Str(text));
+    };
+    m_mruFilesMenu = CreatePopupMenu();
+    m_mruPairsMenu = CreatePopupMenu();
+    HMENU file = CreatePopupMenu();
+    append(file, IDC_OPEN_LEFT, StrId::MenuOpenLeft);
+    append(file, IDC_OPEN_RIGHT, StrId::MenuOpenRight);
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(m_mruFilesMenu),
+                Str(StrId::MenuRecentFiles));
+    AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(m_mruPairsMenu),
+                Str(StrId::MenuRecentPairs));
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    append(file, IDC_EXIT, StrId::MenuExit);
+
+    HMENU lang = CreatePopupMenu();
+    append(lang, IDC_LANG_ENGLISH, StrId::MenuLangEnglish);
+    append(lang, IDC_LANG_ITALIAN, StrId::MenuLangItalian);
+
+    HMENU view = CreatePopupMenu();
+    append(view, IDC_TOGGLE_TOOLBAR, StrId::MenuToolbar);
+    append(view, IDC_TOGGLE_STATUSBAR, StrId::MenuStatusBar);
+    append(view, IDC_TOGGLE_OUTLINE, StrId::MenuOutline);
+    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+    append(view, IDC_ZOOM_IN, StrId::MenuZoomIn);
+    append(view, IDC_ZOOM_OUT, StrId::MenuZoomOut);
+    append(view, IDC_ZOOM_ACTUAL, StrId::MenuActualSize);
+    append(view, IDC_FIT_WIDTH, StrId::MenuFitWidth);
+    append(view, IDC_FIT_PAGE, StrId::MenuFitPage);
+    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(view, MF_POPUP, reinterpret_cast<UINT_PTR>(lang), Str(StrId::MenuLanguage));
+    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+    append(view, IDC_FULLSCREEN, StrId::MenuFullScreen);
+
+    HMENU sync = CreatePopupMenu();
+    append(sync, IDC_TOGGLE_SCROLL_SYNC, StrId::MenuScrollSync);
+    append(sync, IDC_TOGGLE_ZOOM_SYNC, StrId::MenuZoomSync);
+
+    HMENU help = CreatePopupMenu();
+    append(help, IDC_ABOUT, StrId::MenuAbout);
+
+    HMENU bar = CreateMenu();
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), Str(StrId::MenuFile));
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), Str(StrId::MenuView));
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(sync), Str(StrId::MenuSync));
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), Str(StrId::MenuHelp));
+    RebuildMruMenus();
+    return bar;
+}
+
+void MainWindow::RebuildMruMenus() {
+    const auto reset = [](HMENU menu) {
+        if (!menu)
+            return false;
+        while (GetMenuItemCount(menu) > 0)
+            DeleteMenu(menu, 0, MF_BYPOSITION);
+        return true;
+    };
+    if (reset(m_mruFilesMenu)) {
+        for (size_t i = 0; i < m_mruFiles.size(); ++i)
+            AppendMenuW(m_mruFilesMenu, MF_STRING,
+                        static_cast<UINT_PTR>(IDC_MRU_FILE_FIRST) + i,
+                        MruMenuLabel(i, CompactPath(m_mruFiles[i], 64)).c_str());
+        if (m_mruFiles.empty())
+            AppendMenuW(m_mruFilesMenu, MF_STRING | MF_GRAYED, 0, Str(StrId::MenuMruEmpty));
+    }
+    if (reset(m_mruPairsMenu)) {
+        for (size_t i = 0; i < m_mruPairs.size(); ++i) {
+            const std::wstring text =
+                CompactPath(m_mruPairs[i].left, 36) + L"  +  " +
+                CompactPath(m_mruPairs[i].right, 36);
+            AppendMenuW(m_mruPairsMenu, MF_STRING,
+                        static_cast<UINT_PTR>(IDC_MRU_PAIR_FIRST) + i,
+                        MruMenuLabel(i, text).c_str());
+        }
+        if (m_mruPairs.empty())
+            AppendMenuW(m_mruPairsMenu, MF_STRING | MF_GRAYED, 0, Str(StrId::MenuMruEmpty));
+    }
+}
+
+void MainWindow::RecordMruFile(const std::wstring& path) {
+    if (path.empty())
+        return;
+    const std::wstring normalized = NormalizePath(path);
+    auto& v = m_mruFiles;
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [&](const std::wstring& p) {
+                               return lstrcmpiW(p.c_str(), normalized.c_str()) == 0;
+                           }),
+            v.end());
+    v.insert(v.begin(), normalized);
+    if (v.size() > kMruMaxEntries)
+        v.resize(kMruMaxEntries);
+}
+
+void MainWindow::RecordMruPair(const std::wstring& left, const std::wstring& right) {
+    if (left.empty() || right.empty())
+        return;
+    const std::wstring l = NormalizePath(left);
+    const std::wstring r = NormalizePath(right);
+    auto& v = m_mruPairs;
+    v.erase(std::remove_if(v.begin(), v.end(),
+                           [&](const MruPair& p) {
+                               return lstrcmpiW(p.left.c_str(), l.c_str()) == 0 &&
+                                      lstrcmpiW(p.right.c_str(), r.c_str()) == 0;
+                           }),
+            v.end());
+    v.insert(v.begin(), {l, r});
+    if (v.size() > kMruMaxEntries)
+        v.resize(kMruMaxEntries);
+}
+
+void MainWindow::OpenMruFile(size_t index) {
+    if (index >= m_mruFiles.size())
+        return;
+    const std::wstring path = m_mruFiles[index]; // copy: the erase below invalidates
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        m_mruFiles.erase(m_mruFiles.begin() + static_cast<ptrdiff_t>(index));
+        RebuildMruMenus();
+        const std::wstring msg = Str(StrId::MruMissingFile) + path;
+        MessageBoxW(m_hwnd, msg.c_str(), L"PdfSideViewer", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    FocusedPane()->OpenDocument(path);
+}
+
+void MainWindow::OpenMruPair(size_t index) {
+    if (index >= m_mruPairs.size())
+        return;
+    const MruPair pair = m_mruPairs[index]; // copy: the erase below invalidates
+    const bool leftMissing = GetFileAttributesW(pair.left.c_str()) == INVALID_FILE_ATTRIBUTES;
+    const bool rightMissing = GetFileAttributesW(pair.right.c_str()) == INVALID_FILE_ATTRIBUTES;
+    if (leftMissing || rightMissing) {
+        m_mruPairs.erase(m_mruPairs.begin() + static_cast<ptrdiff_t>(index));
+        RebuildMruMenus();
+        const std::wstring msg =
+            Str(StrId::MruMissingFile) + (leftMissing ? pair.left : pair.right);
+        MessageBoxW(m_hwnd, msg.c_str(), L"PdfSideViewer", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    m_left->OpenDocument(pair.left);
+    m_right->OpenDocument(pair.right);
+}
+
+void MainWindow::CreateToolbar(HINSTANCE hinst) {
+    // No TBSTYLE_FLAT: flat toolbars are transparent and delegate their
+    // background to the parent, which paints nothing under children
+    // (WS_CLIPCHILDREN + WM_ERASEBKGND returning 1), leaving a black band.
+    // The comctl v6 theme already renders the non-flat style modern.
+    m_toolbar = CreateWindowExW(0, TOOLBARCLASSNAMEW, nullptr,
+                                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TBSTYLE_TOOLTIPS |
+                                    CCS_TOP | CCS_NODIVIDER,
+                                0, 0, 0, 0, m_hwnd,
+                                reinterpret_cast<HMENU>(static_cast<UINT_PTR>(102)), hinst,
+                                nullptr);
+    if (!m_toolbar)
+        return;
+    SendMessageW(m_toolbar, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+    RebuildToolbarIcons();
+
+    const auto button = [](int image, WORD id, BYTE style) {
+        TBBUTTON b{};
+        b.iBitmap = image;
+        b.idCommand = id;
+        b.fsState = TBSTATE_ENABLED;
+        b.fsStyle = style;
+        return b;
+    };
+    const auto separator = [] {
+        TBBUTTON b{};
+        b.fsStyle = BTNS_SEP;
+        return b;
+    };
+    const TBBUTTON buttons[] = {
+        button(0, IDC_OPEN_LEFT, BTNS_BUTTON),
+        button(1, IDC_OPEN_RIGHT, BTNS_BUTTON),
+        separator(),
+        button(2, IDC_TOGGLE_SCROLL_SYNC, BTNS_CHECK),
+        button(3, IDC_TOGGLE_ZOOM_SYNC, BTNS_CHECK),
+        separator(),
+        // A manual check pair, not BTNS_CHECKGROUP: Manual zoom mode means
+        // NEITHER fit button is pressed, which a radio group cannot show.
+        button(4, IDC_FIT_WIDTH, BTNS_CHECK),
+        button(5, IDC_FIT_PAGE, BTNS_CHECK),
+        separator(),
+        button(6, IDC_FIND_SHOW, BTNS_BUTTON),
+        button(7, IDC_TOGGLE_OUTLINE, BTNS_CHECK),
+        separator(),
+        button(8, IDC_FULLSCREEN, BTNS_BUTTON),
+    };
+    SendMessageW(m_toolbar, TB_ADDBUTTONSW, std::size(buttons),
+                 reinterpret_cast<LPARAM>(buttons));
+}
+
+void MainWindow::RebuildToolbarIcons() {
+    if (!m_toolbar)
+        return;
+    const int glyphPx = MulDiv(16, m_dpi, 96);
+    HIMAGELIST icons =
+        CreateGlyphImageList(std::span<const wchar_t>(kToolbarGlyphs), glyphPx, glyphPx,
+                             GetSysColor(COLOR_BTNTEXT));
+    if (!icons)
+        return;
+    SendMessageW(m_toolbar, TB_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(icons));
+    if (m_toolbarIcons)
+        ImageList_Destroy(m_toolbarIcons);
+    m_toolbarIcons = icons;
+    const int btn = MulDiv(24, m_dpi, 96);
+    SendMessageW(m_toolbar, TB_SETBUTTONSIZE, 0, MAKELPARAM(btn, btn));
+    SendMessageW(m_toolbar, TB_AUTOSIZE, 0, 0);
+}
+
+void MainWindow::UpdateCommandUi() {
+    if (!m_sync)
+        return;
+    if (m_menu) {
+        const auto check = [this](UINT id, bool on) {
+            CheckMenuItem(m_menu, id, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED));
+        };
+        check(IDC_TOGGLE_TOOLBAR, m_toolbarVisible);
+        check(IDC_TOGGLE_STATUSBAR, m_statusVisible);
+        check(IDC_TOGGLE_OUTLINE, m_outlineVisible);
+        check(IDC_FULLSCREEN, m_fullscreen);
+        check(IDC_TOGGLE_SCROLL_SYNC, m_sync->ScrollSync());
+        check(IDC_TOGGLE_ZOOM_SYNC, m_sync->ZoomSync());
+        UINT fitId = IDC_ZOOM_ACTUAL;
+        switch (FocusedPane()->GetZoomMode()) {
+        case PaneWindow::ZoomMode::FitWidth:
+            fitId = IDC_FIT_WIDTH;
+            break;
+        case PaneWindow::ZoomMode::FitPage:
+            fitId = IDC_FIT_PAGE;
+            break;
+        default:
+            break;
+        }
+        CheckMenuRadioItem(m_menu, IDC_ZOOM_ACTUAL, IDC_FIT_PAGE, fitId, MF_BYCOMMAND);
+        CheckMenuRadioItem(m_menu, IDC_LANG_ENGLISH, IDC_LANG_ITALIAN,
+                           UiLanguage() == Lang::Italian ? IDC_LANG_ITALIAN : IDC_LANG_ENGLISH,
+                           MF_BYCOMMAND);
+    }
+    if (m_toolbar) {
+        const auto press = [this](WORD id, bool on) {
+            SendMessageW(m_toolbar, TB_CHECKBUTTON, id, MAKELPARAM(on ? TRUE : FALSE, 0));
+        };
+        const PaneWindow::ZoomMode mode = FocusedPane()->GetZoomMode();
+        press(IDC_TOGGLE_SCROLL_SYNC, m_sync->ScrollSync());
+        press(IDC_TOGGLE_ZOOM_SYNC, m_sync->ZoomSync());
+        press(IDC_TOGGLE_OUTLINE, m_outlineVisible);
+        press(IDC_FIT_WIDTH, mode == PaneWindow::ZoomMode::FitWidth);
+        press(IDC_FIT_PAGE, mode == PaneWindow::ZoomMode::FitPage);
+    }
+}
+
+void MainWindow::UpdateStatusBar() {
+    if (!m_status || !m_sync)
+        return;
+    const auto pageText = [](PaneWindow& pane, StrId prefix, StrId noDoc) {
+        if (!pane.HasDocument())
+            return std::wstring(Str(noDoc));
+        const int count = pane.PageCount();
+        const int page = std::clamp(static_cast<int>(pane.SyncPosition()), 0, count - 1) + 1;
+        return Str(prefix) + std::to_wstring(page) + L" / " + std::to_wstring(count);
+    };
+    const auto zoomText = [](PaneWindow& pane) {
+        if (!pane.HasDocument())
+            return std::wstring();
+        return std::to_wstring(static_cast<int>(pane.Zoom() * 100.0f + 0.5f)) + L"%";
+    };
+    StrId sync = StrId::StatusSyncOff;
+    if (m_sync->ScrollSync() && m_sync->ZoomSync())
+        sync = StrId::StatusSyncBoth;
+    else if (m_sync->ScrollSync())
+        sync = StrId::StatusSyncScroll;
+    else if (m_sync->ZoomSync())
+        sync = StrId::StatusSyncZoom;
+
+    const std::wstring texts[5] = {
+        pageText(*m_left, StrId::StatusLeftPrefix, StrId::StatusLeftNoDoc),
+        zoomText(*m_left),
+        pageText(*m_right, StrId::StatusRightPrefix, StrId::StatusRightNoDoc),
+        zoomText(*m_right),
+        Str(sync),
+    };
+    for (int i = 0; i < 5; ++i) {
+        if (m_statusText[i] == texts[i])
+            continue; // SB_SETTEXT repaints the part even when nothing changed
+        m_statusText[i] = texts[i];
+        SendMessageW(m_status, SB_SETTEXTW, static_cast<WPARAM>(i),
+                     reinterpret_cast<LPARAM>(m_statusText[i].c_str()));
+    }
+}
+
+void MainWindow::ShowAboutBox() {
+    std::wstring text = L"PdfSideViewer " PSV_VERSION_WSTR L"\n\n";
+    text += Str(StrId::AboutBody);
+    MessageBoxW(m_hwnd, text.c_str(), Str(StrId::AboutTitle), MB_OK | MB_ICONINFORMATION);
+}
+
+void MainWindow::SwitchLanguage(Lang lang) {
+    if (lang == UiLanguage())
+        return;
+    SetUiLanguage(lang);
+    HMENU old = m_menu;
+    m_menu = BuildMenuBar();
+    if (!m_fullscreen) { // while full screen the new handle just stays parked
+        SetMenu(m_hwnd, m_menu);
+        DrawMenuBar(m_hwnd);
+    }
+    if (old)
+        DestroyMenu(old);
+    UpdateTitle();
+    m_left->SetPlaceholderHint(Str(StrId::PlaceholderLeft));
+    m_right->SetPlaceholderHint(Str(StrId::PlaceholderRight));
+    for (std::wstring& cached : m_statusText)
+        cached.assign(1, L'\xFFFF'); // impossible text: force every part to rewrite
+    UpdateStatusBar();
+    UpdateCommandUi();
+}
+
+void MainWindow::ToggleFullScreen() {
+    if (!m_fullscreen) {
+        m_fsRestorePlacement.length = sizeof(m_fsRestorePlacement);
+        if (!GetWindowPlacement(m_hwnd, &m_fsRestorePlacement))
+            return;
+        m_fsRestoreStyle = static_cast<LONG>(GetWindowLongW(m_hwnd, GWL_STYLE));
+        SetMenu(m_hwnd, nullptr); // the handle stays parked in m_menu
+        SetWindowLongW(m_hwnd, GWL_STYLE, m_fsRestoreStyle & ~WS_OVERLAPPEDWINDOW);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        GetMonitorInfoW(MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+        // Flag first: SetWindowPos delivers a synchronous WM_SIZE whose
+        // Layout must already hide the bars.
+        m_fullscreen = true;
+        SetWindowPos(m_hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
+                     mi.rcMonitor.right - mi.rcMonitor.left,
+                     mi.rcMonitor.bottom - mi.rcMonitor.top,
+                     SWP_FRAMECHANGED | SWP_NOOWNERZORDER);
+    } else {
+        m_fullscreen = false;
+        SetWindowLongW(m_hwnd, GWL_STYLE, m_fsRestoreStyle);
+        SetMenu(m_hwnd, m_menu);
+        SetWindowPlacement(m_hwnd, &m_fsRestorePlacement); // normal AND maximized state
+        SetWindowPos(m_hwnd, nullptr, 0, 0, 0, 0,
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
+                         SWP_FRAMECHANGED);
+    }
+    UpdateCommandUi();
+}
+
 void MainWindow::UpdateTitle() {
     std::wstring title = L"PdfSideViewer";
     if (m_sync->ScrollSync())
-        title += L"  [scroll sync]";
+        title += Str(StrId::TitleScrollSyncTag);
     if (m_sync->ZoomSync())
-        title += L"  [zoom sync]";
+        title += Str(StrId::TitleZoomSyncTag);
     SetWindowTextW(m_hwnd, title.c_str());
 }
 
@@ -241,16 +700,23 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE: {
         m_dpi = GetDpiForWindow(m_hwnd);
+        const HINSTANCE hinst =
+            reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(m_hwnd, GWLP_HINSTANCE));
         m_left->Create(m_hwnd, 100);
         m_right->Create(m_hwnd, 101);
+        CreateToolbar(hinst);
         CreateFindBar(); // after the panes: overlays must be above them
         m_outlineTree = CreateWindowExW(
             0, WC_TREEVIEWW, nullptr,
             WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | TVS_HASBUTTONS | TVS_HASLINES |
                 TVS_LINESATROOT | TVS_SHOWSELALWAYS,
-            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_OUTLINE_TREE),
-            reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(m_hwnd, GWLP_HINSTANCE)), nullptr);
-        UpdateUiFont(); // find bar + tree
+            0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_OUTLINE_TREE), hinst, nullptr);
+        m_status = CreateWindowExW(0, STATUSCLASSNAMEW, nullptr,
+                                   WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SBARS_SIZEGRIP, 0,
+                                   0, 0, 0, m_hwnd,
+                                   reinterpret_cast<HMENU>(static_cast<UINT_PTR>(103)), hinst,
+                                   nullptr);
+        UpdateUiFont(); // find bar + tree + status bar
         UpdateTheme();  // after the pane HWNDs exist
         Layout();
         return 0;
@@ -262,22 +728,34 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         return 0;
 
     case WM_GETMINMAXINFO: {
+        if (m_fullscreen)
+            break; // borderless monitor-sized window: no track clamps
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-        mmi->ptMinTrackSize = {MulDiv(480, m_dpi, 96), MulDiv(320, m_dpi, 96)};
+        // Two 120-DIP panes + splitter must stay usable under menu + toolbar
+        // + status bar.
+        mmi->ptMinTrackSize = {MulDiv(520, m_dpi, 96), MulDiv(380, m_dpi, 96)};
         return 0;
     }
 
     case WM_DPICHANGED: {
         m_dpi = HIWORD(wParam);
         UpdateUiFont();
+        RebuildToolbarIcons();
         // Panes must know the new DPI before SetWindowPos: its synchronous
         // WM_SIZE cascade rebuilds and presents their targets immediately.
         m_left->OnDpiChanged(m_dpi);
         m_right->OnDpiChanged(m_dpi);
-        const RECT* suggested = reinterpret_cast<const RECT*>(lParam);
-        SetWindowPos(m_hwnd, nullptr, suggested->left, suggested->top,
-                     suggested->right - suggested->left, suggested->bottom - suggested->top,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
+        RECT target = *reinterpret_cast<const RECT*>(lParam);
+        if (m_fullscreen) {
+            // The suggested rect is for the framed window; stay glued to the
+            // monitor instead.
+            MONITORINFO mi{};
+            mi.cbSize = sizeof(mi);
+            GetMonitorInfoW(MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST), &mi);
+            target = mi.rcMonitor;
+        }
+        SetWindowPos(m_hwnd, nullptr, target.left, target.top, target.right - target.left,
+                     target.bottom - target.top, SWP_NOZORDER | SWP_NOACTIVATE);
         Layout();
         return 0;
     }
@@ -359,6 +837,17 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             SetTimer(m_hwnd, kFindDebounceTimer, 350, nullptr); // debounce live search
             return 0;
         }
+        // MRU entries are ranges, not enum cases.
+        if (LOWORD(wParam) >= IDC_MRU_FILE_FIRST &&
+            LOWORD(wParam) < IDC_MRU_FILE_FIRST + kMruMaxEntries) {
+            OpenMruFile(LOWORD(wParam) - IDC_MRU_FILE_FIRST);
+            return 0;
+        }
+        if (LOWORD(wParam) >= IDC_MRU_PAIR_FIRST &&
+            LOWORD(wParam) < IDC_MRU_PAIR_FIRST + kMruMaxEntries) {
+            OpenMruPair(LOWORD(wParam) - IDC_MRU_PAIR_FIRST);
+            return 0;
+        }
         switch (LOWORD(wParam)) {
         case IDC_OPEN_LEFT:
             OpenDocumentDialog(false);
@@ -372,10 +861,14 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_TOGGLE_SCROLL_SYNC:
             m_sync->SetScrollSync(!m_sync->ScrollSync());
             UpdateTitle();
+            UpdateCommandUi();
+            UpdateStatusBar();
             return 0;
         case IDC_TOGGLE_ZOOM_SYNC:
             m_sync->SetZoomSync(!m_sync->ZoomSync());
             UpdateTitle();
+            UpdateCommandUi();
+            UpdateStatusBar();
             return 0;
         case IDC_FIND_SHOW:
             ShowFindBar();
@@ -394,17 +887,61 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_TOGGLE_OUTLINE: {
             m_outlineVisible = !m_outlineVisible;
             if (m_outlineVisible) {
-                PaneWindow* pane = GetFocus() == m_right->Hwnd() ? m_right.get()
-                                                                 : m_left.get();
-                UpdateOutlineSidebar(pane);
+                UpdateOutlineSidebar(FocusedPane());
             } else if (m_outlineTree && GetFocus() == m_outlineTree) {
                 // Hiding a focused window does not move keyboard focus: the
                 // invisible tree would keep eating arrow keys and navigating.
                 SetFocus((m_outlinePane ? m_outlinePane : m_left.get())->Hwnd());
             }
             Layout();
+            UpdateCommandUi();
             return 0;
         }
+        case IDC_TOGGLE_TOOLBAR:
+            m_toolbarVisible = !m_toolbarVisible;
+            Layout();
+            UpdateCommandUi();
+            return 0;
+        case IDC_TOGGLE_STATUSBAR:
+            m_statusVisible = !m_statusVisible;
+            Layout();
+            UpdateCommandUi();
+            return 0;
+        case IDC_ZOOM_IN:
+            FocusedPane()->ApplyZoomRatio(1.25f);
+            UpdateCommandUi();
+            return 0;
+        case IDC_ZOOM_OUT:
+            FocusedPane()->ApplyZoomRatio(1.0f / 1.25f);
+            UpdateCommandUi();
+            return 0;
+        case IDC_ZOOM_ACTUAL:
+            FocusedPane()->SetManualZoom(1.0f);
+            UpdateCommandUi();
+            return 0;
+        case IDC_FIT_WIDTH:
+            FocusedPane()->SetZoomMode(PaneWindow::ZoomMode::FitWidth);
+            UpdateCommandUi();
+            return 0;
+        case IDC_FIT_PAGE:
+            FocusedPane()->SetZoomMode(PaneWindow::ZoomMode::FitPage);
+            UpdateCommandUi();
+            return 0;
+        case IDC_FULLSCREEN:
+            ToggleFullScreen();
+            return 0;
+        case IDC_LANG_ENGLISH:
+            SwitchLanguage(Lang::English);
+            return 0;
+        case IDC_LANG_ITALIAN:
+            SwitchLanguage(Lang::Italian);
+            return 0;
+        case IDC_ABOUT:
+            ShowAboutBox();
+            return 0;
+        case IDC_EXIT:
+            PostMessageW(m_hwnd, WM_CLOSE, 0, 0);
+            return 0;
         default:
             break;
         }
@@ -417,6 +954,43 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             const NMTREEVIEWW* tv = reinterpret_cast<const NMTREEVIEWW*>(lParam);
             if (tv->itemNew.hItem)
                 m_outlinePane->GotoOutlineItem(static_cast<int>(tv->itemNew.lParam));
+            return 0;
+        }
+        if (hdr->code == TTN_GETDISPINFOW) { // toolbar tooltips; idFrom = command id
+            auto* info = reinterpret_cast<NMTTDISPINFOW*>(lParam);
+            StrId tip;
+            switch (hdr->idFrom) {
+            case IDC_OPEN_LEFT:
+                tip = StrId::TipOpenLeft;
+                break;
+            case IDC_OPEN_RIGHT:
+                tip = StrId::TipOpenRight;
+                break;
+            case IDC_TOGGLE_SCROLL_SYNC:
+                tip = StrId::TipScrollSync;
+                break;
+            case IDC_TOGGLE_ZOOM_SYNC:
+                tip = StrId::TipZoomSync;
+                break;
+            case IDC_FIT_WIDTH:
+                tip = StrId::TipFitWidth;
+                break;
+            case IDC_FIT_PAGE:
+                tip = StrId::TipFitPage;
+                break;
+            case IDC_FIND_SHOW:
+                tip = StrId::TipFind;
+                break;
+            case IDC_TOGGLE_OUTLINE:
+                tip = StrId::TipOutline;
+                break;
+            case IDC_FULLSCREEN:
+                tip = StrId::TipFullScreen;
+                break;
+            default:
+                return 0;
+            }
+            info->lpszText = const_cast<wchar_t*>(Str(tip));
             return 0;
         }
         break;
@@ -460,6 +1034,12 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DESTROY:
         m_destroying = true;
+        // While full screen the menu is detached: window destruction only
+        // frees an attached menu, so this one must be freed by hand.
+        if (m_menu && !GetMenu(m_hwnd)) {
+            DestroyMenu(m_menu);
+            m_menu = nullptr;
+        }
         PostQuitMessage(0);
         return 0;
 
@@ -472,7 +1052,45 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 void MainWindow::Layout() {
     RECT rc;
     GetClientRect(m_hwnd, &rc);
-    const int h = rc.bottom;
+
+    // Full screen hides the bars without touching the persisted visibility
+    // flags. The bars self-position (CCS_TOP / SBARS grip) and never resize
+    // the frame, so no WM_SIZE recursion: only the panes shrink, and their
+    // fit zoom is derived from their own window rect.
+    const bool toolbarOn = m_toolbar && m_toolbarVisible && !m_fullscreen;
+    const bool statusOn = m_status && m_statusVisible && !m_fullscreen;
+    if (m_toolbar)
+        ShowWindow(m_toolbar, toolbarOn ? SW_SHOW : SW_HIDE);
+    if (m_status)
+        ShowWindow(m_status, statusOn ? SW_SHOW : SW_HIDE);
+    int top = 0;
+    int bottom = rc.bottom;
+    if (toolbarOn) {
+        SendMessageW(m_toolbar, TB_AUTOSIZE, 0, 0);
+        RECT bar;
+        GetWindowRect(m_toolbar, &bar);
+        top = bar.bottom - bar.top;
+    }
+    if (statusOn) {
+        SendMessageW(m_status, WM_SIZE, 0, 0);
+        RECT bar;
+        GetWindowRect(m_status, &bar);
+        bottom -= bar.bottom - bar.top;
+        // Right edges of the five parts; the sync summary takes the rest.
+        constexpr int kPartDip[] = {130, 60, 130, 60};
+        int parts[5];
+        int edge = 0;
+        for (size_t i = 0; i < std::size(kPartDip); ++i) {
+            edge += MulDiv(kPartDip[i], m_dpi, 96);
+            parts[i] = edge;
+        }
+        parts[4] = -1;
+        SendMessageW(m_status, SB_SETPARTS, std::size(parts), reinterpret_cast<LPARAM>(parts));
+    }
+    m_contentTop = top;
+    m_contentBottom = bottom;
+
+    const int h = bottom - top;
     const int sidebarW = m_outlineVisible ? MulDiv(260, m_dpi, 96) : 0;
     const int x0 = sidebarW;
     const int w = rc.right - x0;
@@ -481,7 +1099,7 @@ void MainWindow::Layout() {
 
     if (m_outlineTree) {
         if (m_outlineVisible)
-            MoveWindow(m_outlineTree, 0, 0, sidebarW, h, TRUE);
+            MoveWindow(m_outlineTree, 0, top, sidebarW, h, TRUE);
         ShowWindow(m_outlineTree, m_outlineVisible ? SW_SHOW : SW_HIDE);
     }
 
@@ -495,12 +1113,13 @@ void MainWindow::Layout() {
     m_splitterX = x0 + leftW;
 
     HDWP dwp = BeginDeferWindowPos(2);
-    dwp = DeferWindowPos(dwp, m_left->Hwnd(), nullptr, x0, 0, leftW, h,
+    dwp = DeferWindowPos(dwp, m_left->Hwnd(), nullptr, x0, top, leftW, h,
                          SWP_NOZORDER | SWP_NOACTIVATE);
-    dwp = DeferWindowPos(dwp, m_right->Hwnd(), nullptr, x0 + leftW + splitterW, 0,
+    dwp = DeferWindowPos(dwp, m_right->Hwnd(), nullptr, x0 + leftW + splitterW, top,
                          w - leftW - splitterW, h, SWP_NOZORDER | SWP_NOACTIVATE);
     EndDeferWindowPos(dwp);
     LayoutFindBar();
+    UpdateStatusBar();
     InvalidateRect(m_hwnd, nullptr, TRUE); // repaint the splitter band
 }
 
@@ -540,8 +1159,8 @@ void MainWindow::UpdateUiFont() {
     HFONT font = CreateFontIndirectW(&ncm.lfMessageFont);
     if (!font)
         return;
-    for (HWND child :
-         {m_findEdit, m_findCount, m_findPrev, m_findNext, m_findClose, m_outlineTree}) {
+    for (HWND child : {m_findEdit, m_findCount, m_findPrev, m_findNext, m_findClose,
+                       m_outlineTree, m_status}) {
         if (child)
             SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     }
@@ -608,7 +1227,7 @@ void MainWindow::LayoutFindBar() {
     const int pad = MulDiv(6, m_dpi, 96);
     const int paneRight = m_findTarget == m_left.get() ? m_splitterX : rc.right;
     const int x = std::max(0, paneRight - barW - pad);
-    SetWindowPos(m_findBar, HWND_TOP, x, pad, barW, barH, SWP_NOACTIVATE);
+    SetWindowPos(m_findBar, HWND_TOP, x, m_contentTop + pad, barW, barH, SWP_NOACTIVATE);
 
     const int gap = MulDiv(4, m_dpi, 96);
     const int btn = MulDiv(26, m_dpi, 96);
@@ -664,10 +1283,8 @@ void MainWindow::CloseFindBar() {
 }
 
 RECT MainWindow::SplitterRect() const {
-    RECT rc;
-    GetClientRect(m_hwnd, &rc);
     const int splitterW = MulDiv(kSplitterDip, m_dpi, 96);
-    return {m_splitterX, 0, m_splitterX + splitterW, rc.bottom};
+    return {m_splitterX, m_contentTop, m_splitterX + splitterW, m_contentBottom};
 }
 
 void MainWindow::SetSplitRatioFromX(int x) {
@@ -688,10 +1305,10 @@ void MainWindow::OpenDocumentDialog(bool rightPane) {
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = m_hwnd;
-    ofn.lpstrFilter = L"PDF documents (*.pdf)\0*.pdf\0All files (*.*)\0*.*\0";
+    ofn.lpstrFilter = Str(StrId::OpenDlgFilter);
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrTitle = rightPane ? L"Open document in right pane" : L"Open document in left pane";
+    ofn.lpstrTitle = Str(rightPane ? StrId::OpenDlgTitleRight : StrId::OpenDlgTitleLeft);
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
     if (GetOpenFileNameW(&ofn))
         (rightPane ? m_right : m_left)->OpenDocument(buffer);

@@ -6,7 +6,7 @@
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int nCmdShow) {
     try {
-        INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_TREEVIEW_CLASSES};
+        INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES};
         InitCommonControlsEx(&icc);
         MainWindow::RegisterWindowClass(hInstance);
         PaneWindow::RegisterWindowClass(hInstance);
@@ -36,12 +36,22 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             {FVIRTKEY, VK_F3, IDC_FIND_NEXT},
             {FSHIFT | FVIRTKEY, VK_F3, IDC_FIND_PREV},
             {FVIRTKEY, VK_F9, IDC_TOGGLE_OUTLINE},
+            {FVIRTKEY, VK_F11, IDC_FULLSCREEN},
+            {FALT | FVIRTKEY, VK_RETURN, IDC_FULLSCREEN},
         };
         HACCEL haccel =
             CreateAcceleratorTableW(const_cast<ACCEL*>(accels), ARRAYSIZE(accels));
 
         MSG msg{};
         while (GetMessageW(&msg, nullptr, 0, 0)) {
+            // Esc leaves full screen, but the find bar keeps its Esc (its
+            // subclass closes the bar). No VK_ESCAPE accelerator: it would
+            // also steal the pane-local Esc that clears text selections.
+            if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE &&
+                window.IsFullScreen() && !window.FindBarHasFocus()) {
+                PostMessageW(window.Hwnd(), WM_COMMAND, IDC_FULLSCREEN, 0);
+                continue;
+            }
             // Tab inside the find bar cycles its WS_TABSTOP controls instead
             // of firing IDC_FOCUS_NEXT_PANE. VK_TAB only: a blanket
             // IsDialogMessage would eat the Enter/Esc the find box handles.

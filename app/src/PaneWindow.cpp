@@ -1,5 +1,7 @@
 #include "PaneWindow.h"
 
+#include "util/Strings.h"
+
 #include <shellapi.h> // drag & drop
 
 namespace {
@@ -66,7 +68,7 @@ void PaneWindow::OpenDocument(std::wstring path) {
     m_previews.clear();
     m_tiles.clear();
     m_outline.clear();
-    m_zoomMode = ZoomMode::FitWidth; // friendly default for a fresh document
+    m_zoomMode = ZoomMode::FitPage; // friendly default for a fresh document
     m_textPages.clear();
     m_textPending.clear();
     m_links.clear();
@@ -582,8 +584,7 @@ void PaneWindow::ScheduleRecovery() {
         // Persistent failure: back off instead of spinning WM_PAINT at 100% CPU.
         SetTimer(m_hwnd, kRecoveryTimer, 250u * m_recoveryAttempts, nullptr);
     } else {
-        MessageBoxW(m_hwnd, L"The graphics device could not be restored.", L"PdfSideViewer",
-                    MB_ICONERROR);
+        MessageBoxW(m_hwnd, Str(StrId::DeviceLostError), L"PdfSideViewer", MB_ICONERROR);
         PostQuitMessage(1);
     }
 }
@@ -692,13 +693,14 @@ void PaneWindow::DrawPlaceholder(ID2D1SolidColorBrush* brush) {
         text = m_hint;
         break;
     case State::Opening:
-        text = L"Opening\n" + FileNameOf(m_docPath) + L"…";
+        text = std::wstring(Str(StrId::PaneOpening)) + L"\n" + FileNameOf(m_docPath) + L"…";
         break;
     case State::Error:
-        text = L"Could not open\n" + FileNameOf(m_docPath) + L"\n\n" + m_errorText;
+        text = std::wstring(Str(StrId::PaneOpenFailed)) + L"\n" + FileNameOf(m_docPath) +
+               L"\n\n" + m_errorText;
         break;
     case State::Open:
-        text = L"(empty document)";
+        text = Str(StrId::PaneEmptyDoc);
         break;
     }
     brush->SetColor(m_dark ? D2D1::ColorF(0x9D9D9D) : D2D1::ColorF(0x605E5C));
@@ -1136,6 +1138,16 @@ void PaneWindow::ApplyZoomRatio(float ratio) {
     ZoomAt({vp.cx / 2, vp.cy / 2}, m_zoom * ratio);
 }
 
+void PaneWindow::SetManualZoom(float zoom) {
+    if (!HasDocument())
+        return;
+    // Pin Manual even when the fit zoom already sits at the target: ZoomAt's
+    // epsilon guard would otherwise skip the mode change.
+    m_zoomMode = ZoomMode::Manual;
+    const SIZE vp = ViewportPx();
+    ZoomAt({vp.cx / 2, vp.cy / 2}, zoom);
+}
+
 void PaneWindow::UpdateScrollBars() {
     if (!m_hwnd)
         return;
@@ -1306,10 +1318,7 @@ bool PaneWindow::OnKeyDown(WPARAM key) {
     case '1':
     case VK_NUMPAD1:
         if (ctrl) {
-            // Pin Manual even when the fit zoom already sits at ~100%:
-            // ZoomAt's epsilon guard would otherwise skip the mode change.
-            m_zoomMode = ZoomMode::Manual;
-            ZoomAt(center, 1.0f);
+            SetManualZoom(1.0f);
             return true;
         }
         break;

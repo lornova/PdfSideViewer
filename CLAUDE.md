@@ -30,6 +30,9 @@ MSBuild lives at `C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuil
 (not on PATH). Output: `build\<platform>\<config>\PdfSideViewer.exe` (single static exe).
 `scripts\make-release.ps1 -Platform x64` zips a portable release.
 `scripts\make-test-pdfs.ps1` regenerates `testdata\*.pdf` (hand-built PDFs with links/outline).
+`scripts\make-icon.ps1` regenerates `app\res\app.ico` (deterministic System.Drawing artwork);
+the icon and VERSIONINFO live in `app\res\PdfSideViewer.rc` (never add an RT_MANIFEST there:
+the manifest is embedded via the vcxproj `<Manifest>` item and a second copy fails the link).
 
 MuPDF link facts: only `libmupdf.lib + libthirdparty.lib + libresources.lib` (the other libs the
 mupdf solution produces are unreferenced); `libresources` exists only in Release and is shared by
@@ -44,8 +47,11 @@ IDC_* ids, WM_VSCROLL, TVM_* to the outline tree), then assert via GetScrollInfo
 counter text, clipboard, and PrintWindow captures. Test scripts MUST call
 `SetThreadDpiAwarenessContext(-4)` first: this dev machine's monitor is 175% (168 DPI) and
 PowerShell is DPI-unaware, so un-aware coordinates/captures are virtualized at 96 DPI (a past
-source of phantom "bugs"). Run one instance at a time; the exe must always exit with code 0 after
-CloseMainWindow. Restore the user's clipboard if a test touches it.
+source of phantom "bugs"). Run one instance at a time — and CHECK first: a foreign (user)
+instance both receives FindWindow-posted commands and rewrites settings.ini at close, which has
+already produced phantom failures; abort the test run if `Get-Process PdfSideViewer` is non-empty
+and verify that a settings.ini deletion actually happened. The exe must always exit with code 0
+after CloseMainWindow. Restore the user's clipboard if a test touches it.
 
 ## Architecture
 
@@ -71,9 +77,15 @@ viewport center), never pixels; the pairing is a delta anchor captured at lock t
 product's reason to exist (PDF Architect fails exactly here): never degrade sync to pixel
 offsets, and test sync changes with different page formats and different zoom levels per pane.
 
-MainWindow owns the frame, splitter, find bar, outline sidebar, session persistence
-(`%APPDATA%\PdfSideViewer\settings.ini`, INI over WritePrivateProfile\* with a UTF-16 BOM and a
-named mutex) and routes pane `ViewEvent`s to SyncController and the outline.
+MainWindow owns the frame, menu bar (incl. MRU submenus: recent files + recent left/right
+pairs, recorded centrally on DocumentOpened, persisted in [mru-files]/[mru-pairs]), toolbar
+(Segoe MDL2 glyph imagelist, util/GlyphIcons.\*),
+status bar (page/zoom per pane + sync state), splitter, find bar, outline sidebar, fullscreen
+(F11/Alt+Enter; hides the chrome without touching the persisted flags; SaveSession must use the
+pre-fullscreen placement), session persistence (`%APPDATA%\PdfSideViewer\settings.ini`, INI over
+WritePrivateProfile\* with a UTF-16 BOM and a named mutex) and routes pane `ViewEvent`s to
+SyncController, the outline, the status bar and the menu/toolbar checked state
+(`UpdateCommandUi`).
 
 ## Invariants that came from real bugs (see also docs/DESIGN.md)
 
@@ -89,10 +101,18 @@ named mutex) and routes pane `ViewEvent`s to SyncController and the outline.
   the sibling just rebuilt; recovery retries are backoff-limited.
 - fz_try is setjmp-based: `fz_var` every local mutated inside and read after; keep destructible
   C++ objects out of fz frames; drop fz objects in `fz_always`.
+- No `TBSTYLE_FLAT` on the toolbar: flat = transparent background delegated to a parent that
+  paints nothing under children, i.e. a black band. The v6 theme already looks modern.
 
 ## Conventions
 
 - clang-format-ish 100 columns, 4 spaces; comments explain constraints, not what the next line
-  does. UI strings are English; the maintainer communicates in Italian.
-- `enum CommandId` in MainWindow.h is the single registry of WM_COMMAND/accelerator ids.
+  does. The maintainer communicates in Italian.
+- Every user-visible string goes through `util/Strings.h` (X-list with English and Italian
+  tables; English is the default and what E2E tests assert against). Engine-level error strings
+  (engine/Document.cpp) stay English: workers cache them in result structs.
+- `enum CommandId` in MainWindow.h is the single registry of WM_COMMAND/accelerator ids
+  (menu, toolbar and accelerators all reuse the same ids; 1017..1019 and 1023..1024 must stay
+  contiguous for CheckMenuRadioItem; 1030+/1040+ are the MRU ranges, kMruMaxEntries slots each,
+  dispatched as ranges in WM_COMMAND).
 - Session settings are versionless: add keys with safe defaults, never repurpose existing ones.

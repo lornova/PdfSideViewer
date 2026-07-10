@@ -4,6 +4,8 @@ namespace {
 
 constexpr PCWSTR kWindowSection = L"window";
 constexpr PCWSTR kSyncSection = L"sync";
+constexpr PCWSTR kMruFilesSection = L"mru-files";
+constexpr PCWSTR kMruPairsSection = L"mru-pairs";
 
 // The multi-key INI write is not atomic as a group; two instances closing
 // together would interleave into a hybrid session. Serialize per user.
@@ -92,7 +94,7 @@ PaneSettings LoadPane(const std::wstring& file, PCWSTR section) {
     pane.zoom = ReadFloat(file, section, L"zoom", 1.0f);
     pane.scrollX = ReadFloat(file, section, L"scrollX", 0);
     pane.scrollY = ReadFloat(file, section, L"scrollY", 0);
-    pane.zoomMode = std::clamp(ReadInt(file, section, L"zoomMode", 1), 0, 2);
+    pane.zoomMode = std::clamp(ReadInt(file, section, L"zoomMode", 2), 0, 2);
     return pane;
 }
 
@@ -121,8 +123,30 @@ AppSettings AppSettings::Load() {
     s.maximized = ReadInt(file, kWindowSection, L"maximized", 0) != 0;
     s.splitRatio = std::clamp(ReadFloat(file, kWindowSection, L"splitRatio", 0.5f), 0.1f, 0.9f);
     s.dpi = static_cast<UINT>(std::max(1, ReadInt(file, kWindowSection, L"dpi", 96)));
-    s.scrollSync = ReadInt(file, kSyncSection, L"scroll", 0) != 0;
-    s.zoomSync = ReadInt(file, kSyncSection, L"zoom", 0) != 0;
+    s.toolbar = ReadInt(file, kWindowSection, L"toolbar", 1) != 0;
+    s.statusbar = ReadInt(file, kWindowSection, L"statusbar", 1) != 0;
+    s.outline = ReadInt(file, kWindowSection, L"outline", 0) != 0;
+    s.language = ReadString(file, kWindowSection, L"language");
+    if (s.language.empty())
+        s.language = L"en";
+    s.scrollSync = ReadInt(file, kSyncSection, L"scroll", 1) != 0;
+    s.zoomSync = ReadInt(file, kSyncSection, L"zoom", 1) != 0;
+    for (size_t i = 0; i < kMruMaxEntries; ++i) {
+        std::wstring f =
+            ReadString(file, kMruFilesSection, (L"file" + std::to_wstring(i)).c_str());
+        if (f.empty())
+            break;
+        s.mruFiles.push_back(std::move(f));
+    }
+    for (size_t i = 0; i < kMruMaxEntries; ++i) {
+        std::wstring l =
+            ReadString(file, kMruPairsSection, (L"left" + std::to_wstring(i)).c_str());
+        std::wstring r =
+            ReadString(file, kMruPairsSection, (L"right" + std::to_wstring(i)).c_str());
+        if (l.empty() || r.empty())
+            break;
+        s.mruPairs.push_back({std::move(l), std::move(r)});
+    }
     s.left = LoadPane(file, L"left");
     s.right = LoadPane(file, L"right");
     return s;
@@ -143,8 +167,33 @@ void AppSettings::Save() const {
     WriteInt(file, kWindowSection, L"maximized", maximized ? 1 : 0);
     WriteFloat(file, kWindowSection, L"splitRatio", splitRatio);
     WriteInt(file, kWindowSection, L"dpi", static_cast<int>(dpi));
+    WriteInt(file, kWindowSection, L"toolbar", toolbar ? 1 : 0);
+    WriteInt(file, kWindowSection, L"statusbar", statusbar ? 1 : 0);
+    WriteInt(file, kWindowSection, L"outline", outline ? 1 : 0);
+    WriteString(file, kWindowSection, L"language", language);
     WriteInt(file, kSyncSection, L"scroll", scrollSync ? 1 : 0);
     WriteInt(file, kSyncSection, L"zoom", zoomSync ? 1 : 0);
+    // Slots past the current size are deleted (nullptr value removes the key)
+    // so a shrunken list leaves no stale tail behind.
+    for (size_t i = 0; i < kMruMaxEntries; ++i) {
+        const std::wstring key = L"file" + std::to_wstring(i);
+        if (i < mruFiles.size())
+            WriteString(file, kMruFilesSection, key.c_str(), mruFiles[i]);
+        else
+            WritePrivateProfileStringW(kMruFilesSection, key.c_str(), nullptr, file.c_str());
+    }
+    for (size_t i = 0; i < kMruMaxEntries; ++i) {
+        const std::wstring leftKey = L"left" + std::to_wstring(i);
+        const std::wstring rightKey = L"right" + std::to_wstring(i);
+        if (i < mruPairs.size()) {
+            WriteString(file, kMruPairsSection, leftKey.c_str(), mruPairs[i].left);
+            WriteString(file, kMruPairsSection, rightKey.c_str(), mruPairs[i].right);
+        } else {
+            WritePrivateProfileStringW(kMruPairsSection, leftKey.c_str(), nullptr, file.c_str());
+            WritePrivateProfileStringW(kMruPairsSection, rightKey.c_str(), nullptr,
+                                       file.c_str());
+        }
+    }
     SavePane(file, L"left", left);
     SavePane(file, L"right", right);
 }

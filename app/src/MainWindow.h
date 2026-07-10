@@ -4,7 +4,10 @@
 #include "PaneWindow.h"
 #include "framework.h"
 #include "util/Settings.h"
+#include "util/Strings.h"
 #include "view/SyncController.h"
+
+#include <commctrl.h> // HIMAGELIST
 
 // Command IDs shared between the accelerator table and WM_COMMAND dispatch.
 enum CommandId : WORD {
@@ -20,6 +23,24 @@ enum CommandId : WORD {
     IDC_FIND_EDIT = 1010,
     IDC_TOGGLE_OUTLINE = 1011,     // F9
     IDC_OUTLINE_TREE = 1012,
+    IDC_TOGGLE_TOOLBAR = 1013,
+    IDC_TOGGLE_STATUSBAR = 1014,
+    IDC_ZOOM_IN = 1015,
+    IDC_ZOOM_OUT = 1016,
+    // Contiguous: CheckMenuRadioItem spans IDC_ZOOM_ACTUAL..IDC_FIT_PAGE.
+    IDC_ZOOM_ACTUAL = 1017, // Ctrl+0
+    IDC_FIT_WIDTH = 1018,   // Ctrl+2
+    IDC_FIT_PAGE = 1019,    // Ctrl+3
+    IDC_FULLSCREEN = 1020,  // F11 / Alt+Enter
+    IDC_ABOUT = 1021,
+    IDC_EXIT = 1022,
+    // Contiguous: CheckMenuRadioItem spans the language radio group.
+    IDC_LANG_ENGLISH = 1023,
+    IDC_LANG_ITALIAN = 1024,
+    // MRU ranges: kMruMaxEntries slots each, dispatched as ranges (not single
+    // cases) in the WM_COMMAND handler.
+    IDC_MRU_FILE_FIRST = 1030,
+    IDC_MRU_PAIR_FIRST = 1040,
 };
 
 // Top-level frame: two PaneWindows separated by a draggable splitter.
@@ -39,6 +60,8 @@ public:
     bool FindBarHasFocus() const {
         return m_findBar && IsWindowVisible(m_findBar) && IsChild(m_findBar, GetFocus());
     }
+    // For the message loop: Esc exits full screen (unless the find bar owns it).
+    bool IsFullScreen() const { return m_fullscreen; }
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -50,6 +73,20 @@ private:
     void OpenDocumentDialog(bool rightPane);
     void UpdateTheme();
     void UpdateTitle();
+    PaneWindow* FocusedPane() const;
+    HMENU BuildMenuBar();
+    void RebuildMruMenus();
+    void RecordMruFile(const std::wstring& path);
+    void RecordMruPair(const std::wstring& left, const std::wstring& right);
+    void OpenMruFile(size_t index);
+    void OpenMruPair(size_t index);
+    void CreateToolbar(HINSTANCE hinst);
+    void RebuildToolbarIcons();
+    void UpdateCommandUi();
+    void UpdateStatusBar();
+    void ShowAboutBox();
+    void ToggleFullScreen();
+    void SwitchLanguage(Lang lang);
     void ApplySession(const AppSettings& session);
     void SaveSession() const;
     void CreateFindBar();
@@ -66,8 +103,29 @@ private:
     std::unique_ptr<SyncController> m_sync;
     HWND m_hwnd = nullptr;
     HWND m_lastPaneFocus = nullptr; // pane holding focus when the frame deactivates
+    HMENU m_menu = nullptr;
+    // Submenus of the File popup, repopulated in place by RebuildMruMenus;
+    // owned (and destroyed) by the menu bar they hang under.
+    HMENU m_mruFilesMenu = nullptr;
+    HMENU m_mruPairsMenu = nullptr;
+    std::vector<std::wstring> m_mruFiles; // most recent first
+    std::vector<MruPair> m_mruPairs;      // most recent first
+    HWND m_toolbar = nullptr;
+    HIMAGELIST m_toolbarIcons = nullptr;
+    HWND m_status = nullptr;
     HBRUSH m_bgBrush = nullptr;
     UINT m_dpi = 96;
+    bool m_toolbarVisible = true;
+    bool m_statusVisible = true;
+    bool m_fullscreen = false;
+    // Window state captured when entering full screen; also what SaveSession
+    // persists while full screen (the live placement is the monitor rect).
+    WINDOWPLACEMENT m_fsRestorePlacement{};
+    LONG m_fsRestoreStyle = 0;
+    // Vertical band left for the panes between the toolbar and the status bar.
+    int m_contentTop = 0;
+    int m_contentBottom = 0;
+    std::wstring m_statusText[5]; // last SB_SETTEXT per part: skip no-op repaints
     float m_splitRatio = 0.5f;
     int m_splitterX = 0; // left edge of the splitter band, client px
     bool m_draggingSplitter = false;
