@@ -18,6 +18,13 @@ cross-platform toolkit: a single small executable that starts instantly.
 - Full-document **text search** (Ctrl+F) with live highlighting and F3 navigation.
 - **Text selection** with the mouse (double-click = word), Ctrl+C copies Unicode text.
 - Clickable **links** (internal destinations and web URLs) and an **outline sidebar** (F9).
+- **Auto-reload**: documents rewritten on disk (e.g. by a LaTeX build) reload in place,
+  keeping position, zoom and sync.
+- **SyncTeX** two-way sync with your TeX editor: Ctrl+click a spot in the PDF to jump to the
+  source line (inverse search), and `-forward-search` jumps the viewer to a source line
+  (see below).
+- Menu bar, toolbar and status bar (page / zoom per pane, sync state), full screen
+  (F11 / Alt+Enter), recent files and recent left+right pairs, English/Italian UI.
 - Drag & drop (drop two files to fill both panes), command line
   (`PdfSideViewer.exe left.pdf right.pdf`), session restore (documents, positions, window).
 
@@ -35,7 +42,40 @@ cross-platform toolkit: a single small executable that starts instantly.
 | Ctrl+wheel, Ctrl +/− | Zoom (anchored at the cursor) |
 | Ctrl+0 / Ctrl+1 | 100% zoom |
 | Ctrl+2 / Ctrl+3 | Fit width / fit page |
+| F11 / Alt+Enter | Full screen (Esc exits) |
+| Ctrl+click | SyncTeX inverse search (open the .tex source at that spot) |
 | Space, Shift+Space, PgUp/PgDn, Home/End, arrows | Navigate |
+
+## SyncTeX (VS Code + LaTeX Workshop)
+
+Compile with SyncTeX enabled (`pdflatex -synctex=1`, the LaTeX Workshop default). The viewer
+reads the `.synctex(.gz)` next to each PDF.
+
+**Inverse search** (PDF → editor): Ctrl+click a position in either pane. By default the viewer
+opens VS Code at that line through the `vscode://file/...` protocol. The launch template lives
+in `settings.ini` under `[synctex] inverse` (`%f` = file, `%l` = line; a value containing
+`://` is treated as a URL, anything else as a command line), e.g. for another editor:
+`inverse=texstudio --line %l "%f"`.
+
+**Forward search** (editor → PDF): configure LaTeX Workshop to use PdfSideViewer as the
+external viewer in VS Code's `settings.json`:
+
+```jsonc
+"latex-workshop.view.pdf.viewer": "external",
+"latex-workshop.view.pdf.external.viewer.command":
+    "C:\\path\\to\\PdfSideViewer.exe",
+"latex-workshop.view.pdf.external.viewer.args": ["%PDF%"],
+"latex-workshop.view.pdf.external.synctex.command":
+    "C:\\path\\to\\PdfSideViewer.exe",
+"latex-workshop.view.pdf.external.synctex.args":
+    ["-forward-search", "%TEX%", "%LINE%", "%PDF%"]
+```
+
+`PdfSideViewer.exe -forward-search file.tex 123 file.pdf` hands the request to the running
+instance (the pane holding that PDF scrolls there and flashes the target green; the PDF is
+opened if needed) or starts the viewer if none is running. With two panes this works per
+document: each pane queries its own `.synctex.gz`, so a bilingual it/en pair gets independent
+forward and inverse search.
 
 ## Building
 

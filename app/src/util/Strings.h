@@ -48,6 +48,15 @@
     X(TipFind, L"Find (Ctrl+F)", L"Trova (Ctrl+F)")                                                \
     X(TipOutline, L"Outline (F9)", L"Segnalibri (F9)")                                             \
     X(TipFullScreen, L"Full screen (F11)", L"Schermo intero (F11)")                                \
+    /* synctex feedback (status bar, never popups) */                                              \
+    X(SyncTexNoData, L"SyncTeX: no .synctex file for this document",                               \
+      L"SyncTeX: nessun file .synctex per questo documento")                                       \
+    X(SyncTexNoMatch, L"SyncTeX: nothing found at this position",                                  \
+      L"SyncTeX: nessun risultato in questa posizione")                                            \
+    X(SyncTexForwardMiss, L"SyncTeX: source line not found in this document",                      \
+      L"SyncTeX: riga sorgente non trovata in questo documento")                                   \
+    X(SyncTexEditorError, L"SyncTeX: could not launch the editor",                                 \
+      L"SyncTeX: impossibile avviare l'editor")                                                    \
     /* status bar ("Left: " + "3 / 42" is composed in code) */                                     \
     X(StatusLeftPrefix, L"Left: ", L"Sinistra: ")                                                  \
     X(StatusRightPrefix, L"Right: ", L"Destra: ")                                                  \

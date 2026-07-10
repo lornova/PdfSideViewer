@@ -2,12 +2,20 @@
 
 #include "DxResources.h"
 #include "engine/Document.h"
+#include "engine/SyncTex.h"
 #include "framework.h"
+#include "util/FileWatcher.h"
 #include "view/PageLayout.h"
 
 #include <map>
+#include <optional>
 #include <set>
 #include <tuple>
+
+// Posted by the pane's FileWatcher when the open document changed on disk.
+// Deliberately OUTSIDE the WM_PSV_FIRST..WM_PSV_LAST drain range: it carries
+// no heap payload and must not be treated as a worker result.
+constexpr UINT WM_PSV_FILE_CHANGED = WM_APP + 10;
 
 // One side of the split view: a full single-document viewer presenting through
 // its own DXGI flip-model swapchain via Direct2D. Owns the Document (worker
@@ -99,6 +107,19 @@ public:
     // Document outline (flattened tree; empty when the document has none).
     const std::vector<Document::OutlineItem>& Outline() const { return m_outline; }
     void GotoOutlineItem(int index);
+
+    // ---------------------------------------------------------------- synctex --
+    // Inverse search resolved: the frame owns launching the editor. A null
+    // hit reports failure; hadData tells "nothing at that position" apart
+    // from "no .synctex file at all".
+    using InverseSearchHandler =
+        std::function<void(PaneWindow&, const SyncTexIndex::InverseHit* hit, bool hadData)>;
+    void SetInverseSearchHandler(InverseSearchHandler handler) {
+        m_onInverseSearch = std::move(handler);
+    }
+    // Forward search: scroll to the boxes for texPath:line and flash them.
+    // False = no synctex data or the line resolves nowhere in this document.
+    bool ForwardSearchTo(const std::wstring& texPath, int line);
 
 private:
     enum class State { Empty, Opening, Open, Error };
@@ -195,8 +216,21 @@ private:
                          bool urgent);
     void EvictStale(int firstKeep, int lastKeep);
 
+    void TryReloadDocument();
+    void InverseSearchAt(POINT client);
+    void FlashSyncTarget(int pageIndex, std::vector<Document::RectPt> rects);
+
     static constexpr UINT_PTR kRecoveryTimer = 1;
     static constexpr UINT kMaxRecoveryAttempts = 5;
+    // Auto-reload: fire this long after the LAST change notification (LaTeX
+    // writes the PDF in bursts), then retry on the same cadence while the
+    // producer still holds the file.
+    static constexpr UINT_PTR kReloadTimer = 2;
+    static constexpr UINT kReloadDebounceMs = 500;
+    static constexpr UINT kMaxReloadRetries = 20;
+    // SyncTeX forward-search flash: transient highlight, one-shot timer.
+    static constexpr UINT_PTR kSyncFlashTimer = 3;
+    static constexpr UINT kSyncFlashMs = 1500;
     static constexpr float kMinZoom = 0.125f;
     static constexpr float kMaxZoom = 8.0f;
     // Pages whose pixel size exceeds ~1.5x this (geometric mean) are split
@@ -222,6 +256,14 @@ private:
 
     State m_state = State::Empty;
     Document m_doc;
+    FileWatcher m_watcher; // auto-reload: watches m_docPath while a document is open
+    UINT m_reloadRetries = 0;
+    SyncTexIndex m_synctex; // lazy; reset with the document (auto-reload included)
+    struct SyncMark {
+        int pageIndex = -1; // -1 = no active flash
+        std::vector<Document::RectPt> rects;
+    } m_syncMark;
+    InverseSearchHandler m_onInverseSearch;
     PageLayout m_layout;
     std::vector<Document::OutlineItem> m_outline;
     ZoomMode m_zoomMode = ZoomMode::FitPage;

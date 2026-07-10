@@ -177,6 +177,37 @@ command line, session restore) feeds the lists; paths are absolutized at record 
 an open completes while the sibling pane also holds a document. Clicking an entry whose file no
 longer exists removes it and reports the missing path.
 
+**SyncTeX**: `engine/SyncTex.*` wraps the reference parser vendored under `thirdparty/synctex`
+(TRACKED in git, unlike `vendor/`; MIT-style license, see its README for the pinned tag). The
+wrapper is plain C file parsing — no `fz_context`, no Direct2D — so it is deliberately
+UI-thread-callable; queries are gesture-rare and the scanner is loaded lazily on the first
+query, cached, and reset in `OpenDocument`'s clear list (which auto-reload funnels through, so
+a rebuilt `.synctex.gz` re-parses on the next query). Every coordinate at the boundary is PDF
+points, top-left origin — SyncTeX's own convention, so boxes drop into `Document::RectPt`
+directly (`visible_v` is the BASELINE: top = v−height, bottom = v+depth). Inverse search is
+Ctrl+click (`WM_LBUTTONUP` click branch, before link logic) → `PagePointAt` →
+`synctex_edit_query` → a configurable launch template (`[synctex] inverse`, default the
+`vscode://file/%f:%l` URI). Forward search arrives as `-forward-search TEX LINE PDF`: a second
+short-lived instance finds the running window and hands the request over via `WM_COPYDATA`
+(op 'PSVF', strictly validated: exact size, length caps, copy-before-use), which MainWindow
+routes to the pane holding that PDF (focused pane wins a tie; the PDF is opened on demand) and
+the pane centers and flashes the target boxes green for 1.5 s (`kSyncFlashTimer`). Requests for
+documents still opening park in `m_parkedForward` and replay on `DocumentOpened`.
+
+**Auto-reload**: each pane owns a `util/FileWatcher.*` — a thread that watches the open
+document's PARENT DIRECTORY (`ReadDirectoryChangesW`; a handle to the file itself would go stale
+across the delete/recreate/rename cycles LaTeX toolchains perform) and posts
+`WM_PSV_FILE_CHANGED` (outside the `WM_PSV_FIRST..LAST` drain range: no payload) when the
+watched name is touched. The pane debounces (500 ms after the last notification of a write
+burst), then probes stability with a deny-write `CreateFileW`: while the producer still holds
+the file (or a clean+rebuild window leaves no file at all) it retries on the same cadence
+instead of flashing an error state. The reload itself goes through the session-restore path
+(`OpenDocumentWithView`), so position, zoom and fit mode survive and sync re-anchors on
+`DocumentOpened`. The watch is armed from `OpenDocument` (Opening state), not from success: a
+failed open self-heals when the next build produces a valid file, and a watch never outlives a
+path switch. The watcher thread touches only Win32 file APIs and `PostMessage` — never MuPDF,
+never Direct2D.
+
 **PageLayout** (continuous vertical mode): virtual canvas where page *i* sits at
 `y = Σ (pageHeight[j]·zoom) + gaps`, width = max page width·zoom + padding. A prefix-sum array of
 page bottoms lets a binary search find the first visible page in O(log n); hit testing subtracts

@@ -36,6 +36,10 @@ struct AppSettings {
     bool statusbar = true;
     bool outline = false;
     std::wstring language = L"en"; // "en" / "it"; anything else falls back to en
+    // SyncTeX inverse-search launch template: %f = absolute .tex path,
+    // %l = 1-based line. A "://" marks a URI (ShellExecute), anything else is
+    // a command line. Default targets VS Code's protocol handler.
+    std::wstring synctexInverse = L"vscode://file/%f:%l";
     std::vector<std::wstring> mruFiles; // most recent first
     std::vector<MruPair> mruPairs;      // most recent first
     PaneSettings left;

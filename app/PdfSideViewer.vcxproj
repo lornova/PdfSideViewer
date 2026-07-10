@@ -51,7 +51,7 @@
       <LanguageStandard>stdcpp20</LanguageStandard>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
       <PreprocessorDefinitions>UNICODE;_UNICODE;%(PreprocessorDefinitions)</PreprocessorDefinitions>
-      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)res;$(SolutionDir)vendor\mupdf\include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)res;$(SolutionDir)vendor\mupdf\include;$(SolutionDir)thirdparty\synctex;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
     <Link>
@@ -87,6 +87,8 @@
     <ClCompile Include="src\PaneWindow.cpp" />
     <ClCompile Include="src\engine\Document.cpp" />
     <ClCompile Include="src\engine\MupdfLib.cpp" />
+    <ClCompile Include="src\engine\SyncTex.cpp" />
+    <ClCompile Include="src\util\FileWatcher.cpp" />
     <ClCompile Include="src\util\GlyphIcons.cpp" />
     <ClCompile Include="src\util\Settings.cpp" />
     <ClCompile Include="src\util\Strings.cpp" />
@@ -101,12 +103,60 @@
     <ClInclude Include="src\engine\Document.h" />
     <ClInclude Include="src\engine\Mupdf.h" />
     <ClInclude Include="src\engine\MupdfLib.h" />
+    <ClInclude Include="src\engine\SyncTex.h" />
+    <ClInclude Include="src\util\FileWatcher.h" />
     <ClInclude Include="src\util\GlyphIcons.h" />
     <ClInclude Include="src\util\Settings.h" />
     <ClInclude Include="src\util\Strings.h" />
     <ClInclude Include="src\view\PageLayout.h" />
     <ClInclude Include="src\view\SyncController.h" />
     <ClInclude Include="res\resource.h" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Vendored C sources: exempted from /W4 and /sdl per-file. The synctex
+         parser needs zlib headers; the four gz*.c are compiled here because
+         MuPDF's libthirdparty builds zlib WITHOUT the gzFile API (only
+         inflate/deflate/crc32/zutil objects, which we link from there — if a
+         future MuPDF adds gz* to libthirdparty this becomes LNK2005: drop
+         these four entries then). Defines must stay in lockstep with
+         libthirdparty's zlib set (currently only _CRT_SECURE_NO_WARNINGS). -->
+    <!-- synctex_msvc_compat.h (ours) is force-included: it supplies the
+         ATTRIBUTE_FORMAT_PRINTF macro TeX Live's w2c/c-auto.h would provide;
+         /D cannot define function-like macros. -->
+    <ClCompile Include="$(SolutionDir)thirdparty\synctex\synctex_parser.c">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(SolutionDir)vendor\mupdf\thirdparty\zlib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <ForcedIncludeFiles>$(SolutionDir)thirdparty\synctex\synctex_msvc_compat.h</ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)thirdparty\synctex\synctex_parser_utils.c">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(SolutionDir)vendor\mupdf\thirdparty\zlib;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <ForcedIncludeFiles>$(SolutionDir)thirdparty\synctex\synctex_msvc_compat.h</ForcedIncludeFiles>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)vendor\mupdf\thirdparty\zlib\gzlib.c">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)vendor\mupdf\thirdparty\zlib\gzread.c">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)vendor\mupdf\thirdparty\zlib\gzclose.c">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <ClCompile Include="$(SolutionDir)vendor\mupdf\thirdparty\zlib\gzwrite.c">
+      <WarningLevel>TurnOffAllWarnings</WarningLevel>
+      <SDLCheck>false</SDLCheck>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="res\PdfSideViewer.rc" />

@@ -86,6 +86,17 @@ void PaneWindow::OpenDocument(std::wstring path) {
     m_scrollX = 0;
     m_scrollY = 0;
     m_zoom = 1.0f;
+    // The .synctex regenerates with every build; auto-reload funnels through
+    // here too, so the index lazily re-parses on the first query afterwards.
+    m_synctex.Reset();
+    m_syncMark = {};
+    KillTimer(m_hwnd, kSyncFlashTimer);
+    // Watch from Opening on (not from success): a failed open self-heals when
+    // the file changes again (e.g. the next LaTeX run produces a valid PDF),
+    // and an old watch must never outlive a path switch.
+    KillTimer(m_hwnd, kReloadTimer);
+    m_reloadRetries = 0;
+    m_watcher.Watch(m_hwnd, WM_PSV_FILE_CHANGED, m_docPath);
     m_openGen = m_doc.OpenAsync(std::move(path));
     UpdateScrollBars();
     Invalidate();
@@ -99,6 +110,31 @@ void PaneWindow::OpenDocumentWithView(std::wstring path, float zoom, float scrol
     m_restoreScrollX = scrollX;
     m_restoreScrollY = scrollY;
     m_restoreZoomMode = zoomMode;
+}
+
+void PaneWindow::TryReloadDocument() {
+    if (m_docPath.empty())
+        return;
+    // Stability probe: a deny-write open fails while the producer (a LaTeX
+    // run, a download) is still writing, and a clean+rebuild cycle leaves a
+    // window with no file at all. Both retry on the debounce cadence; any
+    // further notification re-arms everything anyway. Reloading the current
+    // view goes through the session-restore path, so position, zoom and fit
+    // mode survive and sync re-anchors on DocumentOpened.
+    const HANDLE probe = CreateFileW(m_docPath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                                     OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (probe == INVALID_HANDLE_VALUE) {
+        const DWORD err = GetLastError();
+        const bool transient = err == ERROR_SHARING_VIOLATION || err == ERROR_LOCK_VIOLATION ||
+                               err == ERROR_FILE_NOT_FOUND || err == ERROR_ACCESS_DENIED;
+        if (transient && ++m_reloadRetries <= kMaxReloadRetries)
+            SetTimer(m_hwnd, kReloadTimer, kReloadDebounceMs, nullptr);
+        return; // keep showing the current render; never flash an error state
+    }
+    CloseHandle(probe);
+    m_reloadRetries = 0;
+    OpenDocumentWithView(m_docPath, PersistZoom(), PersistScrollX(), PersistScrollY(),
+                         PersistZoomMode());
 }
 
 void PaneWindow::SetZoomMode(ZoomMode mode) {
@@ -275,7 +311,26 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             Invalidate(); // next WM_PAINT retries the device rebuild
             return 0;
         }
+        if (wParam == kReloadTimer) {
+            KillTimer(m_hwnd, kReloadTimer);
+            TryReloadDocument();
+            return 0;
+        }
+        if (wParam == kSyncFlashTimer) {
+            KillTimer(m_hwnd, kSyncFlashTimer);
+            m_syncMark = {};
+            Invalidate();
+            return 0;
+        }
         break;
+
+    case WM_PSV_FILE_CHANGED:
+        // Debounce: reload only after the change burst has been quiet for a
+        // while. Every notification restarts both the timer and the retry
+        // budget (new burst = new attempt).
+        m_reloadRetries = 0;
+        SetTimer(m_hwnd, kReloadTimer, kReloadDebounceMs, nullptr);
+        return 0;
 
     case WM_PSV_DOC_OPENED:
         OnDocOpened(std::unique_ptr<Document::OpenResult>(
@@ -415,7 +470,11 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         const LONG dy = pt.y - m_dragStart.y;
         const bool suppress = m_suppressLinkClick;
         m_suppressLinkClick = false;
-        if (!suppress && !m_hasSelection && dx * dx + dy * dy <= 9) { // click: follow links
+        if (!suppress && !m_hasSelection && dx * dx + dy * dy <= 9) { // click, not drag
+            if (wParam & MK_CONTROL) { // Ctrl+click = SyncTeX inverse search
+                InverseSearchAt(pt);
+                return 0; // never also follow a link
+            }
             if (const auto pp = PagePointAt(pt)) {
                 if (const Document::LinkInfo* link = LinkAt(pp->page, pp->x, pp->y)) {
                     m_clickActivatedLink = true;
@@ -1456,6 +1515,66 @@ void PaneWindow::ScrollToMatch(const Document::SearchMatch& match) {
     ScrollTo(cx - static_cast<float>(vp.cx) / 2.0f, cy - static_cast<float>(vp.cy) / 2.0f);
 }
 
+// ------------------------------------------------------------------ synctex --
+
+void PaneWindow::InverseSearchAt(POINT client) {
+    if (!m_onInverseSearch)
+        return;
+    const auto pp = PagePointAt(client);
+    if (!pp)
+        return; // canvas outside any page: not an error, just no target
+    if (!m_synctex.EnsureLoaded(m_docPath)) {
+        m_onInverseSearch(*this, nullptr, false);
+        return;
+    }
+    const auto hit = m_synctex.SourceAt(pp->page, pp->x, pp->y);
+    m_onInverseSearch(*this, hit ? &*hit : nullptr, true);
+}
+
+bool PaneWindow::ForwardSearchTo(const std::wstring& texPath, int line) {
+    if (m_state != State::Open || m_layout.Empty())
+        return false;
+    if (!m_synctex.EnsureLoaded(m_docPath))
+        return false;
+    int page = -1;
+    std::vector<Document::RectPt> boxes = m_synctex.ForwardBoxes(texPath, line, page);
+    if (boxes.empty() || page < 0 || page >= m_layout.PageCount())
+        return false;
+    FlashSyncTarget(page, std::move(boxes));
+    return true;
+}
+
+void PaneWindow::FlashSyncTarget(int pageIndex, std::vector<Document::RectPt> rects) {
+    if (rects.empty())
+        return;
+    Document::RectPt u = rects.front(); // union drives the centering
+    for (const Document::RectPt& r : rects) {
+        u.x0 = std::min(u.x0, r.x0);
+        u.y0 = std::min(u.y0, r.y0);
+        u.x1 = std::max(u.x1, r.x1);
+        u.y1 = std::max(u.y1, r.y1);
+    }
+    const D2D1_RECT_F pr = m_layout.PageRect(pageIndex);
+    const float scale = DesiredScale();
+    if (u.x1 - u.x0 < 2.0f) {
+        // Degenerate target (kern/glue-only nodes): flash a full-width band
+        // at that height instead of an invisible sliver.
+        const float pageWidthPt = (pr.right - pr.left) / scale;
+        for (Document::RectPt& r : rects) {
+            r.x0 = 0;
+            r.x1 = pageWidthPt;
+        }
+    }
+    const SIZE vp = ViewportPx();
+    const float cx = pr.left + (u.x0 + u.x1) / 2.0f * scale;
+    const float cy = pr.top + (u.y0 + u.y1) / 2.0f * scale;
+    ScrollTo(cx - static_cast<float>(vp.cx) / 2.0f, cy - static_cast<float>(vp.cy) / 2.0f);
+    m_syncMark.pageIndex = pageIndex;
+    m_syncMark.rects = std::move(rects);
+    SetTimer(m_hwnd, kSyncFlashTimer, kSyncFlashMs, nullptr);
+    Invalidate();
+}
+
 std::optional<PageLayout::PagePoint> PaneWindow::PagePointAt(POINT client) const {
     if (m_state != State::Open || m_layout.Empty())
         return std::nullopt;
@@ -1717,6 +1836,20 @@ void PaneWindow::DrawOverlays(ID2D1SolidColorBrush* brush, int page, const D2D1_
                                 dest.left + r.x1 * scale, dest.top + r.y1 * scale),
                     brush);
             }
+        }
+    }
+
+    // SyncTeX forward-search flash: transient (kSyncFlashTimer clears it),
+    // drawn last so it wins over a coincident search match. Green: distinct
+    // from the blue selection and the orange/yellow matches. The ±1.5 pt
+    // vertical inflation keeps thin hboxes visible.
+    if (m_syncMark.pageIndex == page) {
+        brush->SetColor(D2D1::ColorF(0x00A550, 0.40f));
+        for (const Document::RectPt& r : m_syncMark.rects) {
+            m_d2dContext->FillRectangle(
+                D2D1::RectF(dest.left + r.x0 * scale, dest.top + (r.y0 - 1.5f) * scale,
+                            dest.left + r.x1 * scale, dest.top + (r.y1 + 1.5f) * scale),
+                brush);
         }
     }
 }

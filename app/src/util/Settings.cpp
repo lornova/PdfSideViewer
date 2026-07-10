@@ -6,6 +6,7 @@ constexpr PCWSTR kWindowSection = L"window";
 constexpr PCWSTR kSyncSection = L"sync";
 constexpr PCWSTR kMruFilesSection = L"mru-files";
 constexpr PCWSTR kMruPairsSection = L"mru-pairs";
+constexpr PCWSTR kSynctexSection = L"synctex";
 
 // The multi-key INI write is not atomic as a group; two instances closing
 // together would interleave into a hybrid session. Serialize per user.
@@ -131,6 +132,11 @@ AppSettings AppSettings::Load() {
         s.language = L"en";
     s.scrollSync = ReadInt(file, kSyncSection, L"scroll", 1) != 0;
     s.zoomSync = ReadInt(file, kSyncSection, L"zoom", 1) != 0;
+    {
+        std::wstring inverse = ReadString(file, kSynctexSection, L"inverse");
+        if (!inverse.empty())
+            s.synctexInverse = std::move(inverse); // empty/missing keeps the default
+    }
     for (size_t i = 0; i < kMruMaxEntries; ++i) {
         std::wstring f =
             ReadString(file, kMruFilesSection, (L"file" + std::to_wstring(i)).c_str());
@@ -173,6 +179,7 @@ void AppSettings::Save() const {
     WriteString(file, kWindowSection, L"language", language);
     WriteInt(file, kSyncSection, L"scroll", scrollSync ? 1 : 0);
     WriteInt(file, kSyncSection, L"zoom", zoomSync ? 1 : 0);
+    WriteString(file, kSynctexSection, L"inverse", synctexInverse);
     // Slots past the current size are deleted (nullptr value removes the key)
     // so a shrunken list leaves no stale tail behind.
     for (size_t i = 0; i < kMruMaxEntries; ++i) {

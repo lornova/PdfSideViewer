@@ -8,6 +8,7 @@
 #include "view/SyncController.h"
 
 #include <commctrl.h> // HIMAGELIST
+#include <optional>
 
 // Command IDs shared between the accelerator table and WM_COMMAND dispatch.
 enum CommandId : WORD {
@@ -43,6 +44,28 @@ enum CommandId : WORD {
     IDC_MRU_PAIR_FIRST = 1040,
 };
 
+// SyncTeX forward search request, exchanged between processes via
+// WM_COPYDATA: the sender is a short-lived second instance spawned by the
+// editor (LaTeX Workshop). Payload = ForwardSearchBlob followed by the tex
+// then pdf characters, no NUL terminators. Arrives from arbitrary processes:
+// the receiver validates sizes exactly.
+struct ForwardSearchRequest {
+    std::wstring tex;
+    int line = 0; // 1-based
+    std::wstring pdf;
+};
+
+constexpr ULONG_PTR kCdForwardSearch = 0x50535646; // 'PSVF'
+constexpr ULONG_PTR kCdOpenDocument = 0x50535644;  // 'PSVD' (reserved: -reuse-instance)
+
+#pragma pack(push, 1)
+struct ForwardSearchBlob {
+    uint32_t line;   // 1-based
+    uint32_t texLen; // wchar_t count
+    uint32_t pdfLen; // wchar_t count
+};
+#pragma pack(pop)
+
 // Top-level frame: two PaneWindows separated by a draggable splitter.
 class MainWindow {
 public:
@@ -51,7 +74,8 @@ public:
 
     ~MainWindow();
 
-    bool Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile, std::wstring rightFile);
+    bool Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile, std::wstring rightFile,
+                std::optional<ForwardSearchRequest> forward = std::nullopt);
     HWND Hwnd() const { return m_hwnd; }
 
     // For the message loop: Tab inside the find bar must cycle its controls
@@ -87,6 +111,9 @@ private:
     void ShowAboutBox();
     void ToggleFullScreen();
     void SwitchLanguage(Lang lang);
+    void RouteForwardSearch(ForwardSearchRequest req);
+    void LaunchInverseSearch(const SyncTexIndex::InverseHit& hit);
+    void ShowStatusMessage(StrId id);
     void ApplySession(const AppSettings& session);
     void SaveSession() const;
     void CreateFindBar();
@@ -118,6 +145,10 @@ private:
     bool m_toolbarVisible = true;
     bool m_statusVisible = true;
     bool m_fullscreen = false;
+    // Alt+scroll is the temporary sync unlock: releasing Alt afterwards must
+    // not pop the menu bar open (set on Scrolled-with-Alt, consumed by the
+    // SC_KEYMENU suppression).
+    bool m_altScrollGesture = false;
     // Window state captured when entering full screen; also what SaveSession
     // persists while full screen (the live placement is the monitor rect).
     WINDOWPLACEMENT m_fsRestorePlacement{};
@@ -126,6 +157,12 @@ private:
     int m_contentTop = 0;
     int m_contentBottom = 0;
     std::wstring m_statusText[5]; // last SB_SETTEXT per part: skip no-op repaints
+
+    // SyncTeX: inverse-search launch template and the forward request parked
+    // until its document finishes opening (cold start, on-demand open, or a
+    // request landing mid-reload).
+    std::wstring m_synctexInverse;
+    std::optional<ForwardSearchRequest> m_parkedForward;
     float m_splitRatio = 0.5f;
     int m_splitterX = 0; // left edge of the splitter band, client px
     bool m_draggingSplitter = false;

@@ -4,6 +4,49 @@
 #include <commctrl.h>
 #include <shellapi.h>
 
+#include <vector>
+
+namespace {
+
+std::wstring Absolutize(PCWSTR path) {
+    wchar_t full[1024];
+    const DWORD n = GetFullPathNameW(path, ARRAYSIZE(full), full, nullptr);
+    return (n == 0 || n >= ARRAYSIZE(full)) ? std::wstring() : std::wstring(full, n);
+}
+
+// Hand the forward search to the running instance. A nonzero exit code makes
+// the failure visible to the caller (LaTeX Workshop) instead of silent.
+bool SendForwardSearch(HWND target, const ForwardSearchRequest& req) {
+    ForwardSearchBlob blob{};
+    blob.line = static_cast<uint32_t>(req.line);
+    blob.texLen = static_cast<uint32_t>(req.tex.size());
+    blob.pdfLen = static_cast<uint32_t>(req.pdf.size());
+    std::vector<BYTE> payload(sizeof(blob) +
+                              (req.tex.size() + req.pdf.size()) * sizeof(wchar_t));
+    memcpy(payload.data(), &blob, sizeof(blob));
+    memcpy(payload.data() + sizeof(blob), req.tex.data(), req.tex.size() * sizeof(wchar_t));
+    memcpy(payload.data() + sizeof(blob) + req.tex.size() * sizeof(wchar_t), req.pdf.data(),
+           req.pdf.size() * sizeof(wchar_t));
+
+    COPYDATASTRUCT cds{};
+    cds.dwData = kCdForwardSearch;
+    cds.cbData = static_cast<DWORD>(payload.size());
+    cds.lpData = payload.data();
+
+    // Grant the receiver the right to come to the foreground when it flashes
+    // the target position.
+    DWORD pid = 0;
+    GetWindowThreadProcessId(target, &pid);
+    AllowSetForegroundWindow(pid);
+
+    DWORD_PTR handled = 0;
+    return SendMessageTimeoutW(target, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cds),
+                               SMTO_ABORTIFHUNG, 5000, &handled) != 0 &&
+           handled != 0;
+}
+
+} // namespace
+
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int nCmdShow) {
     try {
         INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES};
@@ -13,17 +56,39 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
 
         std::wstring leftFile;
         std::wstring rightFile;
+        std::optional<ForwardSearchRequest> forward;
         int argc = 0;
         if (LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
-            if (argc > 1)
-                leftFile = argv[1];
-            if (argc > 2)
-                rightFile = argv[2];
+            std::wstring first = argc > 1 ? argv[1] : L"";
+            while (!first.empty() && first.front() == L'-')
+                first.erase(first.begin());
+            if (argc >= 5 && lstrcmpiW(first.c_str(), L"forward-search") == 0) {
+                // PdfSideViewer.exe -forward-search TEX LINE PDF (SumatraPDF
+                // argument order, what LaTeX Workshop templates expect).
+                ForwardSearchRequest req;
+                req.tex = Absolutize(argv[2]);
+                req.line = _wtoi(argv[3]);
+                req.pdf = Absolutize(argv[4]);
+                if (req.line >= 1 && !req.tex.empty() && !req.pdf.empty()) {
+                    if (HWND running = FindWindowW(MainWindow::kClassName, nullptr)) {
+                        const bool ok = SendForwardSearch(running, req);
+                        LocalFree(argv);
+                        return ok ? 0 : 1;
+                    }
+                    forward = std::move(req); // cold start: park it
+                }
+            } else {
+                if (argc > 1)
+                    leftFile = argv[1];
+                if (argc > 2)
+                    rightFile = argv[2];
+            }
             LocalFree(argv);
         }
 
         MainWindow window;
-        if (!window.Create(hInstance, nCmdShow, std::move(leftFile), std::move(rightFile)))
+        if (!window.Create(hInstance, nCmdShow, std::move(leftFile), std::move(rightFile),
+                           std::move(forward)))
             return 1;
 
         const ACCEL accels[] = {

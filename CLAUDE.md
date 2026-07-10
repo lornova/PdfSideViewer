@@ -39,6 +39,14 @@ mupdf solution produces are unreferenced); `libresources` exists only in Release
 Debug via a fallback library path; the mupdf projects declare v142 and are built with
 `/p:PlatformToolset=v143`.
 
+`thirdparty\synctex\` (SyncTeX reference parser) IS tracked in git, unlike `vendor\`. The app
+compiles it plus the four zlib `gz*.c` from `vendor\mupdf\thirdparty\zlib` (libthirdparty builds
+zlib WITHOUT the gzFile API — if a future MuPDF adds it, drop the app copies or face LNK2005).
+The vendored C files build with warnings off and a force-included `synctex_msvc_compat.h` that
+supplies `ATTRIBUTE_FORMAT_PRINTF` and — CRITICAL — `#undef`s `UNICODE/_UNICODE`: the parser
+calls generic-text shlwapi macros (`PathFindFileName`) with `char*` buffers, and the W variants
+silently break `.synctex` name resolution (only a pointer WARNING in C, suppressed by design).
+
 ## Testing
 
 There is no unit-test suite. Verification is end-to-end: launch the exe with `testdata\` PDFs and
@@ -50,8 +58,10 @@ PowerShell is DPI-unaware, so un-aware coordinates/captures are virtualized at 9
 source of phantom "bugs"). Run one instance at a time — and CHECK first: a foreign (user)
 instance both receives FindWindow-posted commands and rewrites settings.ini at close, which has
 already produced phantom failures; abort the test run if `Get-Process PdfSideViewer` is non-empty
-and verify that a settings.ini deletion actually happened. The exe must always exit with code 0
-after CloseMainWindow. Restore the user's clipboard if a test touches it.
+and verify that a settings.ini deletion actually happened — with a RETRY loop: a scanner
+briefly holding a handle turns the delete into delete-pending and the file stays visible for a
+moment. The exe must always exit with code 0 after CloseMainWindow. Restore the user's
+clipboard if a test touches it.
 
 ## Architecture
 
@@ -62,7 +72,10 @@ owns the `fz_document` exclusively, interprets pages into cached display lists, 
 job queue (Open / Render / TextPage / Links / Search) with urgent jobs pushed to the front.
 Results are heap-allocated structs posted to the pane HWND via `WM_PSV_*` messages (receiver
 takes ownership). Selection/link hit-testing and search highlighting run UI-side on plain-C++
-models extracted by the worker, never on fz objects.
+models extracted by the worker, never on fz objects. Each pane also owns a `util/FileWatcher`
+thread (auto-reload): it watches the document's parent directory and posts
+`WM_PSV_FILE_CHANGED` (no payload, outside the drain range); debounce, deny-write stability
+probe and the actual reload (via the view-preserving `OpenDocumentWithView` path) are UI-side.
 
 View pipeline (PaneWindow.cpp): `PageLayout` computes a continuous vertical layout in "content
 px" quantized EXACTLY like the worker's `fz_round_rect` on origin-normalized bounds, so page/tile

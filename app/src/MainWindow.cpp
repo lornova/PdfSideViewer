@@ -7,6 +7,7 @@
 
 #include <commctrl.h> // SetWindowSubclass for the find-box keyboard handling
 #include <commdlg.h>  // excluded from windows.h by WIN32_LEAN_AND_MEAN
+#include <shellapi.h> // ShellExecuteW for the synctex inverse-search URI
 #include <shlwapi.h>  // PathCompactPathExW for the MRU menu labels
 
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
@@ -20,6 +21,7 @@ constexpr int kMinPaneDip = 120;
 constexpr int kInitialWidthDip = 1100;
 constexpr int kInitialHeightDip = 760;
 constexpr UINT_PTR kFindDebounceTimer = 2;
+constexpr UINT_PTR kStatusMsgTimer = 3; // transient status-bar message expiry
 constexpr PCWSTR kFindBarClass = L"PsvFindBar";
 
 // Command lines may carry relative paths; MRU entries must survive a cwd
@@ -53,6 +55,40 @@ std::wstring MruMenuLabel(size_t index, const std::wstring& text) {
     label += L"  ";
     label += EscapeMenuText(text);
     return label;
+}
+
+void ReplaceAll(std::wstring& s, PCWSTR what, const std::wstring& with) {
+    const size_t n = wcslen(what);
+    size_t pos = 0;
+    while ((pos = s.find(what, pos)) != std::wstring::npos) {
+        s.replace(pos, n, with);
+        pos += with.size();
+    }
+}
+
+// Minimal percent-encoding for the vscode://file/ URI: keep the characters a
+// path legitimately contains, escape everything else as UTF-8 bytes.
+std::wstring PercentEncode(const std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size());
+    for (const wchar_t c : s) {
+        const bool safe = (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z') ||
+                          (c >= L'0' && c <= L'9') || c == L'-' || c == L'.' || c == L'_' ||
+                          c == L'~' || c == L'/' || c == L':';
+        if (safe) {
+            out += c;
+            continue;
+        }
+        char utf8[8];
+        const int len = WideCharToMultiByte(CP_UTF8, 0, &c, 1, utf8, sizeof(utf8), nullptr,
+                                            nullptr);
+        for (int i = 0; i < len; ++i) {
+            wchar_t hex[4];
+            swprintf_s(hex, L"%%%02X", static_cast<unsigned char>(utf8[i]));
+            out += hex;
+        }
+    }
+    return out;
 }
 
 // Segoe MDL2 Assets codepoints; the order is the imagelist order referenced
@@ -132,7 +168,8 @@ MainWindow::~MainWindow() {
 }
 
 bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
-                        std::wstring rightFile) {
+                        std::wstring rightFile,
+                        std::optional<ForwardSearchRequest> forward) {
     m_dx.EnsureCreated(); // fail fast in wWinMain if graphics init is impossible
 
     // Loaded before any UI is built: the language drives the menu and the
@@ -144,8 +181,21 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_toolbarVisible = session.toolbar;
     m_statusVisible = session.statusbar;
     m_outlineVisible = session.outline;
+    m_synctexInverse = session.synctexInverse;
     m_mruFiles = session.mruFiles;
     m_mruPairs = session.mruPairs;
+
+    if (forward) {
+        // Cold-start forward search: prefer the saved session when it already
+        // contains the pdf (the sibling document comes back too); otherwise
+        // open just that pdf. The query itself replays on DocumentOpened.
+        m_parkedForward = std::move(*forward);
+        const bool inSession =
+            lstrcmpiW(session.left.path.c_str(), m_parkedForward->pdf.c_str()) == 0 ||
+            lstrcmpiW(session.right.path.c_str(), m_parkedForward->pdf.c_str()) == 0;
+        if (!inSession && leftFile.empty() && rightFile.empty())
+            leftFile = m_parkedForward->pdf;
+    }
 
     m_left = std::make_unique<PaneWindow>(m_dx, Str(StrId::PlaceholderLeft));
     m_right = std::make_unique<PaneWindow>(m_dx, Str(StrId::PlaceholderRight));
@@ -186,6 +236,15 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
                 if (m_left->HasDocument() && m_right->HasDocument())
                     RecordMruPair(m_left->DocumentPath(), m_right->DocumentPath());
                 RebuildMruMenus();
+                // Parked forward search: covers cold start, on-demand opens
+                // and requests that landed while an auto-reload was underway.
+                if (m_parkedForward &&
+                    lstrcmpiW(p.DocumentPath().c_str(), m_parkedForward->pdf.c_str()) == 0) {
+                    const ForwardSearchRequest req = *m_parkedForward;
+                    m_parkedForward.reset();
+                    if (!p.ForwardSearchTo(req.tex, req.line))
+                        ShowStatusMessage(StrId::SyncTexForwardMiss);
+                }
             }
         }
         UpdateStatusBar();
@@ -193,11 +252,23 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
         // state only depends on zoom mode and focus anyway.
         if (e != PaneWindow::ViewEvent::Scrolled)
             UpdateCommandUi();
+        else if (GetKeyState(VK_MENU) < 0)
+            m_altScrollGesture = true; // Alt is a scroll modifier here, not a menu key
     };
     m_left->SetViewChangedHandler(onViewChanged);
     m_right->SetViewChangedHandler(onViewChanged);
     m_left->SetOpenSiblingHandler([this](std::wstring p) { m_right->OpenDocument(std::move(p)); });
     m_right->SetOpenSiblingHandler([this](std::wstring p) { m_left->OpenDocument(std::move(p)); });
+
+    const auto onInverseSearch = [this](PaneWindow&, const SyncTexIndex::InverseHit* hit,
+                                        bool hadData) {
+        if (hit)
+            LaunchInverseSearch(*hit);
+        else
+            ShowStatusMessage(hadData ? StrId::SyncTexNoMatch : StrId::SyncTexNoData);
+    };
+    m_left->SetInverseSearchHandler(onInverseSearch);
+    m_right->SetInverseSearchHandler(onInverseSearch);
 
     const auto onSearchStatus = [this](PaneWindow& pane, int active, int total, bool done) {
         if (&pane != m_findTarget || !m_findCount)
@@ -301,6 +372,7 @@ void MainWindow::SaveSession() const {
     s.statusbar = m_statusVisible;
     s.outline = m_outlineVisible;
     s.language = UiLanguage() == Lang::Italian ? L"it" : L"en";
+    s.synctexInverse = m_synctexInverse;
     s.mruFiles = m_mruFiles;
     s.mruPairs = m_mruPairs;
     s.left = m_left->HasPersistableDocument()
@@ -642,6 +714,83 @@ void MainWindow::SwitchLanguage(Lang lang) {
     UpdateCommandUi();
 }
 
+void MainWindow::ShowStatusMessage(StrId id) {
+    if (!m_status)
+        return;
+    // Borrow the sync part for a transient message; the timer restores it.
+    m_statusText[4] = Str(id);
+    SendMessageW(m_status, SB_SETTEXTW, 4, reinterpret_cast<LPARAM>(m_statusText[4].c_str()));
+    SetTimer(m_hwnd, kStatusMsgTimer, 4000, nullptr);
+}
+
+void MainWindow::LaunchInverseSearch(const SyncTexIndex::InverseHit& hit) {
+    std::wstring cmd = m_synctexInverse.empty() ? L"vscode://file/%f:%l" : m_synctexInverse;
+    const bool uri = cmd.find(L"://") != std::wstring::npos;
+    std::wstring file = hit.texPath;
+    if (uri) {
+        std::replace(file.begin(), file.end(), L'\\', L'/');
+        file = PercentEncode(file);
+    }
+    ReplaceAll(cmd, L"%f", file);
+    ReplaceAll(cmd, L"%l", std::to_wstring(hit.line));
+
+    if (uri) {
+        const auto result = reinterpret_cast<INT_PTR>(
+            ShellExecuteW(m_hwnd, L"open", cmd.c_str(), nullptr, nullptr, SW_SHOWNORMAL));
+        if (result <= 32) // per ShellExecute contract
+            ShowStatusMessage(StrId::SyncTexEditorError);
+        return;
+    }
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    // CreateProcessW may rewrite the command-line buffer: pass writable data.
+    if (CreateProcessW(nullptr, cmd.data(), nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr,
+                       nullptr, &si, &pi)) {
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    } else {
+        ShowStatusMessage(StrId::SyncTexEditorError);
+    }
+}
+
+void MainWindow::RouteForwardSearch(ForwardSearchRequest req) {
+    req.pdf = NormalizePath(req.pdf);
+    // Attention without stealing: the short-lived sender granted
+    // AllowSetForegroundWindow, so this usually succeeds; the green flash is
+    // the primary cue either way.
+    if (!SetForegroundWindow(m_hwnd)) {
+        FLASHWINFO fi{sizeof(fi), m_hwnd, FLASHW_TRAY | FLASHW_TIMERNOFG, 3, 0};
+        FlashWindowEx(&fi);
+    }
+    const auto matches = [&](PaneWindow& pane) {
+        return pane.HasPersistableDocument() &&
+               lstrcmpiW(pane.DocumentPath().c_str(), req.pdf.c_str()) == 0;
+    };
+    const bool leftMatch = matches(*m_left);
+    const bool rightMatch = matches(*m_right);
+    PaneWindow* target = nullptr;
+    if (leftMatch && rightMatch)
+        target = FocusedPane(); // same pdf in both panes: follow user attention
+    else if (leftMatch)
+        target = m_left.get();
+    else if (rightMatch)
+        target = m_right.get();
+
+    if (!target) {
+        target = FocusedPane();
+        target->OpenDocument(req.pdf);
+        m_parkedForward = std::move(req); // replayed on DocumentOpened
+        return;
+    }
+    if (!target->HasDocument()) {
+        m_parkedForward = std::move(req); // pane still opening (e.g. mid-reload)
+        return;
+    }
+    if (!target->ForwardSearchTo(req.tex, req.line))
+        ShowStatusMessage(StrId::SyncTexForwardMiss);
+}
+
 void MainWindow::ToggleFullScreen() {
     if (!m_fullscreen) {
         m_fsRestorePlacement.length = sizeof(m_fsRestorePlacement);
@@ -830,7 +979,44 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
         }
+        if (wParam == kStatusMsgTimer) {
+            KillTimer(m_hwnd, kStatusMsgTimer);
+            m_statusText[4].assign(1, L'\xFFFF'); // force the part to rewrite
+            UpdateStatusBar();
+            return 0;
+        }
         break;
+
+    case WM_COPYDATA: {
+        // SyncTeX forward search from a short-lived second instance. The
+        // message crosses process boundaries: validate the payload exactly.
+        const auto* cds = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
+        if (!cds || cds->dwData != kCdForwardSearch || !cds->lpData ||
+            cds->cbData < sizeof(ForwardSearchBlob))
+            return FALSE;
+        ForwardSearchBlob blob;
+        memcpy(&blob, cds->lpData, sizeof(blob));
+        if (blob.line < 1 || blob.line > 10'000'000 || blob.texLen == 0 || blob.pdfLen == 0 ||
+            blob.texLen > 0x8000 || blob.pdfLen > 0x8000)
+            return FALSE;
+        const size_t expected =
+            sizeof(ForwardSearchBlob) +
+            (static_cast<size_t>(blob.texLen) + blob.pdfLen) * sizeof(wchar_t);
+        if (cds->cbData != expected)
+            return FALSE;
+        const auto* chars = reinterpret_cast<const wchar_t*>(
+            static_cast<const BYTE*>(cds->lpData) + sizeof(ForwardSearchBlob));
+        ForwardSearchRequest req;
+        req.tex.assign(chars, blob.texLen); // copy NOW: the buffer dies at return
+        req.pdf.assign(chars + blob.texLen, blob.pdfLen);
+        req.line = static_cast<int>(blob.line);
+        const bool pdfRooted =
+            req.pdf.size() >= 3 && (req.pdf[1] == L':' || req.pdf.rfind(L"\\\\", 0) == 0);
+        if (!pdfRooted)
+            return FALSE;
+        RouteForwardSearch(std::move(req));
+        return TRUE;
+    }
 
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_FIND_EDIT && HIWORD(wParam) == EN_CHANGE) {
@@ -1020,6 +1206,23 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             SetFocus(restorable ? m_lastPaneFocus : m_left->Hwnd());
             return 0;
         }
+        break;
+
+    case WM_SYSCOMMAND:
+        // A plain Alt press-release generates SC_KEYMENU (lParam == 0) and
+        // DefWindowProc would focus the menu bar. When that Alt modified a
+        // scroll (the temporary sync unlock), swallow it; Alt+letter
+        // mnemonics carry the character in lParam and pass through.
+        if ((wParam & 0xFFF0) == SC_KEYMENU && lParam == 0 && m_altScrollGesture) {
+            m_altScrollGesture = false;
+            return 0;
+        }
+        break;
+
+    case WM_INITMENU:
+        // The menu opened some other way (click, mnemonic): a stale gesture
+        // flag must not swallow the NEXT genuine Alt tap.
+        m_altScrollGesture = false;
         break;
 
     case WM_SETTINGCHANGE:
