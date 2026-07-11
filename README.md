@@ -5,8 +5,8 @@ side**, with **synchronized scrolling** that actually works: the pairing is a us
 anchor (pre-scroll each pane, lock, done) and positions are exchanged in *page units*, so
 documents with different page formats and different zoom levels stay aligned page-for-page.
 
-Pure Win32 + Direct2D, rendered by [MuPDF](https://mupdf.com). No .NET, no Electron, no
-cross-platform toolkit: a single small executable that starts instantly.
+Pure Win32 + Direct2D, rendered by [MuPDF](https://mupdf.com): a single self-contained
+executable that starts instantly.
 
 ## Features
 
