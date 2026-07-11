@@ -72,6 +72,27 @@ uint64_t Document::OpenAsync(std::wstring path) {
     return generation;
 }
 
+void Document::CloseAsync() {
+    EnsureWorker();
+    {
+        std::lock_guard lock(m_mutex);
+        m_jobs.clear(); // closing supersedes everything queued
+        if (m_activeCookie)
+            m_activeCookie->abort = 1;
+        m_wantedFirst = INT_MIN;
+        m_wantedLast = INT_MAX;
+        // An Open already RUNNING still posts its result; bumping the
+        // generation (pane-side m_openGen resets to 0 on close) keeps that
+        // stale success from resurrecting the document just closed.
+        ++m_openGeneration;
+        m_currentSearchId = 0;
+        Job job;
+        job.type = Job::Type::Close;
+        m_jobs.push_back(std::move(job));
+    }
+    m_cv.notify_one();
+}
+
 void Document::RequestRender(int pageIndex, float scale, uint64_t requestId, int res, int row,
                              int col, bool urgent) {
     EnsureWorker();
@@ -249,6 +270,14 @@ void Document::WorkerMain() {
         switch (job.type) {
         case Job::Type::Open:
             WorkerOpen(ctx, job);
+            break;
+        case Job::Type::Close:
+            DropDisplayLists(ctx);
+            if (m_doc) {
+                fz_drop_document(ctx, m_doc);
+                m_doc = nullptr;
+            }
+            m_pageCount = 0;
             break;
         case Job::Type::Render:
             WorkerRender(ctx, job);

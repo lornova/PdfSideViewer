@@ -38,6 +38,10 @@ enum CommandId : WORD {
     // Contiguous: CheckMenuRadioItem spans the language radio group.
     IDC_LANG_ENGLISH = 1023,
     IDC_LANG_ITALIAN = 1024,
+    // Contiguous: CheckMenuRadioItem spans the scroll-mode radio group.
+    IDC_SCROLL_CONTINUOUS = 1025,
+    IDC_SCROLL_PAGED = 1026, // Ctrl+4 (pane OnKeyDown, like Ctrl+2/3; NOT an accelerator)
+    IDC_CLOSE_DOC = 1027,    // Ctrl+W, closes the focused pane's document
     // MRU ranges: kMruMaxEntries slots each, dispatched as ranges (not single
     // cases) in the WM_COMMAND handler.
     IDC_MRU_FILE_FIRST = 1030,
@@ -111,6 +115,7 @@ private:
     void ShowAboutBox();
     void ToggleFullScreen();
     void SwitchLanguage(Lang lang);
+    void ApplyScrollMode(PaneWindow::ScrollMode mode);
     void RouteForwardSearch(ForwardSearchRequest req);
     void LaunchInverseSearch(const SyncTexIndex::InverseHit& hit);
     void ShowStatusMessage(StrId id);
@@ -145,6 +150,8 @@ private:
     bool m_toolbarVisible = true;
     bool m_statusVisible = true;
     bool m_fullscreen = false;
+    // Global scroll mode (authoritative copy; the panes cache it).
+    PaneWindow::ScrollMode m_scrollMode = PaneWindow::ScrollMode::Continuous;
     // Alt+scroll is the temporary sync unlock: releasing Alt afterwards must
     // not pop the menu bar open (set on Scrolled-with-Alt, consumed by the
     // SC_KEYMENU suppression).

@@ -108,6 +108,11 @@ public:
     // alone cannot distinguish a stale open of the same file from a re-open.
     uint64_t OpenAsync(std::wstring path);
 
+    // Drops the open fz_document and every cached display list in the worker,
+    // releasing the file handle. Supersedes queued jobs like OpenAsync and
+    // bumps the generation, but posts no result (the pane already reset).
+    void CloseAsync();
+
     // Supersedes any queued/running render of the same (page, res, row, col).
     // urgent jobs (visible content) jump the queue; previews/prefetch do not.
     void RequestRender(int pageIndex, float scale, uint64_t requestId, int res, int row, int col,
@@ -134,7 +139,7 @@ public:
 
 private:
     struct Job {
-        enum class Type { Open, Render, TextPage, Links, Search } type = Type::Open;
+        enum class Type { Open, Close, Render, TextPage, Links, Search } type = Type::Open;
         std::wstring path;
         uint64_t generation = 0; // Open jobs only
         int pageIndex = 0;

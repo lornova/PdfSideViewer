@@ -216,6 +216,49 @@ PDF's bottom-up coordinates). Relayout re-runs when scrollbar appearance shrinks
 (loop until stable, a real subtlety copied from SumatraPDF). Fit-width/fit-page are *virtual*
 zooms recomputed on every relayout.
 
+**Paged scroll mode** (View → Continuous Scrolling / Page-by-Page, Ctrl+4; global for both
+panes, persisted as `[window] scrollMode`): the continuous `PageLayout` stays untouched — the
+mode is a per-page clamp plus quantized navigation, never a rebuilt one-page layout (that would
+break `FirstVisible`, prefetch adjacency, `TotalHeight` scrollbars, fit estimation and the
+page-unit sync contract). Invariants, each traced to the cross-viewer research pass
+(SumatraPDF/Okular/Evince sources and bug archives):
+
+- `m_currentPage` is the single authority. `ClampScroll` confines `m_scrollY` to the page band
+  `[PageRect.top, PageRect.bottom − vp.cy]`; a page that fits degenerates to the one centered
+  position, possibly NEGATIVE for page 0 (`ContentOrigin` skips whole-content centering in
+  paged mode and always translates by `-m_scrollY`). The band excludes gap/margin, so neighbors
+  never peek in; `DrawDocument` draws only the current page but keeps the wanted range at
+  `cur±1` so flips land instantly.
+- Two input regimes. Programmatic jumps (outline, internal links, search, SyncTeX, sync
+  targets, thumb drag, session restore) call `AdoptPage(target)` and may rest mid-page.
+  User-incremental input (wheel, arrows, PgUp/Dn, Space, SB_LINE*/SB_PAGE*) goes through
+  `PagedStepY`/`PagedWheelY`: the event that REACHES the band edge never flips; only a
+  subsequent event already at the edge does (the "mandatory stop" gate — Acrobat's
+  immediate-flip at the edge is the design users complain about).
+- A wheel flip needs one full detent of signed accumulated delta (`m_wheelAccum`), reset on
+  direction change, every completed step, relayout/zoom, and flip attempts at the document
+  ends (Okular bug 498038: leftover credit at the ends must drain or it eats the next opposite
+  notch). Full reset, never `-= 120`: coalesced multi-notch messages cap at one flip. Wheel
+  delta sign is INVERTED relative to scroll direction (delta > 0 = wheel away = scroll up =
+  PREVIOUS page) — the classic sign bug, caught in plan review.
+- Landing: forward flip → page top; backward flip → page BOTTOM (upward reading stays
+  continuous; unanimous among viewers with edge-flip). `m_scrollX` is preserved across flips.
+  LEFT/RIGHT are horizontal-first: with real horizontal overflow they only scroll (never flip,
+  not even at the horizontal edge); without it they flip (a ~2 px tolerance absorbs fit-zoom
+  rounding so FitWidth always flips).
+- Hit-testing pins to the current page (`PagePointAt` rejects other pages, `CaretAt` clamps to
+  the current one): neighbors exist in layout space and keep cached link/text models
+  (`EvictStale` keeps `cur±1`), so without the pin, hovering/clicking the background would
+  activate links on pages that are not on screen.
+- Sync is untouched: flips emit `Scrolled` and positions stay fractional page units; the
+  follower adopts the incoming target page inside `ScrollToSyncPosition`. The vertical
+  scrollbar keeps document-wide semantics (Acrobat school, chosen over Sumatra's
+  page-local bar): the thumb shows the true document position and dragging adopts the page
+  under the viewport center.
+- `OnDocOpened`'s restore path must adopt the saved page BETWEEN the offset assignment and its
+  `ClampScroll`, or every paged session restore and auto-reload clamps into page 0's band and
+  lands on page 0.
+
 **RenderCache** (design lifted from SumatraPDF's `RenderCache`, verified against master sources):
 
 - Entries keyed by `(document, pageNo, rotation, zoom, tile{res,row,col})`, byte-budgeted

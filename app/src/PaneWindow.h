@@ -42,6 +42,10 @@ public:
     // Like OpenDocument, but restores the given view once the document loads.
     void OpenDocumentWithView(std::wstring path, float zoom, float scrollX, float scrollY,
                               ZoomMode zoomMode);
+    // Back to the empty placeholder; the worker drops the fz_document (and
+    // with it the file handle). Fires DocumentOpened so the frame refreshes
+    // outline/status like any other document-state change.
+    void CloseDocument();
     void SetDarkMode(bool dark);
     // Live language switch: the other placeholder texts are composed at paint
     // time (so the repaint alone refreshes them), but the empty-state hint is
@@ -53,6 +57,19 @@ public:
     void OnDpiChanged(UINT dpi);
     void SetZoomMode(ZoomMode mode);
     ZoomMode GetZoomMode() const { return m_zoomMode; }
+
+    // Continuous = classic whole-document scrolling. Paged = the view is
+    // clamped to one page and edge scrolling flips pages. The mode is global
+    // (MainWindow owns the authoritative copy) but cached per pane because
+    // ClampScroll/ContentOrigin/DrawDocument sit on hot paths.
+    enum class ScrollMode { Continuous = 0, Paged = 1 };
+    void SetScrollMode(ScrollMode mode);
+    ScrollMode GetScrollMode() const { return m_scrollMode; }
+    // Ctrl+4 in a pane toggles the global mode; the pane knows no command
+    // ids, so the frame injects the action (same pattern as m_openSibling).
+    void SetToggleScrollModeHandler(std::function<void()> handler) {
+        m_onToggleScrollMode = std::move(handler);
+    }
 
     // ------------------------------------------------------------- sync API --
     // Positions are in page units (pageIndex + fraction within the page),
@@ -68,6 +85,11 @@ public:
     }
     void SetOpenSiblingHandler(std::function<void(std::wstring)> handler) {
         m_openSibling = std::move(handler);
+    }
+    // Double-click on an empty (or failed) pane asks the frame to show the
+    // open dialog for this pane; the pane itself owns no dialogs.
+    void SetOpenRequestHandler(std::function<void()> handler) {
+        m_onOpenRequest = std::move(handler);
     }
     bool HasDocument() const { return m_state == State::Open && !m_layout.Empty(); }
     int PageCount() const { return m_layout.PageCount(); }
@@ -92,8 +114,10 @@ public:
     float ScrollX() const { return m_scrollX; }
     float ScrollY() const { return m_scrollY; }
     // Unlike HasDocument(), a pane still opening (or that failed to open)
-    // keeps its intended document for persistence: the app has no "close
-    // document" command, so writing an empty path is always data loss.
+    // keeps its intended document for persistence: closing the app mid-open
+    // must not wipe it from settings.ini. A deliberate CloseDocument resets
+    // to Empty (and the frame drops its session fallback), so a closed pane
+    // genuinely persists as empty.
     bool HasPersistableDocument() const { return m_state != State::Empty && !m_docPath.empty(); }
     // While a restore is pending the live zoom/scroll are the reset values;
     // persist the parked restore view instead.
@@ -204,6 +228,23 @@ private:
     void RelayoutDocument();
     void UpdateFitZoom(); // recompute m_zoom for FitWidth/FitPage
     void ClampScroll();
+    // Paged mode: the scroll range that keeps the current page filling the
+    // viewport. fits => lo == hi, the single position centering the page
+    // vertically (may be negative for page 0).
+    struct PagedBand {
+        float lo;
+        float hi;
+        bool fits;
+    };
+    PagedBand PagedBandFor(int page) const;
+    bool PagedActive() const {
+        return m_scrollMode == ScrollMode::Paged && m_state == State::Open && !m_layout.Empty();
+    }
+    bool AtBandEdge(const PagedBand& band, int dir) const; // dir: +1 down/next, -1 up/prev
+    void AdoptPage(int page); // programmatic jumps make their target the current page
+    void PagedFlip(int dir);
+    void PagedStepY(float dy);
+    void PagedWheelY(int delta, float pxPerDetent);
     void ScrollTo(float x, float y);
     void ScrollBy(float dx, float dy);
     void ZoomAt(POINT viewPt, float newZoom);
@@ -216,6 +257,7 @@ private:
                          bool urgent);
     void EvictStale(int firstKeep, int lastKeep);
 
+    void ResetDocumentState(); // shared clear list: the current document goes away
     void TryReloadDocument();
     void InverseSearchAt(POINT client);
     void FlashSyncTarget(int pageIndex, std::vector<Document::RectPt> rects);
@@ -233,6 +275,10 @@ private:
     static constexpr UINT kSyncFlashMs = 1500;
     static constexpr float kMinZoom = 0.125f;
     static constexpr float kMaxZoom = 8.0f;
+    // Paged mode: pre-event position vs band edge tolerance. Half a pixel
+    // absorbs float noise and fractional touchpad residue without mistaking
+    // "one pixel short of the edge" for "at the edge".
+    static constexpr float kPagedEdgeEps = 0.5f;
     // Pages whose pixel size exceeds ~1.5x this (geometric mean) are split
     // into a 2^res x 2^res tile grid; previews are capped to this size too.
     static constexpr float kMaxTilePx = 2048.0f;
@@ -270,6 +316,9 @@ private:
     float m_zoom = 1.0f;
     float m_scrollX = 0; // content px
     float m_scrollY = 0;
+    ScrollMode m_scrollMode = ScrollMode::Continuous;
+    int m_currentPage = 0;  // paged mode: the one page drawn and clamped to
+    float m_wheelAccum = 0; // paged mode: signed wheel credit toward one detent
     std::map<int, CachedBitmap> m_previews; // whole page, capped size; tile fallback
     std::map<TileKey, CachedBitmap> m_tiles; // exact-scale tiles when res > 0
     uint64_t m_frame = 0; // bumped per DrawDocument; drives tile eviction
@@ -278,6 +327,8 @@ private:
 
     ViewChangedHandler m_onViewChanged;
     std::function<void(std::wstring)> m_openSibling; // second file of a multi-drop
+    std::function<void()> m_onToggleScrollMode;      // Ctrl+4: frame-owned global toggle
+    std::function<void()> m_onOpenRequest;           // double-click on an empty pane
 
     // UI-side text/link models for visible (and selection-spanning) pages.
     std::map<int, std::vector<Document::TextLine>> m_textPages;

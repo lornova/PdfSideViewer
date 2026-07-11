@@ -132,6 +132,7 @@ AppSettings AppSettings::Load() {
         s.language = L"en";
     s.scrollSync = ReadInt(file, kSyncSection, L"scroll", 1) != 0;
     s.zoomSync = ReadInt(file, kSyncSection, L"zoom", 1) != 0;
+    s.scrollMode = std::clamp(ReadInt(file, kWindowSection, L"scrollMode", 0), 0, 1);
     {
         std::wstring inverse = ReadString(file, kSynctexSection, L"inverse");
         if (!inverse.empty())
@@ -177,6 +178,7 @@ void AppSettings::Save() const {
     WriteInt(file, kWindowSection, L"statusbar", statusbar ? 1 : 0);
     WriteInt(file, kWindowSection, L"outline", outline ? 1 : 0);
     WriteString(file, kWindowSection, L"language", language);
+    WriteInt(file, kWindowSection, L"scrollMode", scrollMode);
     WriteInt(file, kSyncSection, L"scroll", scrollSync ? 1 : 0);
     WriteInt(file, kSyncSection, L"zoom", zoomSync ? 1 : 0);
     WriteString(file, kSynctexSection, L"inverse", synctexInverse);

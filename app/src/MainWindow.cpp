@@ -103,6 +103,8 @@ constexpr wchar_t kToolbarGlyphs[] = {
     0xE721, // 6 find
     0xE8FD, // 7 outline (bulleted list)
     0xE740, // 8 full screen
+    0xEC8F, // 9 continuous scrolling (ScrollUpDown)
+    0xE7C3, // 10 page-by-page (Page)
 };
 
 // The find bar is a plain container: forward its children's notifications to
@@ -259,6 +261,22 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_right->SetViewChangedHandler(onViewChanged);
     m_left->SetOpenSiblingHandler([this](std::wstring p) { m_right->OpenDocument(std::move(p)); });
     m_right->SetOpenSiblingHandler([this](std::wstring p) { m_left->OpenDocument(std::move(p)); });
+    m_left->SetOpenRequestHandler([this] { OpenDocumentDialog(false); });
+    m_right->SetOpenRequestHandler([this] { OpenDocumentDialog(true); });
+
+    // Applied before any document opens (panes are still closed: only the
+    // flag lands); the restore path then adopts the saved page under it.
+    m_scrollMode = session.scrollMode != 0 ? PaneWindow::ScrollMode::Paged
+                                           : PaneWindow::ScrollMode::Continuous;
+    m_left->SetScrollMode(m_scrollMode);
+    m_right->SetScrollMode(m_scrollMode);
+    const auto toggleScrollMode = [this] {
+        ApplyScrollMode(m_scrollMode == PaneWindow::ScrollMode::Paged
+                            ? PaneWindow::ScrollMode::Continuous
+                            : PaneWindow::ScrollMode::Paged);
+    };
+    m_left->SetToggleScrollModeHandler(toggleScrollMode);
+    m_right->SetToggleScrollModeHandler(toggleScrollMode);
 
     const auto onInverseSearch = [this](PaneWindow&, const SyncTexIndex::InverseHit* hit,
                                         bool hadData) {
@@ -367,6 +385,7 @@ void MainWindow::SaveSession() const {
     s.splitRatio = m_splitRatio;
     s.scrollSync = m_sync->ScrollSync();
     s.zoomSync = m_sync->ZoomSync();
+    s.scrollMode = m_scrollMode == PaneWindow::ScrollMode::Paged ? 1 : 0;
     s.dpi = m_dpi;
     s.toolbar = m_toolbarVisible;
     s.statusbar = m_statusVisible;
@@ -401,6 +420,7 @@ HMENU MainWindow::BuildMenuBar() {
     HMENU file = CreatePopupMenu();
     append(file, IDC_OPEN_LEFT, StrId::MenuOpenLeft);
     append(file, IDC_OPEN_RIGHT, StrId::MenuOpenRight);
+    append(file, IDC_CLOSE_DOC, StrId::MenuCloseDoc);
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(m_mruFilesMenu),
                 Str(StrId::MenuRecentFiles));
@@ -423,6 +443,9 @@ HMENU MainWindow::BuildMenuBar() {
     append(view, IDC_ZOOM_ACTUAL, StrId::MenuActualSize);
     append(view, IDC_FIT_WIDTH, StrId::MenuFitWidth);
     append(view, IDC_FIT_PAGE, StrId::MenuFitPage);
+    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+    append(view, IDC_SCROLL_CONTINUOUS, StrId::MenuScrollContinuous);
+    append(view, IDC_SCROLL_PAGED, StrId::MenuScrollPaged);
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(view, MF_POPUP, reinterpret_cast<UINT_PTR>(lang), Str(StrId::MenuLanguage));
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
@@ -579,6 +602,10 @@ void MainWindow::CreateToolbar(HINSTANCE hinst) {
         button(4, IDC_FIT_WIDTH, BTNS_CHECK),
         button(5, IDC_FIT_PAGE, BTNS_CHECK),
         separator(),
+        // Scroll-mode pair: exactly one is always pressed (UpdateCommandUi).
+        button(9, IDC_SCROLL_CONTINUOUS, BTNS_CHECK),
+        button(10, IDC_SCROLL_PAGED, BTNS_CHECK),
+        separator(),
         button(6, IDC_FIND_SHOW, BTNS_BUTTON),
         button(7, IDC_TOGGLE_OUTLINE, BTNS_CHECK),
         separator(),
@@ -631,6 +658,11 @@ void MainWindow::UpdateCommandUi() {
             break;
         }
         CheckMenuRadioItem(m_menu, IDC_ZOOM_ACTUAL, IDC_FIT_PAGE, fitId, MF_BYCOMMAND);
+        CheckMenuRadioItem(m_menu, IDC_SCROLL_CONTINUOUS, IDC_SCROLL_PAGED,
+                           m_scrollMode == PaneWindow::ScrollMode::Paged
+                               ? IDC_SCROLL_PAGED
+                               : IDC_SCROLL_CONTINUOUS,
+                           MF_BYCOMMAND);
         CheckMenuRadioItem(m_menu, IDC_LANG_ENGLISH, IDC_LANG_ITALIAN,
                            UiLanguage() == Lang::Italian ? IDC_LANG_ITALIAN : IDC_LANG_ENGLISH,
                            MF_BYCOMMAND);
@@ -645,6 +677,8 @@ void MainWindow::UpdateCommandUi() {
         press(IDC_TOGGLE_OUTLINE, m_outlineVisible);
         press(IDC_FIT_WIDTH, mode == PaneWindow::ZoomMode::FitWidth);
         press(IDC_FIT_PAGE, mode == PaneWindow::ZoomMode::FitPage);
+        press(IDC_SCROLL_CONTINUOUS, m_scrollMode == PaneWindow::ScrollMode::Continuous);
+        press(IDC_SCROLL_PAGED, m_scrollMode == PaneWindow::ScrollMode::Paged);
     }
 }
 
@@ -691,6 +725,15 @@ void MainWindow::ShowAboutBox() {
     std::wstring text = L"PdfSideViewer " PSV_VERSION_WSTR L"\n\n";
     text += Str(StrId::AboutBody);
     MessageBoxW(m_hwnd, text.c_str(), Str(StrId::AboutTitle), MB_OK | MB_ICONINFORMATION);
+}
+
+void MainWindow::ApplyScrollMode(PaneWindow::ScrollMode mode) {
+    // Global by design: one mental switch, and sync-locked panes flip pages
+    // together instead of mixing paged and continuous behavior.
+    m_scrollMode = mode;
+    m_left->SetScrollMode(mode);
+    m_right->SetScrollMode(mode);
+    UpdateCommandUi();
 }
 
 void MainWindow::SwitchLanguage(Lang lang) {
@@ -1041,6 +1084,25 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_OPEN_RIGHT:
             OpenDocumentDialog(true);
             return 0;
+        case IDC_CLOSE_DOC: {
+            // Only when a pane really has focus: FocusedPane() falls back to
+            // the LEFT pane for any other focus (find box, outline tree), and
+            // a reflexive Ctrl+W typed in the find bar must not close - and
+            // wipe the saved session of - a document nobody aimed at.
+            const HWND focus = GetFocus();
+            if (focus != m_left->Hwnd() && focus != m_right->Hwnd())
+                return 0;
+            PaneWindow* pane = FocusedPane();
+            // A deliberate close must not resurrect on the next launch: the
+            // SaveSession fallback protects panes that never finished
+            // opening, not ones the user closed. A no-op close (already
+            // empty pane) must NOT wipe it, though: it may still hold a
+            // session document that never got to open.
+            if (pane->HasPersistableDocument())
+                (pane == m_right.get() ? m_fallbackRight : m_fallbackLeft) = PaneSettings{};
+            pane->CloseDocument(); // DocumentOpened refreshes status/outline/UI
+            return 0;
+        }
         case IDC_FOCUS_NEXT_PANE:
             SetFocus(GetFocus() == m_left->Hwnd() ? m_right->Hwnd() : m_left->Hwnd());
             return 0;
@@ -1113,6 +1175,12 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             FocusedPane()->SetZoomMode(PaneWindow::ZoomMode::FitPage);
             UpdateCommandUi();
             return 0;
+        case IDC_SCROLL_CONTINUOUS:
+            ApplyScrollMode(PaneWindow::ScrollMode::Continuous);
+            return 0;
+        case IDC_SCROLL_PAGED:
+            ApplyScrollMode(PaneWindow::ScrollMode::Paged);
+            return 0;
         case IDC_FULLSCREEN:
             ToggleFullScreen();
             return 0;
@@ -1163,6 +1231,12 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 break;
             case IDC_FIT_PAGE:
                 tip = StrId::TipFitPage;
+                break;
+            case IDC_SCROLL_CONTINUOUS:
+                tip = StrId::TipScrollContinuous;
+                break;
+            case IDC_SCROLL_PAGED:
+                tip = StrId::TipScrollPaged;
                 break;
             case IDC_FIND_SHOW:
                 tip = StrId::TipFind;
@@ -1217,6 +1291,11 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             m_altScrollGesture = false;
             return 0;
         }
+        // NOT worth also hiding the accelerator underlines while Alt stays
+        // held after the scroll: the system repaints them from the physical
+        // key state (pushing UISF_HIDEACCEL onto frame and panes plus a
+        // menu-bar redraw was verified to have no visual effect), and they
+        // are truthful anyway - Alt+letter mnemonics still work mid-gesture.
         break;
 
     case WM_INITMENU:

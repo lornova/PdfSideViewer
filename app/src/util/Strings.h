@@ -15,6 +15,7 @@
     X(MenuFile, L"&File", L"&File")                                                                \
     X(MenuOpenLeft, L"Open &Left...\tCtrl+O", L"Apri a &sinistra...\tCtrl+O")                      \
     X(MenuOpenRight, L"Open &Right...\tCtrl+Shift+O", L"Apri a &destra...\tCtrl+Shift+O")          \
+    X(MenuCloseDoc, L"&Close\tCtrl+W", L"C&hiudi\tCtrl+W")                                         \
     X(MenuRecentFiles, L"Recent &Files", L"File recen&ti")                                         \
     X(MenuRecentPairs, L"Recent Pa&irs", L"&Coppie recenti")                                       \
     X(MenuMruEmpty, L"(empty)", L"(vuoto)")                                                        \
@@ -29,6 +30,8 @@
     X(MenuActualSize, L"&Actual Size\tCtrl+0", L"Dimensioni &effettive\tCtrl+0")                   \
     X(MenuFitWidth, L"Fit &Width\tCtrl+2", L"Adatta &larghezza\tCtrl+2")                           \
     X(MenuFitPage, L"Fit &Page\tCtrl+3", L"Adatta &pagina\tCtrl+3")                                \
+    X(MenuScrollContinuous, L"&Continuous Scrolling\tCtrl+4", L"Scorrimento c&ontinuo\tCtrl+4")    \
+    X(MenuScrollPaged, L"Page-&by-Page\tCtrl+4", L"Pagina per pagi&na\tCtrl+4")                    \
     X(MenuLanguage, L"&Language", L"Ling&ua")                                                      \
     X(MenuLangEnglish, L"English", L"English")                                                     \
     X(MenuLangItalian, L"Italiano", L"Italiano")                                                   \
@@ -45,6 +48,8 @@
     X(TipZoomSync, L"Zoom sync (Ctrl+F7)", L"Sync zoom (Ctrl+F7)")                                 \
     X(TipFitWidth, L"Fit width (Ctrl+2)", L"Adatta larghezza (Ctrl+2)")                            \
     X(TipFitPage, L"Fit page (Ctrl+3)", L"Adatta pagina (Ctrl+3)")                                 \
+    X(TipScrollContinuous, L"Continuous scrolling (Ctrl+4)", L"Scorrimento continuo (Ctrl+4)")     \
+    X(TipScrollPaged, L"Page-by-page (Ctrl+4)", L"Pagina per pagina (Ctrl+4)")                     \
     X(TipFind, L"Find (Ctrl+F)", L"Trova (Ctrl+F)")                                                \
     X(TipOutline, L"Outline (F9)", L"Segnalibri (F9)")                                             \
     X(TipFullScreen, L"Full screen (F11)", L"Schermo intero (F11)")                                \
@@ -75,10 +80,10 @@
     X(OpenDlgFilter, L"PDF documents (*.pdf)\0*.pdf\0All files (*.*)\0*.*\0",                      \
       L"Documenti PDF (*.pdf)\0*.pdf\0Tutti i file (*.*)\0*.*\0")                                  \
     /* pane placeholders */                                                                        \
-    X(PlaceholderLeft, L"Left pane\nCtrl+O to open a PDF",                                         \
-      L"Pannello sinistro\nCtrl+O per aprire un PDF")                                              \
-    X(PlaceholderRight, L"Right pane\nCtrl+Shift+O to open a PDF",                                 \
-      L"Pannello destro\nCtrl+Shift+O per aprire un PDF")                                          \
+    X(PlaceholderLeft, L"Left pane\nCtrl+O or double-click to open a PDF",                         \
+      L"Pannello sinistro\nCtrl+O o doppio click per aprire un PDF")                               \
+    X(PlaceholderRight, L"Right pane\nCtrl+Shift+O or double-click to open a PDF",                 \
+      L"Pannello destro\nCtrl+Shift+O o doppio click per aprire un PDF")                           \
     X(PaneOpening, L"Opening", L"Apertura di")                                                     \
     X(PaneOpenFailed, L"Could not open", L"Impossibile aprire")                                    \
     X(PaneEmptyDoc, L"(empty document)", L"(documento vuoto)")                                     \

@@ -94,6 +94,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         const ACCEL accels[] = {
             {FCONTROL | FVIRTKEY, 'O', IDC_OPEN_LEFT},
             {FCONTROL | FSHIFT | FVIRTKEY, 'O', IDC_OPEN_RIGHT},
+            {FCONTROL | FVIRTKEY, 'W', IDC_CLOSE_DOC},
             {FVIRTKEY, VK_TAB, IDC_FOCUS_NEXT_PANE},
             {FVIRTKEY, VK_F7, IDC_TOGGLE_SCROLL_SYNC},
             {FCONTROL | FVIRTKEY, VK_F7, IDC_TOGGLE_ZOOM_SYNC},

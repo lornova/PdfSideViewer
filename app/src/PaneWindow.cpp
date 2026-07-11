@@ -60,10 +60,7 @@ void PaneWindow::Create(HWND parent, int childId) {
                     reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(parent, GWLP_HINSTANCE)), this);
 }
 
-void PaneWindow::OpenDocument(std::wstring path) {
-    m_hasRestoreView = false;
-    m_docPath = path;
-    m_state = State::Opening;
+void PaneWindow::ResetDocumentState() {
     m_errorText.clear();
     m_previews.clear();
     m_tiles.clear();
@@ -80,26 +77,53 @@ void PaneWindow::OpenDocument(std::wstring path) {
     m_matches.clear();
     m_activeMatch = -1;
     m_searchDone = true;
-    m_doc.CancelSearch();
     NotifySearchStatus();
     m_layout.Clear();
     m_scrollX = 0;
     m_scrollY = 0;
     m_zoom = 1.0f;
+    m_currentPage = 0;
+    m_wheelAccum = 0;
     // The .synctex regenerates with every build; auto-reload funnels through
     // here too, so the index lazily re-parses on the first query afterwards.
     m_synctex.Reset();
     m_syncMark = {};
     KillTimer(m_hwnd, kSyncFlashTimer);
+    KillTimer(m_hwnd, kReloadTimer);
+    m_reloadRetries = 0;
+}
+
+void PaneWindow::OpenDocument(std::wstring path) {
+    m_hasRestoreView = false;
+    m_docPath = path;
+    m_state = State::Opening;
+    m_doc.CancelSearch();
+    ResetDocumentState();
     // Watch from Opening on (not from success): a failed open self-heals when
     // the file changes again (e.g. the next LaTeX run produces a valid PDF),
     // and an old watch must never outlive a path switch.
-    KillTimer(m_hwnd, kReloadTimer);
-    m_reloadRetries = 0;
     m_watcher.Watch(m_hwnd, WM_PSV_FILE_CHANGED, m_docPath);
     m_openGen = m_doc.OpenAsync(std::move(path));
     UpdateScrollBars();
     Invalidate();
+}
+
+void PaneWindow::CloseDocument() {
+    if (m_state == State::Empty)
+        return;
+    m_hasRestoreView = false;
+    m_docPath.clear();
+    m_state = State::Empty;
+    // An Open still RUNNING in the worker posts its result regardless of the
+    // queue purge; 0 never matches a real generation, so it cannot land.
+    m_openGen = 0;
+    m_watcher.Stop();
+    m_doc.CloseAsync();
+    ResetDocumentState();
+    UpdateScrollBars();
+    Invalidate();
+    if (m_onViewChanged)
+        m_onViewChanged(*this, ViewEvent::DocumentOpened, 1.0f);
 }
 
 void PaneWindow::OpenDocumentWithView(std::wstring path, float zoom, float scrollX,
@@ -149,12 +173,36 @@ void PaneWindow::SetZoomMode(ZoomMode mode) {
     Invalidate();
 }
 
+void PaneWindow::SetScrollMode(ScrollMode mode) {
+    if (mode == m_scrollMode)
+        return;
+    m_scrollMode = mode;
+    m_wheelAccum = 0;
+    if (m_state != State::Open || m_layout.Empty()) {
+        Invalidate();
+        return;
+    }
+    if (mode == ScrollMode::Paged) {
+        // Enter on the page under the viewport center (SyncPosition's rule);
+        // the re-clamp below may then move/center it within its band.
+        m_currentPage =
+            std::clamp(static_cast<int>(SyncPosition()), 0, m_layout.PageCount() - 1);
+    }
+    // Both directions re-clamp under the new mode: leaving Paged must undo a
+    // possibly negative centered offset, and the drawn page set changes even
+    // when the offset does not.
+    ScrollTo(m_scrollX, m_scrollY);
+    UpdateScrollBars();
+    Invalidate();
+}
+
 void PaneWindow::GotoOutlineItem(int index) {
     if (m_state != State::Open || index < 0 || index >= static_cast<int>(m_outline.size()))
         return;
     const Document::OutlineItem& item = m_outline[static_cast<size_t>(index)];
     if (item.targetPage < 0 || item.targetPage >= m_layout.PageCount())
         return;
+    AdoptPage(item.targetPage); // paged: jumps adopt their target page
     const D2D1_RECT_F pr = m_layout.PageRect(item.targetPage);
     ScrollTo(m_scrollX, pr.top + item.targetY * DesiredScale() - DipToPx(8.0f));
 }
@@ -398,6 +446,14 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_LBUTTONDBLCLK: {
+        if (m_state == State::Empty || m_state == State::Error) {
+            // The placeholder invites it: double-click opens a file in this
+            // pane (the frame owns the dialog). A failed open counts too:
+            // its natural next step is picking another file.
+            if (m_onOpenRequest)
+                m_onOpenRequest();
+            return 0;
+        }
         const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         // The double-click's second WM_LBUTTONUP must not re-activate a link,
         // and after an internal-link scroll the same client point now hits
@@ -802,12 +858,22 @@ void PaneWindow::DrawDocument(ID2D1SolidColorBrush* brush) {
     // The wanted range must be published BEFORE any render request: an idle
     // worker pops fresh jobs immediately and would judge them against the
     // previous paint's range, silently dropping them.
-    const int first = m_layout.FirstVisible(m_scrollY);
-    int last = first - 1;
-    for (int i = first; i < m_layout.PageCount(); ++i) {
-        if (m_layout.PageRect(i).top + origin.y > static_cast<float>(vp.cy))
-            break;
-        last = i;
+    int first;
+    int last;
+    if (PagedActive()) {
+        // Strict single page: neighbors are never drawn (the background clear
+        // covers where they would be), but the wanted range below still keeps
+        // cur±1 warm so flips land instantly.
+        first = m_currentPage;
+        last = m_currentPage;
+    } else {
+        first = m_layout.FirstVisible(m_scrollY);
+        last = first - 1;
+        for (int i = first; i < m_layout.PageCount(); ++i) {
+            if (m_layout.PageRect(i).top + origin.y > static_cast<float>(vp.cy))
+                break;
+            last = i;
+        }
     }
     m_doc.SetWantedRange(first - 1, last + 1);
 
@@ -949,6 +1015,13 @@ void PaneWindow::OnDocOpened(std::unique_ptr<Document::OpenResult> result) {
             m_layout.Update(DesiredScale(), DipToPx(8.0f), DipToPx(12.0f));
             m_scrollX = m_restoreScrollX;
             m_scrollY = m_restoreScrollY;
+            // Adopt BEFORE the clamp: m_currentPage still holds page 0 from
+            // the OpenDocument reset, and clamping into page 0's band here
+            // would wreck every paged session restore and auto-reload.
+            if (PagedActive()) {
+                const SIZE vp = ViewportPx();
+                AdoptPage(m_layout.FirstVisible(m_scrollY + static_cast<float>(vp.cy) / 2.0f));
+            }
             ClampScroll();
             const double pos = SyncPosition();
             RelayoutDocument();
@@ -1027,9 +1100,14 @@ D2D1_POINT_2F PaneWindow::ContentOrigin() const {
     const float ox = m_layout.TotalWidth() <= static_cast<float>(vp.cx)
                          ? (static_cast<float>(vp.cx) - m_layout.TotalWidth()) / 2.0f
                          : -m_scrollX;
-    const float oy = m_layout.TotalHeight() <= static_cast<float>(vp.cy)
-                         ? (static_cast<float>(vp.cy) - m_layout.TotalHeight()) / 2.0f
-                         : -m_scrollY;
+    // Paged: never center the whole content; the band clamp already centers a
+    // fitting page by pushing m_scrollY (possibly negative) to the one valid
+    // position, so the plain translation is always correct.
+    const float oy = PagedActive()
+                         ? -m_scrollY
+                         : (m_layout.TotalHeight() <= static_cast<float>(vp.cy)
+                                ? (static_cast<float>(vp.cy) - m_layout.TotalHeight()) / 2.0f
+                                : -m_scrollY);
     // Snap to whole pixels: fractional scroll/centering would put the 1:1
     // page blits on half-pixel boundaries and blur them.
     return D2D1::Point2F(std::floor(ox + 0.5f), std::floor(oy + 0.5f));
@@ -1071,6 +1149,7 @@ void PaneWindow::UpdateFitZoom() {
 void PaneWindow::RelayoutDocument() {
     if (m_state != State::Open)
         return;
+    m_wheelAccum = 0; // band geometry changes; pending paged wheel credit is void
     const float oldZoom = m_zoom;
     UpdateFitZoom();
     m_layout.Update(DesiredScale(), DipToPx(8.0f), DipToPx(12.0f));
@@ -1085,8 +1164,100 @@ void PaneWindow::ClampScroll() {
     const SIZE vp = ViewportPx();
     m_scrollX = std::clamp(m_scrollX, 0.0f,
                            std::max(0.0f, m_layout.TotalWidth() - static_cast<float>(vp.cx)));
-    m_scrollY = std::clamp(m_scrollY, 0.0f,
-                           std::max(0.0f, m_layout.TotalHeight() - static_cast<float>(vp.cy)));
+    if (PagedActive()) {
+        // Paged invariant: no ScrollTo from ANY path can leave the current
+        // page. The band excludes gap and margin (PageRect covers only the
+        // page), so a neighbor can never peek in. X stays whole-content:
+        // a per-page X band would yank m_scrollX on every flip through
+        // mixed-width documents, breaking "X is preserved across flips".
+        m_currentPage = std::clamp(m_currentPage, 0, m_layout.PageCount() - 1);
+        const PagedBand band = PagedBandFor(m_currentPage);
+        m_scrollY = std::clamp(m_scrollY, band.lo, band.hi);
+    } else {
+        m_scrollY = std::clamp(m_scrollY, 0.0f,
+                               std::max(0.0f, m_layout.TotalHeight() - static_cast<float>(vp.cy)));
+    }
+}
+
+PaneWindow::PagedBand PaneWindow::PagedBandFor(int page) const {
+    const D2D1_RECT_F pr = m_layout.PageRect(page);
+    const float vpH = static_cast<float>(ViewportPx().cy);
+    const float pageH = pr.bottom - pr.top;
+    PagedBand band{};
+    band.fits = pageH <= vpH;
+    if (band.fits) {
+        // Single valid position: the page centered vertically. May be
+        // negative (page 0 in a viewport taller than page + margin);
+        // ContentOrigin's paged branch turns that into positive padding.
+        band.lo = band.hi = pr.top - (vpH - pageH) / 2.0f;
+    } else {
+        band.lo = pr.top;
+        band.hi = pr.bottom - vpH;
+    }
+    return band;
+}
+
+bool PaneWindow::AtBandEdge(const PagedBand& band, int dir) const {
+    return dir > 0 ? m_scrollY >= band.hi - kPagedEdgeEps
+                   : m_scrollY <= band.lo + kPagedEdgeEps;
+}
+
+void PaneWindow::AdoptPage(int page) {
+    if (!PagedActive())
+        return;
+    m_currentPage = std::clamp(page, 0, m_layout.PageCount() - 1);
+    m_wheelAccum = 0;
+}
+
+void PaneWindow::PagedFlip(int dir) {
+    m_wheelAccum = 0; // drains leftover credit even when pinned at an end
+    const int target = m_currentPage + dir;
+    if (target < 0 || target >= m_layout.PageCount())
+        return; // no wrap at document ends
+    m_currentPage = target;
+    const PagedBand band = PagedBandFor(target);
+    // Forward lands at the top, backward at the BOTTOM of the previous page
+    // (upward reading stays continuous); fits => lo == hi centers it. X is
+    // deliberately preserved across flips.
+    ScrollTo(m_scrollX, dir > 0 ? band.lo : band.hi);
+    Invalidate(); // the drawn page changed even if the offset somehow did not
+}
+
+void PaneWindow::PagedStepY(float dy) {
+    const int dir = dy > 0 ? 1 : -1;
+    const PagedBand band = PagedBandFor(m_currentPage);
+    if (band.fits || AtBandEdge(band, dir)) {
+        PagedFlip(dir); // a previous event already parked us at the edge
+        return;
+    }
+    m_wheelAccum = 0; // a key step invalidates pending wheel credit
+    // The band clamp stops at the edge: the event that REACHES the edge never
+    // flips (the mandatory stop); only the next one, already at the edge, does.
+    ScrollTo(m_scrollX, m_scrollY + dy);
+}
+
+void PaneWindow::PagedWheelY(int delta, float pxPerDetent) {
+    // Wheel deltas are inverted relative to scroll direction: positive delta
+    // (wheel away from the user) scrolls UP, toward the PREVIOUS page.
+    const int dir = delta < 0 ? 1 : -1;
+    if (m_wheelAccum != 0 && (m_wheelAccum > 0) != (delta > 0))
+        m_wheelAccum = 0; // direction change forfeits the credit
+    const PagedBand band = PagedBandFor(m_currentPage);
+    if (!band.fits && !AtBandEdge(band, dir)) {
+        m_wheelAccum = 0;
+        // Mid-page: scroll (the clamp stops at the edge), never flip.
+        ScrollTo(m_scrollX, m_scrollY - static_cast<float>(delta) / WHEEL_DELTA * pxPerDetent);
+        return;
+    }
+    // At the edge (or the page fits): accumulate toward one full detent so
+    // precision-touchpad micro-deltas cannot flip once per event.
+    m_wheelAccum += static_cast<float>(delta);
+    if (std::abs(m_wheelAccum) >= static_cast<float>(WHEEL_DELTA)) {
+        // Full reset, not -= WHEEL_DELTA: drains leftover credit at document
+        // ends and caps coalesced multi-notch messages at one flip each.
+        m_wheelAccum = 0;
+        PagedFlip(dir);
+    }
 }
 
 void PaneWindow::ScrollTo(float x, float y) {
@@ -1131,7 +1302,12 @@ void PaneWindow::ZoomAt(POINT viewPt, float newZoom) {
     const bool haveAnchor = !m_layout.Empty();
     if (haveAnchor) {
         const float oldScale = DesiredScale();
-        const int page = std::min(m_layout.FirstVisible(cy), m_layout.PageCount() - 1);
+        // Paged: the current page is the only one on screen; FirstVisible
+        // over the background above/below it would anchor an invisible
+        // neighbor and zooming would drag the view onto it.
+        const int page = PagedActive()
+                             ? m_currentPage
+                             : std::min(m_layout.FirstVisible(cy), m_layout.PageCount() - 1);
         const D2D1_RECT_F rect = m_layout.PageRect(page);
         const float px = std::clamp(cx, rect.left, rect.right);
         const float py = std::clamp(cy, rect.top, rect.bottom);
@@ -1143,6 +1319,7 @@ void PaneWindow::ZoomAt(POINT viewPt, float newZoom) {
     const float ratioApplied = newZoom / m_zoom;
     m_zoomMode = ZoomMode::Manual; // a zoom gesture unhooks the fit modes
     m_zoom = newZoom;
+    m_wheelAccum = 0; // relayout below: stale paged wheel credit must not survive it
     m_layout.Update(DesiredScale(), DipToPx(8.0f), DipToPx(12.0f));
 
     D2D1_POINT_2F target = D2D1::Point2F(cx, cy);
@@ -1167,13 +1344,29 @@ double PaneWindow::SyncPosition() const {
     // smaller than the viewport and centered, too).
     const float centerY = static_cast<float>(vp.cy) / 2.0f - ContentOrigin().y;
     const int count = m_layout.PageCount();
-    const int page = m_layout.FirstVisible(centerY);
-    if (page >= count)
-        return static_cast<double>(count);
+    int page;
+    if (PagedActive()) {
+        // The current page is authoritative. Between a viewport change and
+        // the re-clamp (resize, fullscreen, splitter drag) the stale offset
+        // can put the geometric center on a neighbor, and reporting that
+        // would switch pages across every resize dance.
+        page = std::clamp(m_currentPage, 0, count - 1);
+    } else {
+        page = m_layout.FirstVisible(centerY);
+        if (page >= count)
+            return static_cast<double>(count);
+    }
     const D2D1_RECT_F rect = m_layout.PageRect(page);
     float fraction = 0;
     if (centerY > rect.top && rect.bottom > rect.top)
         fraction = std::clamp((centerY - rect.top) / (rect.bottom - rect.top), 0.0f, 1.0f);
+    if (PagedActive()) {
+        // The integer part IS the current page: a stale offset can push the
+        // fraction to exactly 1.0 (only possible pre-re-clamp; a band-clamped
+        // center always sits strictly above the page bottom), and page + 1.0
+        // would make ScrollToSyncPosition adopt the NEXT page mid-resize.
+        fraction = std::min(fraction, 0.9999f);
+    }
     return static_cast<double>(page) + static_cast<double>(fraction);
 }
 
@@ -1183,6 +1376,9 @@ void PaneWindow::ScrollToSyncPosition(double pos) {
     const int count = m_layout.PageCount();
     pos = std::clamp(pos, 0.0, static_cast<double>(count));
     const int page = std::min(static_cast<int>(pos), count - 1);
+    // Paged: sync targets and the relayout dances adopt the page they aim at
+    // (a programmatic jump), then the band clamp lands as close as possible.
+    AdoptPage(page);
     const float fraction = static_cast<float>(std::clamp(pos - page, 0.0, 1.0));
     const D2D1_RECT_F rect = m_layout.PageRect(page);
     const float contentY = rect.top + fraction * (rect.bottom - rect.top);
@@ -1253,6 +1449,48 @@ void PaneWindow::OnScrollMessage(UINT msg, WPARAM wParam) {
     const SIZE vp = ViewportPx();
     const float line = DipToPx(48.0f);
     const float page = static_cast<float>(vertical ? vp.cy : vp.cx) * 0.9f;
+
+    if (vertical && PagedActive()) {
+        switch (LOWORD(wParam)) {
+        case SB_LINEUP:
+            PagedStepY(-line);
+            return;
+        case SB_LINEDOWN:
+            PagedStepY(line);
+            return;
+        case SB_PAGEUP:
+            PagedStepY(-page);
+            return;
+        case SB_PAGEDOWN:
+            PagedStepY(page);
+            return;
+        case SB_TOP:
+            AdoptPage(0);
+            ScrollTo(m_scrollX, 0);
+            return;
+        case SB_BOTTOM:
+            AdoptPage(m_layout.PageCount() - 1);
+            ScrollTo(m_scrollX, m_layout.TotalHeight()); // overshoot; the band clamp lands it
+            return;
+        case SB_THUMBTRACK:
+        case SB_THUMBPOSITION: {
+            SCROLLINFO si{};
+            si.cbSize = sizeof(si);
+            si.fMask = SIF_TRACKPOS; // 32-bit position (HIWORD(wParam) truncates)
+            GetScrollInfo(m_hwnd, SB_VERT, &si);
+            const float track = static_cast<float>(si.nTrackPos);
+            // Document-wide thumb: dragging adopts the page under the viewport
+            // center (SyncPosition's rule: page containing trackPos would bias
+            // one page early on the way down), then clamps into its band.
+            AdoptPage(m_layout.FirstVisible(track + static_cast<float>(vp.cy) / 2.0f));
+            ScrollTo(m_scrollX, track);
+            return;
+        }
+        default:
+            return;
+        }
+    }
+
     float pos = vertical ? m_scrollY : m_scrollX;
 
     switch (LOWORD(wParam)) {
@@ -1310,6 +1548,17 @@ void PaneWindow::OnMouseWheel(WPARAM wParam, LPARAM lParam, bool horizontal) {
     UINT scrollLines = 3;
     SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &scrollLines, 0);
     const SIZE vp = ViewportPx();
+
+    if (PagedActive() && !horizontal && !(keys & MK_SHIFT)) {
+        // Shift+wheel and WM_MOUSEHWHEEL stay horizontal below: horizontal
+        // scrolling never flips pages (universal viewer behavior).
+        const float pxPerDetent = scrollLines == WHEEL_PAGESCROLL
+                                      ? static_cast<float>(vp.cy)
+                                      : static_cast<float>(scrollLines) * DipToPx(32.0f);
+        PagedWheelY(delta, pxPerDetent);
+        return;
+    }
+
     float amount;
     if (scrollLines == WHEEL_PAGESCROLL)
         amount = static_cast<float>(delta) / WHEEL_DELTA * static_cast<float>(vp.cy);
@@ -1326,37 +1575,71 @@ void PaneWindow::OnMouseWheel(WPARAM wParam, LPARAM lParam, bool horizontal) {
 }
 
 bool PaneWindow::OnKeyDown(WPARAM key) {
+    const bool ctrl = GetKeyState(VK_CONTROL) < 0;
+    // Ctrl+4 toggles the GLOBAL scroll mode, so it must work even when the
+    // focused pane has no document (the state gate below would eat it).
+    if (key == '4' && ctrl && m_onToggleScrollMode) {
+        m_onToggleScrollMode();
+        return true;
+    }
     if (m_state != State::Open)
         return false;
-    const bool ctrl = GetKeyState(VK_CONTROL) < 0;
     const SIZE vp = ViewportPx();
     const float line = DipToPx(48.0f);
     const POINT center{vp.cx / 2, vp.cy / 2};
+    // Paged LEFT/RIGHT: horizontal-first. With horizontal overflow they only
+    // scroll (never flip, not even at the horizontal edge); without it they
+    // always flip. The couple-of-pixels tolerance covers fit-zoom rounding,
+    // which can leave TotalWidth marginally past the client width and would
+    // otherwise demand a pointless 2 px scroll before every FitWidth flip.
+    const bool pagedFlipLR =
+        PagedActive() &&
+        m_layout.TotalWidth() <= static_cast<float>(vp.cx) + DipToPx(2.0f);
 
     switch (key) {
     case VK_UP:
-        ScrollBy(0, -line);
+        if (PagedActive())
+            PagedStepY(-line);
+        else
+            ScrollBy(0, -line);
         return true;
     case VK_DOWN:
-        ScrollBy(0, line);
+        if (PagedActive())
+            PagedStepY(line);
+        else
+            ScrollBy(0, line);
         return true;
     case VK_LEFT:
-        ScrollBy(-line, 0);
+        if (pagedFlipLR)
+            PagedFlip(-1);
+        else
+            ScrollBy(-line, 0);
         return true;
     case VK_RIGHT:
-        ScrollBy(line, 0);
+        if (pagedFlipLR)
+            PagedFlip(1);
+        else
+            ScrollBy(line, 0);
         return true;
     case VK_PRIOR:
-        ScrollBy(0, -static_cast<float>(vp.cy) * 0.9f);
+        if (PagedActive())
+            PagedStepY(-static_cast<float>(vp.cy) * 0.9f);
+        else
+            ScrollBy(0, -static_cast<float>(vp.cy) * 0.9f);
         return true;
     case VK_NEXT:
-        ScrollBy(0, static_cast<float>(vp.cy) * 0.9f);
+        if (PagedActive())
+            PagedStepY(static_cast<float>(vp.cy) * 0.9f);
+        else
+            ScrollBy(0, static_cast<float>(vp.cy) * 0.9f);
         return true;
     case VK_HOME:
+        AdoptPage(0); // no-op in continuous
         ScrollTo(m_scrollX, 0);
         return true;
     case VK_END:
-        ScrollTo(m_scrollX, m_layout.TotalHeight());
+        AdoptPage(m_layout.PageCount() - 1);
+        ScrollTo(m_scrollX, m_layout.TotalHeight()); // overshoot; the clamp lands it
         return true;
     case VK_OEM_PLUS:
     case VK_ADD:
@@ -1393,9 +1676,15 @@ bool PaneWindow::OnKeyDown(WPARAM key) {
             return true;
         }
         break;
-    case VK_SPACE:
-        ScrollBy(0, (GetKeyState(VK_SHIFT) < 0 ? -0.9f : 0.9f) * static_cast<float>(vp.cy));
+    case VK_SPACE: {
+        const float dy =
+            (GetKeyState(VK_SHIFT) < 0 ? -0.9f : 0.9f) * static_cast<float>(vp.cy);
+        if (PagedActive())
+            PagedStepY(dy);
+        else
+            ScrollBy(0, dy);
         return true;
+    }
     case 'C':
         if (ctrl && m_hasSelection) {
             CopySelection();
@@ -1506,6 +1795,7 @@ void PaneWindow::NotifySearchStatus() {
 void PaneWindow::ScrollToMatch(const Document::SearchMatch& match) {
     if (match.rects.empty() || match.pageIndex < 0 || match.pageIndex >= m_layout.PageCount())
         return;
+    AdoptPage(match.pageIndex); // paged: jumps adopt their target page
     const Document::RectPt& r = match.rects.front();
     const D2D1_RECT_F pr = m_layout.PageRect(match.pageIndex);
     const float scale = DesiredScale();
@@ -1568,6 +1858,7 @@ void PaneWindow::FlashSyncTarget(int pageIndex, std::vector<Document::RectPt> re
     const SIZE vp = ViewportPx();
     const float cx = pr.left + (u.x0 + u.x1) / 2.0f * scale;
     const float cy = pr.top + (u.y0 + u.y1) / 2.0f * scale;
+    AdoptPage(pageIndex); // paged: jumps adopt their target page
     ScrollTo(cx - static_cast<float>(vp.cx) / 2.0f, cy - static_cast<float>(vp.cy) / 2.0f);
     m_syncMark.pageIndex = pageIndex;
     m_syncMark.rects = std::move(rects);
@@ -1579,8 +1870,14 @@ std::optional<PageLayout::PagePoint> PaneWindow::PagePointAt(POINT client) const
     if (m_state != State::Open || m_layout.Empty())
         return std::nullopt;
     const D2D1_POINT_2F origin = ContentOrigin();
-    return m_layout.HitTest(static_cast<float>(client.x) - origin.x,
-                            static_cast<float>(client.y) - origin.y);
+    const auto pp = m_layout.HitTest(static_cast<float>(client.x) - origin.x,
+                                     static_cast<float>(client.y) - origin.y);
+    // Paged: neighbors exist in layout space but are not drawn; hovering or
+    // clicking where they would be (a centered short page leaves reachable
+    // strips) must not resolve to their links/text/SyncTeX positions.
+    if (pp && PagedActive() && pp->page != m_currentPage)
+        return std::nullopt;
+    return pp;
 }
 
 std::optional<PaneWindow::CaretPos> PaneWindow::CaretAt(POINT client, bool clampToNearest) {
@@ -1593,12 +1890,17 @@ std::optional<PaneWindow::CaretPos> PaneWindow::CaretAt(POINT client, bool clamp
     int page = 0;
     float px = 0;
     float py = 0;
-    if (const auto pp = m_layout.HitTest(cx, cy)) {
+    auto pp = m_layout.HitTest(cx, cy);
+    if (pp && PagedActive() && pp->page != m_currentPage)
+        pp.reset(); // undrawn neighbor: treat as a miss, never select into it
+    if (pp) {
         page = pp->page;
         px = pp->x;
         py = pp->y;
     } else if (clampToNearest) {
-        page = std::min(m_layout.FirstVisible(cy), m_layout.PageCount() - 1);
+        page = PagedActive()
+                   ? m_currentPage // pin to the only visible page
+                   : std::min(m_layout.FirstVisible(cy), m_layout.PageCount() - 1);
         const D2D1_RECT_F rect = m_layout.PageRect(page);
         const float scale = DesiredScale();
         px = (std::clamp(cx, rect.left, rect.right) - rect.left) / scale;
@@ -1689,6 +1991,10 @@ const Document::LinkInfo* PaneWindow::LinkAt(int page, float px, float py) const
 
 void PaneWindow::ActivateLink(const Document::LinkInfo& link) {
     if (link.targetPage >= 0 && link.targetPage < m_layout.PageCount()) {
+        // Adopt only inside the validity guard: external links carry
+        // targetPage == -1 and adopting that (clamped to 0) would teleport
+        // the paged view to page 0 on every URL click.
+        AdoptPage(link.targetPage);
         const D2D1_RECT_F pr = m_layout.PageRect(link.targetPage);
         ScrollTo(m_scrollX, pr.top + link.targetY * DesiredScale() - DipToPx(8.0f));
     } else if (!link.uri.empty()) {
@@ -1697,6 +2003,11 @@ void PaneWindow::ActivateLink(const Document::LinkInfo& link) {
 }
 
 void PaneWindow::ClearSelection() {
+    // A document swap mid-drag (Ctrl+W, auto-reload) must not leave the mouse
+    // captured: WM_LBUTTONUP only calls ReleaseCapture while m_selecting is
+    // still true, so a latched capture would eat every click in the app.
+    if (m_selecting && GetCapture() == m_hwnd)
+        ReleaseCapture();
     m_selecting = false;
     m_hasSelection = false;
 }

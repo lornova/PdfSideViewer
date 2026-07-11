@@ -31,6 +31,7 @@ struct AppSettings {
     float splitRatio = 0.5f;
     bool scrollSync = true; // sync is the product: both locks default on
     bool zoomSync = true;
+    int scrollMode = 0; // PaneWindow::ScrollMode (0 continuous, 1 paged); global like sync
     UINT dpi = 96; // DPI the scroll offsets were saved at
     bool toolbar = true;
     bool statusbar = true;
