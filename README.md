@@ -12,6 +12,10 @@ cross-platform toolkit: a single small executable that starts instantly.
 
 - Two independent panes, each a full PDF viewer: continuous layout, tiled rendering crisp up
   to 800% zoom, fit-width / fit-page modes, per-monitor DPI awareness.
+- **Page-by-page mode** (Ctrl+4): the view holds one page at a time. When the whole page fits,
+  every key press or wheel notch flips a page; when zoomed in, input scrolls to the page edge
+  first and only a further input flips (backward flips land at the bottom of the previous
+  page, so reading upward stays continuous). Synced panes flip together.
 - **Synchronized scrolling** (F7) with a delta anchor: align any page of one document with any
   page of the other and the offset is preserved; hold **Alt** to adjust one pane while keeping
   the lock. Optional **zoom sync** (Ctrl+F7).
@@ -25,14 +29,16 @@ cross-platform toolkit: a single small executable that starts instantly.
   (see below).
 - Menu bar, toolbar and status bar (page / zoom per pane, sync state), full screen
   (F11 / Alt+Enter), recent files and recent left+right pairs, English/Italian UI.
-- Drag & drop (drop two files to fill both panes), command line
-  (`PdfSideViewer.exe left.pdf right.pdf`), session restore (documents, positions, window).
+- Drag & drop (drop two files to fill both panes), double-click an empty pane to open a file
+  there, close a document with Ctrl+W, command line (`PdfSideViewer.exe left.pdf right.pdf`),
+  session restore (documents, positions, window).
 
 ## Keyboard
 
 | Key | Action |
 |---|---|
 | Ctrl+O / Ctrl+Shift+O | Open document in the left / right pane |
+| Ctrl+W | Close the focused pane's document |
 | Tab | Switch pane |
 | F7 / Ctrl+F7 | Toggle scroll sync / zoom sync |
 | Alt + scroll | Adjust one pane while synced (re-anchors) |
@@ -42,6 +48,7 @@ cross-platform toolkit: a single small executable that starts instantly.
 | Ctrl+wheel, Ctrl +/− | Zoom (anchored at the cursor) |
 | Ctrl+0 / Ctrl+1 | 100% zoom |
 | Ctrl+2 / Ctrl+3 | Fit width / fit page |
+| Ctrl+4 | Toggle continuous / page-by-page scrolling |
 | F11 / Alt+Enter | Full screen (Esc exits) |
 | Ctrl+click | SyncTeX inverse search (open the .tex source at that spot) |
 | Space, Shift+Space, PgUp/PgDn, Home/End, arrows | Navigate |
