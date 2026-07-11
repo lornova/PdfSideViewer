@@ -419,6 +419,41 @@ void Document::WorkerOpen(fz_context* ctx, const Job& job) {
         fz_drop_outline(ctx, outline);
     }
 
+    // Page labels (/PageLabels): optional; a damaged number tree must not
+    // fail the open, hence the separate fz frame. All C++ allocation stays
+    // outside the frame (setjmp rule); inside there are only C byte writes.
+    // pdf_page_label falls back to the decimal ordinal when the tree is
+    // absent, so "no labels" is detected by comparison afterwards.
+    constexpr int kLabelCap = 64;
+    std::vector<char> rawLabels(static_cast<size_t>(pageCount) * kLabelCap, '\0');
+    bool labelsOk = false;
+    fz_var(labelsOk);
+    fz_try(ctx) {
+        pdf_document* pdoc = pdf_specifics(ctx, doc); // borrowed; null = not a PDF
+        if (pdoc) {
+            for (int i = 0; i < pageCount; ++i)
+                pdf_page_label(ctx, pdoc, i,
+                               rawLabels.data() + static_cast<size_t>(i) * kLabelCap,
+                               kLabelCap);
+            labelsOk = true;
+        }
+    }
+    fz_catch(ctx) {
+        labelsOk = false;
+    }
+    if (labelsOk) {
+        result->pageLabels.reserve(static_cast<size_t>(pageCount));
+        bool anyCustom = false;
+        for (int i = 0; i < pageCount; ++i) {
+            std::wstring label = FromUtf8(rawLabels.data() + static_cast<size_t>(i) * kLabelCap);
+            if (label != std::to_wstring(i + 1))
+                anyCustom = true;
+            result->pageLabels.push_back(std::move(label));
+        }
+        if (!anyCustom)
+            result->pageLabels.clear(); // plain ordinals: nothing worth carrying
+    }
+
     m_doc = doc;
     m_pageCount = pageCount;
     result->ok = true;

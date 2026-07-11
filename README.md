@@ -27,8 +27,29 @@ executable that starts instantly.
 - **SyncTeX** two-way sync with your TeX editor: Ctrl+click a spot in the PDF to jump to the
   source line (inverse search), and `-forward-search` jumps the viewer to a source line
   (see below).
-- Menu bar, toolbar and status bar (page / zoom per pane, sync state), full screen
-  (F11 / Alt+Enter), recent files and recent left+right pairs, English/Italian UI.
+- **PDF page labels**: the status bar, the go-to box and the scrollbar tooltip show the
+  document's own page labels when they differ from the ordinal, e.g. `ix (9/314)` for
+  roman-numbered front matter.
+- **Go to page** (Ctrl+G) by number or by label ("ix", "A-3" - labels win on ambiguity), an
+  editable page box in the toolbar row, and a page tooltip while dragging the scrollbar.
+- Compact chrome: menu bar and toolbar share ONE row in a rebar (with a chevron overflow when
+  narrow), plus the status bar (left pane info left, right pane info right, sync state
+  centered), full screen (F11 / Alt+Enter), a width-adjustable outline sidebar (drag the
+  divider; double-click fits it to the widest bookmark, removing the horizontal scroll),
+  recent files and recent left+right pairs, English/Italian UI.
+- **Movable toolbars**, Internet Explorer style: untick "Lock the Toolbars" (View menu, or
+  right-click the bar) and grippers appear on the menu, toolbar and page-box bands: drag to
+  reorder or resize them, or wrap them onto extra rows. The arrangement and the lock state
+  are remembered.
+- **Options dialog**: reopen the last session or start empty, defaults for new documents
+  (scroll mode, zoom, sync locks), wheel-scroll lines override, the SyncTeX inverse-search
+  command, and the Explorer context-menu integration.
+- **Explorer context menu** (optional, off by default): "Open left/right in PdfSideViewer" on
+  .pdf files, registered per-user under `SystemFileAssociations` so it can NEVER become the
+  default PDF handler. "Open right" reuses the running window. Moving the exe requires
+  re-registering (re-tick the Options checkbox, or run `-register-shell`/`-unregister-shell`
+  from a script).
+- **Swap panes** (F8) exchanges the two documents including their view states.
 - Drag & drop (drop two files to fill both panes), double-click an empty pane to open a file
   there, close a document with Ctrl+W, command line (`PdfSideViewer.exe left.pdf right.pdf`),
   session restore (documents, positions, window).
@@ -49,6 +70,8 @@ executable that starts instantly.
 | Ctrl+0 / Ctrl+1 | 100% zoom |
 | Ctrl+2 / Ctrl+3 | Fit width / fit page |
 | Ctrl+4 | Toggle continuous / page-by-page scrolling |
+| Ctrl+G | Go to page (number or label) |
+| F8 | Swap the two panes |
 | F11 / Alt+Enter | Full screen (Esc exits) |
 | Ctrl+click | SyncTeX inverse search (open the .tex source at that spot) |
 | Space, Shift+Space, PgUp/PgDn, Home/End, arrows | Navigate |

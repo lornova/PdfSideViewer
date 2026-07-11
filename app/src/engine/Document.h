@@ -42,6 +42,10 @@ public:
         std::wstring error;
         std::vector<D2D1_SIZE_F> pageSizesPt;  // page sizes in PDF points (1/72")
         std::vector<OutlineItem> outline;      // flattened bookmark tree (may be empty)
+        // /PageLabels labels, index-aligned with pageSizesPt. EMPTY when the
+        // document has none worth showing: not a PDF, damaged tree, or every
+        // label equals its ordinal (the engine falls back to "%d").
+        std::vector<std::wstring> pageLabels;
     };
     struct RenderResult {
         int pageIndex = 0;

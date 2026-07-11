@@ -2,6 +2,7 @@
 
 #include "util/Strings.h"
 
+#include <commctrl.h> // scrollbar-drag tracking tooltip
 #include <shellapi.h> // drag & drop
 
 namespace {
@@ -65,7 +66,8 @@ void PaneWindow::ResetDocumentState() {
     m_previews.clear();
     m_tiles.clear();
     m_outline.clear();
-    m_zoomMode = ZoomMode::FitPage; // friendly default for a fresh document
+    m_pageLabels.clear();
+    m_zoomMode = m_defaultZoomMode; // configurable default for a fresh document
     m_textPages.clear();
     m_textPending.clear();
     m_links.clear();
@@ -88,6 +90,7 @@ void PaneWindow::ResetDocumentState() {
     // here too, so the index lazily re-parses on the first query afterwards.
     m_synctex.Reset();
     m_syncMark = {};
+    HideScrollTip();
     KillTimer(m_hwnd, kSyncFlashTimer);
     KillTimer(m_hwnd, kReloadTimer);
     m_reloadRetries = 0;
@@ -207,6 +210,41 @@ void PaneWindow::GotoOutlineItem(int index) {
     ScrollTo(m_scrollX, pr.top + item.targetY * DesiredScale() - DipToPx(8.0f));
 }
 
+const std::wstring& PaneWindow::PageLabel(int pageIndex) const {
+    static const std::wstring kEmpty;
+    if (pageIndex < 0 || pageIndex >= static_cast<int>(m_pageLabels.size()))
+        return kEmpty;
+    return m_pageLabels[static_cast<size_t>(pageIndex)];
+}
+
+std::wstring PaneWindow::FormatPageText(int pageIndex) const {
+    const int count = m_layout.PageCount();
+    if (count <= 0)
+        return {};
+    const int n = std::clamp(pageIndex, 0, count - 1) + 1;
+    const std::wstring& label = PageLabel(n - 1);
+    if (label.empty() || label == std::to_wstring(n))
+        return std::to_wstring(n) + L" / " + std::to_wstring(count);
+    return label + L" (" + std::to_wstring(n) + L"/" + std::to_wstring(count) + L")";
+}
+
+int PaneWindow::FindPageByLabel(const std::wstring& text) const {
+    for (size_t i = 0; i < m_pageLabels.size(); ++i) {
+        if (lstrcmpiW(m_pageLabels[i].c_str(), text.c_str()) == 0)
+            return static_cast<int>(i);
+    }
+    return -1;
+}
+
+void PaneWindow::GotoPage(int pageIndex) {
+    if (m_state != State::Open || m_layout.Empty())
+        return;
+    pageIndex = std::clamp(pageIndex, 0, m_layout.PageCount() - 1);
+    AdoptPage(pageIndex); // paged: jumps adopt their target page
+    const D2D1_RECT_F pr = m_layout.PageRect(pageIndex);
+    ScrollTo(m_scrollX, pr.top - DipToPx(8.0f)); // top-aligned like GotoOutlineItem
+}
+
 void PaneWindow::SetDarkMode(bool dark) {
     if (m_dark == dark)
         return;
@@ -219,6 +257,10 @@ void PaneWindow::OnDpiChanged(UINT dpi) {
         return;
     const float ratio = static_cast<float>(dpi) / static_cast<float>(m_dpi);
     m_dpi = dpi;
+    if (m_scrollTip) { // metrics/font change: recreated lazily at the new DPI
+        DestroyWindow(m_scrollTip);
+        m_scrollTip = nullptr;
+    }
     if (m_hasRestoreView) { // pending session-restore offsets are device px too
         m_restoreScrollX *= ratio;
         m_restoreScrollY *= ratio;
@@ -1003,6 +1045,7 @@ void PaneWindow::OnDocOpened(std::unique_ptr<Document::OpenResult> result) {
         m_state = State::Open;
         m_layout.SetPages(std::move(result->pageSizesPt));
         m_outline = std::move(result->outline);
+        m_pageLabels = std::move(result->pageLabels);
         if (m_hasRestoreView) {
             m_hasRestoreView = false;
             m_zoomMode = m_restoreZoomMode;
@@ -1444,6 +1487,65 @@ void PaneWindow::UpdateScrollBars() {
     }
 }
 
+void PaneWindow::EnsureScrollTip() {
+    if (m_scrollTip)
+        return;
+    m_scrollTip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                                  WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0, m_hwnd,
+                                  nullptr, nullptr, nullptr);
+    if (!m_scrollTip)
+        return;
+    TOOLINFOW ti{};
+    ti.cbSize = sizeof(ti);
+    ti.uFlags = TTF_TRACK | TTF_ABSOLUTE;
+    ti.hwnd = m_hwnd;
+    ti.uId = 1;
+    ti.lpszText = const_cast<wchar_t*>(L"");
+    SendMessageW(m_scrollTip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+}
+
+void PaneWindow::UpdateScrollTip(float trackY) {
+    if (m_state != State::Open || m_layout.Empty())
+        return;
+    EnsureScrollTip();
+    if (!m_scrollTip)
+        return;
+    // Page under the would-be viewport center (SyncPosition's rule).
+    const SIZE vp = ViewportPx();
+    const int page =
+        std::clamp(m_layout.FirstVisible(trackY + static_cast<float>(vp.cy) / 2.0f), 0,
+                   m_layout.PageCount() - 1);
+    const std::wstring text = FormatPageText(page);
+    TOOLINFOW ti{};
+    ti.cbSize = sizeof(ti);
+    ti.hwnd = m_hwnd;
+    ti.uId = 1;
+    ti.lpszText = const_cast<wchar_t*>(text.c_str());
+    SendMessageW(m_scrollTip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
+    // Left of the vertical scrollbar, at the cursor's height.
+    POINT cur{};
+    GetCursorPos(&cur);
+    RECT wr{};
+    GetWindowRect(m_hwnd, &wr);
+    const int sbW = GetSystemMetricsForDpi(SM_CXVSCROLL, m_dpi);
+    const LRESULT bubble =
+        SendMessageW(m_scrollTip, TTM_GETBUBBLESIZE, 0, reinterpret_cast<LPARAM>(&ti));
+    const int x = wr.right - sbW - LOWORD(bubble) - MulDiv(4, static_cast<int>(m_dpi), 96);
+    const int y = cur.y - HIWORD(bubble) / 2;
+    SendMessageW(m_scrollTip, TTM_TRACKPOSITION, 0, MAKELPARAM(x, y));
+    SendMessageW(m_scrollTip, TTM_TRACKACTIVATE, TRUE, reinterpret_cast<LPARAM>(&ti));
+}
+
+void PaneWindow::HideScrollTip() {
+    if (!m_scrollTip)
+        return;
+    TOOLINFOW ti{};
+    ti.cbSize = sizeof(ti);
+    ti.hwnd = m_hwnd;
+    ti.uId = 1;
+    SendMessageW(m_scrollTip, TTM_TRACKACTIVATE, FALSE, reinterpret_cast<LPARAM>(&ti));
+}
+
 void PaneWindow::OnScrollMessage(UINT msg, WPARAM wParam) {
     const bool vertical = msg == WM_VSCROLL;
     const SIZE vp = ViewportPx();
@@ -1472,6 +1574,9 @@ void PaneWindow::OnScrollMessage(UINT msg, WPARAM wParam) {
             AdoptPage(m_layout.PageCount() - 1);
             ScrollTo(m_scrollX, m_layout.TotalHeight()); // overshoot; the band clamp lands it
             return;
+        case SB_ENDSCROLL:
+            HideScrollTip();
+            return;
         case SB_THUMBTRACK:
         case SB_THUMBPOSITION: {
             SCROLLINFO si{};
@@ -1479,6 +1584,10 @@ void PaneWindow::OnScrollMessage(UINT msg, WPARAM wParam) {
             si.fMask = SIF_TRACKPOS; // 32-bit position (HIWORD(wParam) truncates)
             GetScrollInfo(m_hwnd, SB_VERT, &si);
             const float track = static_cast<float>(si.nTrackPos);
+            if (LOWORD(wParam) == SB_THUMBTRACK)
+                UpdateScrollTip(track);
+            else
+                HideScrollTip();
             // Document-wide thumb: dragging adopts the page under the viewport
             // center (SyncPosition's rule: page containing trackPos would bias
             // one page early on the way down), then clamps into its band.
@@ -1519,8 +1628,15 @@ void PaneWindow::OnScrollMessage(UINT msg, WPARAM wParam) {
         si.fMask = SIF_TRACKPOS; // 32-bit position (HIWORD(wParam) truncates)
         GetScrollInfo(m_hwnd, vertical ? SB_VERT : SB_HORZ, &si);
         pos = static_cast<float>(si.nTrackPos);
+        if (vertical && LOWORD(wParam) == SB_THUMBTRACK)
+            UpdateScrollTip(pos);
+        else
+            HideScrollTip();
         break;
     }
+    case SB_ENDSCROLL:
+        HideScrollTip();
+        return;
     default:
         return;
     }
@@ -1547,6 +1663,8 @@ void PaneWindow::OnMouseWheel(WPARAM wParam, LPARAM lParam, bool horizontal) {
 
     UINT scrollLines = 3;
     SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &scrollLines, 0);
+    if (m_wheelLinesOverride > 0)
+        scrollLines = static_cast<UINT>(m_wheelLinesOverride); // Options override
     const SIZE vp = ViewportPx();
 
     if (PagedActive() && !horizontal && !(keys & MK_SHIFT)) {

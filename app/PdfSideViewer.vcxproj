@@ -88,10 +88,13 @@
     <ClCompile Include="src\engine\Document.cpp" />
     <ClCompile Include="src\engine\MupdfLib.cpp" />
     <ClCompile Include="src\engine\SyncTex.cpp" />
+    <ClCompile Include="src\util\DialogTemplate.cpp" />
     <ClCompile Include="src\util\FileWatcher.cpp" />
     <ClCompile Include="src\util\GlyphIcons.cpp" />
     <ClCompile Include="src\util\Settings.cpp" />
+    <ClCompile Include="src\util\ShellIntegration.cpp" />
     <ClCompile Include="src\util\Strings.cpp" />
+    <ClCompile Include="src\view\MenuBand.cpp" />
     <ClCompile Include="src\view\PageLayout.cpp" />
     <ClCompile Include="src\view\SyncController.cpp" />
   </ItemGroup>
@@ -104,10 +107,13 @@
     <ClInclude Include="src\engine\Mupdf.h" />
     <ClInclude Include="src\engine\MupdfLib.h" />
     <ClInclude Include="src\engine\SyncTex.h" />
+    <ClInclude Include="src\util\DialogTemplate.h" />
     <ClInclude Include="src\util\FileWatcher.h" />
     <ClInclude Include="src\util\GlyphIcons.h" />
     <ClInclude Include="src\util\Settings.h" />
+    <ClInclude Include="src\util\ShellIntegration.h" />
     <ClInclude Include="src\util\Strings.h" />
+    <ClInclude Include="src\view\MenuBand.h" />
     <ClInclude Include="src\view\PageLayout.h" />
     <ClInclude Include="src\view\SyncController.h" />
     <ClInclude Include="res\resource.h" />

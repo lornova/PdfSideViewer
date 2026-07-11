@@ -36,6 +36,18 @@ struct AppSettings {
     bool toolbar = true;
     bool statusbar = true;
     bool outline = false;
+    bool restoreSession = true; // startup: reopen the last session vs start empty
+    int wheelLines = 0;         // continuous-scroll wheel lines per notch; 0 = system value
+    int outlineWidth = 260;     // outline sidebar width, DIP
+    bool rebarLocked = true;    // IE-style "lock the toolbars": no grippers, no dragging
+    // Rebar band layout in visual order, "id,cx,break;..." per band (empty =
+    // default). Parsed leniently: anything malformed keeps the default row.
+    std::wstring rebarBands;
+    // Defaults for fresh documents and non-restored launches ([defaults]).
+    int defScrollMode = 0; // PaneWindow::ScrollMode (0 continuous, 1 paged)
+    int defZoomMode = 2;   // PaneWindow::ZoomMode (0 manual, 1 fit width, 2 fit page)
+    bool defScrollSync = true;
+    bool defZoomSync = true;
     std::wstring language = L"en"; // "en" / "it"; anything else falls back to en
     // SyncTeX inverse-search launch template: %f = absolute .tex path,
     // %l = 1-based line. A "://" marks a URI (ShellExecute), anything else is

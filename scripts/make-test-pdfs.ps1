@@ -4,7 +4,8 @@ param([string]$OutDir = "D:\Progetti\PdfSideViewer\testdata")
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
 function New-TestPdf {
-    param([string]$Path, [array]$Pages, [switch]$WithLinks) # Pages: @{W=..; H=..; Label=..}
+    param([string]$Path, [array]$Pages, [switch]$WithLinks, [switch]$WithPageLabels)
+    # Pages: @{W=..; H=..; Label=..}
 
     $n = $Pages.Count
     $objs = @()
@@ -12,7 +13,11 @@ function New-TestPdf {
     $kids = (0..($n-1) | ForEach-Object { "$(3 + 2*$_) 0 R" }) -join ' '
     $fontObj = 3 + 2*$n
     $outlinesRef = if ($WithLinks) { " /Outlines $($fontObj + 3) 0 R" } else { '' }
-    $objs += "1 0 obj`n<< /Type /Catalog /Pages 2 0 R$outlinesRef >>`nendobj`n"
+    # The labels object is appended LAST: object numbers must stay sequential
+    # for the xref builder below (objs[i] is object i+1).
+    $labelsNum = if ($WithLinks) { $fontObj + 7 } else { $fontObj + 1 }
+    $labelsRef = if ($WithPageLabels) { " /PageLabels $labelsNum 0 R" } else { '' }
+    $objs += "1 0 obj`n<< /Type /Catalog /Pages 2 0 R$outlinesRef$labelsRef >>`nendobj`n"
     $objs += "2 0 obj`n<< /Type /Pages /Kids [$kids] /Count $n >>`nendobj`n"
     for ($i = 0; $i -lt $n; $i++) {
         $p = $Pages[$i]
@@ -47,6 +52,11 @@ function New-TestPdf {
         $objs += "$($o + 2) 0 obj`n<< /Title (Capitolo 2) /Parent $o 0 R /Prev $($o + 1) 0 R /First $($o + 3) 0 R /Last $($o + 3) 0 R /Count 1 /Dest [5 0 R /Fit] >>`nendobj`n"
         $objs += "$($o + 3) 0 obj`n<< /Title (Sezione 2.1 - pagina 3) /Parent $($o + 2) 0 R /Dest [7 0 R /Fit] >>`nendobj`n"
     }
+    if ($WithPageLabels) {
+        # Front matter in lowercase roman (i, ii), then decimal restarting at
+        # 1: pages 3..4 get labels "1", "2" that differ from their ordinals.
+        $objs += "$labelsNum 0 obj`n<< /Nums [0 << /S /r >> 2 << /S /D >>] >>`nendobj`n"
+    }
 
     $body = "%PDF-1.4`n"
     $offsets = @()
@@ -64,7 +74,7 @@ function New-TestPdf {
     Write-Host "written $Path ($([System.Text.Encoding]::ASCII.GetByteCount($body)) bytes)"
 }
 
-New-TestPdf -Path (Join-Path $OutDir 'test-a.pdf') -WithLinks -Pages @(
+New-TestPdf -Path (Join-Path $OutDir 'test-a.pdf') -WithLinks -WithPageLabels -Pages @(
     @{W=595; H=842; Label='A - Pagina 1 (A4)'},
     @{W=842; H=595; Label='A - Pagina 2 (A4 orizz.)'},
     @{W=420; H=595; Label='A - Pagina 3 (A5)'},

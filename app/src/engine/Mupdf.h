@@ -6,5 +6,6 @@
 #pragma warning(disable : 4100 4611)
 extern "C" {
 #include <mupdf/fitz.h>
+#include <mupdf/pdf.h> // pdf_specifics/pdf_page_label (page labels)
 }
 #pragma warning(pop)

@@ -55,13 +55,15 @@ IDC_* ids, WM_VSCROLL, TVM_* to the outline tree), then assert via GetScrollInfo
 counter text, clipboard, and PrintWindow captures. Test scripts MUST call
 `SetThreadDpiAwarenessContext(-4)` first: this dev machine's monitor is 175% (168 DPI) and
 PowerShell is DPI-unaware, so un-aware coordinates/captures are virtualized at 96 DPI (a past
-source of phantom "bugs"). Run one instance at a time — and CHECK first: a foreign (user)
-instance both receives FindWindow-posted commands and rewrites settings.ini at close, which has
-already produced phantom failures; abort the test run if `Get-Process PdfSideViewer` is non-empty
-and verify that a settings.ini deletion actually happened — with a RETRY loop: a scanner
-briefly holding a handle turns the delete into delete-pending and the file stays visible for a
-moment. The exe must always exit with code 0 after CloseMainWindow. Restore the user's
-clipboard if a test touches it.
+source of phantom "bugs"). Tests MUST set `PSV_SETTINGS_DIR` to a scratch directory before
+launching the exe: it overrides where settings.ini lives, so the user's real
+%APPDATA%\PdfSideViewer\settings.ini is never deleted or rewritten (suites that touched the
+real file have wiped the user's MRU lists whenever a user launch overlapped a test window).
+Deletions of the TEST settings file still need a RETRY loop: a scanner briefly holding a
+handle turns the delete into delete-pending and the file stays visible for a moment. Run one
+instance at a time — and CHECK first: a foreign (user) instance receives FindWindow-posted
+commands; abort the test run if `Get-Process PdfSideViewer` is non-empty. The exe must always
+exit with code 0 after CloseMainWindow. Restore the user's clipboard if a test touches it.
 
 ## Architecture
 
@@ -114,8 +116,26 @@ SyncController, the outline, the status bar and the menu/toolbar checked state
   the sibling just rebuilt; recovery retries are backoff-limited.
 - fz_try is setjmp-based: `fz_var` every local mutated inside and read after; keep destructible
   C++ objects out of fz frames; drop fz objects in `fz_always`.
-- No `TBSTYLE_FLAT` on the toolbar: flat = transparent background delegated to a parent that
-  paints nothing under children, i.e. a black band. The v6 theme already looks modern.
+- `TBSTYLE_FLAT` only INSIDE a rebar band (there `FLAT|TRANSPARENT` is the required pattern:
+  the rebar paints the band background); never on a toolbar whose parent paints nothing under
+  children, where flat = a black band.
+- The menu bar is a MenuBand toolbar in rebar band 0; the `HMENU` is built but NEVER attached
+  to the window (fullscreen just hides the rebar). MainWindow owns the HMENU and every
+  WM_COMMAND; MenuBand owns tracking (WH_MSGFILTER hook scoped to the track loop,
+  EndMenu+retrack for hover/arrow switches; the Alt+scroll SC_KEYMENU swallow stays FIRST).
+  Tracking never starts inside TBN_DROPDOWN (posted kMsgTrack: comctl32 paints the dropped
+  button hot while the notify is in flight); the hook hit-tests `MSG::pt`, never
+  `GetMessagePos()` (stale in menu loops); the subclass swallows WM_MOUSEMOVE while tracking
+  (synthetic reposts would re-light the previous button).
+- Rebar bands are addressed by RBBIM_ID, never by index (unlocked, the user reorders them).
+  comctl32 forces RBBS_FIXEDSIZE bands to the end of their row on EVERY layout: the page box
+  holds the bit only while row-last (ApplyPageBoxFixedSize); RBN_HEIGHTCHANGE re-runs Layout
+  behind the m_layingOut guard; the menu chevron popup must RemoveMenu its shared submenus
+  before DestroyMenu. USECHEVRON clips the CHILD under cxIdeal and band borders are exposed
+  by no API: the menu band cx is measured (UpdateRebarBandSizes), never ideal+constant.
+- Cross-process E2E: `SetWindowText`/`GetWindowText` on another process's control DO NOT
+  deliver WM_SETTEXT/WM_GETTEXT (SetWindowText even returns success touching only the caption
+  cache); test scripts must SEND `WM_SETTEXT` explicitly.
 
 ## Conventions
 
@@ -125,7 +145,11 @@ SyncController, the outline, the status bar and the menu/toolbar checked state
   tables; English is the default and what E2E tests assert against). Engine-level error strings
   (engine/Document.cpp) stay English: workers cache them in result structs.
 - `enum CommandId` in MainWindow.h is the single registry of WM_COMMAND/accelerator ids
-  (menu, toolbar and accelerators all reuse the same ids; 1017..1019 and 1023..1024 must stay
-  contiguous for CheckMenuRadioItem; 1030+/1040+ are the MRU ranges, kMruMaxEntries slots each,
-  dispatched as ranges in WM_COMMAND).
-- Session settings are versionless: add keys with safe defaults, never repurpose existing ones.
+  (menu, toolbar and accelerators all reuse the same ids; 1017..1019, 1023..1024 and
+  1025..1026 must stay contiguous for CheckMenuRadioItem; 1030+/1040+ are the MRU ranges,
+  kMruMaxEntries slots each, dispatched as ranges in WM_COMMAND). Control ids live in a
+  separate >= 2000 space (2001 page box, 2100+ Options dialog, 2201 goto dialog, 2300+ menu
+  band) so they can never collide with command dispatch.
+- Session settings are versionless: add keys with safe defaults, never repurpose existing
+  ones. `[defaults]` holds the new-document defaults (scroll mode, zoom mode, sync locks)
+  applied when session restore is off and to every fresh OpenDocument.

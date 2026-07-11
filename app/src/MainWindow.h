@@ -5,6 +5,7 @@
 #include "framework.h"
 #include "util/Settings.h"
 #include "util/Strings.h"
+#include "view/MenuBand.h"
 #include "view/SyncController.h"
 
 #include <commctrl.h> // HIMAGELIST
@@ -42,10 +43,17 @@ enum CommandId : WORD {
     IDC_SCROLL_CONTINUOUS = 1025,
     IDC_SCROLL_PAGED = 1026, // Ctrl+4 (pane OnKeyDown, like Ctrl+2/3; NOT an accelerator)
     IDC_CLOSE_DOC = 1027,    // Ctrl+W, closes the focused pane's document
+    IDC_GOTO_PAGE = 1028,    // Ctrl+G
+    IDC_SWAP_PANES = 1029,   // F8
     // MRU ranges: kMruMaxEntries slots each, dispatched as ranges (not single
     // cases) in the WM_COMMAND handler.
     IDC_MRU_FILE_FIRST = 1030,
     IDC_MRU_PAIR_FIRST = 1040,
+    IDC_OPTIONS = 1049,
+    IDC_LOCK_TOOLBARS = 1050, // IE-style rebar lock (menu + rebar context menu)
+    // Control ids live in a separate >= 2000 space so they can never collide
+    // with command dispatch: 2001 page box, 2100+ Options dialog, 2201 goto
+    // dialog, 2300+ the menu-band toolbar and its buttons (MenuBand.h).
 };
 
 // SyncTeX forward search request, exchanged between processes via
@@ -60,13 +68,18 @@ struct ForwardSearchRequest {
 };
 
 constexpr ULONG_PTR kCdForwardSearch = 0x50535646; // 'PSVF'
-constexpr ULONG_PTR kCdOpenDocument = 0x50535644;  // 'PSVD' (reserved: -reuse-instance)
+constexpr ULONG_PTR kCdOpenDocument = 0x50535644;  // 'PSVD' (-open-left/-open-right handoff)
 
 #pragma pack(push, 1)
 struct ForwardSearchBlob {
     uint32_t line;   // 1-based
     uint32_t texLen; // wchar_t count
     uint32_t pdfLen; // wchar_t count
+};
+// Explorer-verb handoff payload: blob followed by pathLen wchar_t, no NUL.
+struct OpenDocumentBlob {
+    uint32_t side;    // 0 = left pane, 1 = right
+    uint32_t pathLen; // wchar_t count
 };
 #pragma pack(pop)
 
@@ -97,12 +110,33 @@ private:
 
     void Layout();
     RECT SplitterRect() const;
+    RECT OutlineDividerRect() const;
     void SetSplitRatioFromX(int x);
+    void SetOutlineWidthFromX(int x);
+    void FitOutlineToContent();
     void OpenDocumentDialog(bool rightPane);
     void UpdateTheme();
     void UpdateTitle();
     PaneWindow* FocusedPane() const;
     HMENU BuildMenuBar();
+    void BuildRebar(HINSTANCE hinst);
+    void UpdateRebarBandSizes();
+    void SetRebarLocked(bool locked);
+    void ApplyPageBoxFixedSize();
+    void ApplyRebarLayout(const std::wstring& layout);
+    std::wstring SerializeRebarLayout() const;
+    void ShowRebarContextMenu(POINT screenPt);
+    void ShowChevronMenu(const NMREBARCHEVRON* nm);
+    static StrId CommandTipId(UINT id);
+    void UpdatePageBox();
+    bool GotoFromText(const std::wstring& text);
+    static LRESULT CALLBACK PageBoxProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                        UINT_PTR id, DWORD_PTR data);
+    void ShowGotoPageDialog();
+    static INT_PTR CALLBACK GotoDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam);
+    void ShowOptionsDialog();
+    static INT_PTR CALLBACK OptionsDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam);
+    BOOL HandleOpenDocumentCopyData(const COPYDATASTRUCT& cds);
     void RebuildMruMenus();
     void RecordMruFile(const std::wstring& path);
     void RecordMruPair(const std::wstring& left, const std::wstring& right);
@@ -116,6 +150,7 @@ private:
     void ToggleFullScreen();
     void SwitchLanguage(Lang lang);
     void ApplyScrollMode(PaneWindow::ScrollMode mode);
+    void SwapPanes();
     void RouteForwardSearch(ForwardSearchRequest req);
     void LaunchInverseSearch(const SyncTexIndex::InverseHit& hit);
     void ShowStatusMessage(StrId id);
@@ -142,13 +177,24 @@ private:
     HMENU m_mruPairsMenu = nullptr;
     std::vector<std::wstring> m_mruFiles; // most recent first
     std::vector<MruPair> m_mruPairs;      // most recent first
+    HWND m_rebar = nullptr; // hosts the menu band, the command toolbar, the page box
+    MenuBand m_menuBand;
     HWND m_toolbar = nullptr;
+    HWND m_pageBox = nullptr;             // editable current-page box (rebar band 2)
+    PaneWindow* m_activePane = nullptr;   // last pane that had focus (page box target;
+                                          // FocusedPane() falls back to left while the
+                                          // box itself owns the focus)
     HIMAGELIST m_toolbarIcons = nullptr;
     HWND m_status = nullptr;
     HBRUSH m_bgBrush = nullptr;
     UINT m_dpi = 96;
     bool m_toolbarVisible = true;
     bool m_statusVisible = true;
+    bool m_rebarLocked = true;        // IE-style toolbar lock (grippers + dragging)
+    std::wstring m_rebarBandsSaved;   // band layout loaded from the session, applied
+                                      // by BuildRebar after the default insert
+    bool m_layingOut = false;         // Layout's own rebar MoveWindow fires
+                                      // RBN_HEIGHTCHANGE; break the recursion
     bool m_fullscreen = false;
     // Global scroll mode (authoritative copy; the panes cache it).
     PaneWindow::ScrollMode m_scrollMode = PaneWindow::ScrollMode::Continuous;
@@ -163,7 +209,7 @@ private:
     // Vertical band left for the panes between the toolbar and the status bar.
     int m_contentTop = 0;
     int m_contentBottom = 0;
-    std::wstring m_statusText[5]; // last SB_SETTEXT per part: skip no-op repaints
+    std::wstring m_statusText[7]; // last SB_SETTEXT per part: skip no-op repaints
 
     // SyncTeX: inverse-search launch template and the forward request parked
     // until its document finishes opening (cold start, on-demand open, or a
@@ -172,7 +218,20 @@ private:
     std::optional<ForwardSearchRequest> m_parkedForward;
     float m_splitRatio = 0.5f;
     int m_splitterX = 0; // left edge of the splitter band, client px
-    bool m_draggingSplitter = false;
+    // Two draggable dividers share the mouse handlers: the pane splitter and
+    // the outline sidebar divider.
+    enum class DragTarget { None, PaneSplitter, OutlineDivider };
+    DragTarget m_drag = DragTarget::None;
+    int m_outlineWidthDip = 260; // persisted; the divider drag updates it
+    int m_sidebarPx = 0;         // outline width in device px, as laid out (0 = hidden)
+    bool m_restoreSession = true;
+    int m_wheelLines = 0; // continuous-scroll lines per wheel notch; 0 = system
+    struct Defaults {
+        PaneWindow::ScrollMode scrollMode = PaneWindow::ScrollMode::Continuous;
+        PaneWindow::ZoomMode zoomMode = PaneWindow::ZoomMode::FitPage;
+        bool scrollSync = true;
+        bool zoomSync = true;
+    } m_defaults;
     bool m_dark = false;
     bool m_destroying = false; // suppress focus forwarding during teardown
     bool m_startMaximized = false;

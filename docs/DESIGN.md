@@ -156,17 +156,41 @@ MainWindow (frame, menu bar, toolbar, status bar, accelerators, find bar, fullsc
  └── SearchController    per-pane search state, background whole-doc scan
 ```
 
-**UI chrome** (all programmatic, no dialog/menu resources): the menu bar is built with
-`CreateMenu`/`AppendMenuW` and attached at `CreateWindowExW` time; the toolbar is a comctl32
-`ToolbarWindow32` whose icons are Segoe MDL2 Assets glyphs rendered into a 32bpp imagelist
-(`util/GlyphIcons.*`, rebuilt on `WM_DPICHANGED`); the status bar shows page/total and zoom per
-pane plus the sync state, updated from the central `ViewEvent` handler with a per-part text cache.
-`MainWindow::Layout()` reserves the toolbar band on top and the status band at the bottom, then
-partitions the remaining strip among sidebar/panes/splitter. Every user-visible string goes
-through `util/Strings.*` (an X-list keyed by `StrId` with English and Italian tables; English is
-the default, the choice persists in settings and switches live by rebuilding the menu). Full
-screen (F11 / Alt+Enter, Esc exits) strips `WS_OVERLAPPEDWINDOW`, detaches the menu and hides the
-bars without touching their persisted visibility flags.
+**UI chrome** (all programmatic, no dialog/menu/rebar resources): everything above the panes
+lives in ONE `ReBarWindow32` row with three locked bands (no grippers, fixed order): band 0 is
+the MENU emulated as a text-only `TBSTYLE_FLAT|LIST|TRANSPARENT` toolbar (`view/MenuBand.*`,
+the documented "IE-style menu band" pattern — a native `HMENU` bar is non-client and cannot be
+a band child), band 1 the command toolbar (Segoe MDL2 glyph imagelist via `util/GlyphIcons.*`,
+`RBBS_USECHEVRON` overflow popup reusing the tooltip strings), band 2 an editable page box
+(Enter jumps, label-first like Ctrl+G). Bands carry `RBBIM_ID` and every access resolves the
+index through `RB_IDTOINDEX`: with the rebar UNLOCKED (IE-style "Lock the Toolbars" in the
+View menu and on the bar's right-click context menu) the user drags the grippers to reorder,
+resize and wrap bands onto extra rows; order/width/breaks persist as `[window] rebarBands`
+("id,cx,break;" per band in visual order) and the lock as `rebarLocked`. The menu band clips
+into its own chevron popup listing the hidden top-level menus. Ownership split: MainWindow owns the `HMENU` (built by
+`BuildMenuBar`, NEVER attached to the window) and every `WM_COMMAND`; MenuBand owns
+presentation and the modal tracking loop (`TrackPopupMenuEx` WITHOUT `TPM_RETURNCMD`, so the
+popups post ordinary `WM_COMMAND`s and the dispatch is untouched). The status bar has SEVEN
+parts mirroring the pane geometry: left-pane page/zoom on the left half, right-pane page/zoom
+anchored to the right half, the sync summary centered astride the midline, two borderless
+fillers absorbing the slack; page parts show the PDF /PageLabels label when it differs from
+the ordinal ("ix (9/314)"), via the single `PaneWindow::FormatPageText` formatter shared with
+the scrollbar-drag tooltip and the go-to flows. `MainWindow::Layout()` reserves the rebar
+height (`RB_GETBARHEIGHT`) on top and the status band at the bottom, then partitions the
+remaining strip among the width-adjustable outline sidebar (persisted DIP width, own drag
+divider; double-click best-fits the width to the widest expanded item so the tree loses its
+horizontal scrollbar), panes and splitter. Modal dialogs (Go to Page, Options) are
+built as in-memory `DLGTEMPLATE`s (`util/DialogTemplate.*`) for `DialogBoxIndirectParamW` — no
+.rc resources, free modality/Tab/Esc. Every user-visible string goes through `util/Strings.*`
+(an X-list keyed by `StrId` with English and Italian tables; English is the default, the
+choice persists in settings and a live switch rebuilds the `HMENU` and retitles the band).
+Full screen (F11 / Alt+Enter, Esc exits) strips `WS_OVERLAPPEDWINDOW` and hides the WHOLE
+rebar plus the status bar without touching their persisted visibility flags ("View > Toolbar"
+only hides bands 1-2; the menu band always stays). Explorer integration (optional, Options or
+`-register-shell`): two static verbs under `HKCU\...\SystemFileAssociations\.pdf\shell`
+(`MUIVerb`, `MultiSelectModel=Single`) — a location that by documented design never
+participates in default-handler resolution; `-open-left/-open-right` reuse a running instance
+through the same `WM_COPYDATA` channel as forward search (op 'PSVD', strictly validated).
 
 **MRU**: File carries two submenus, Recent Files (single documents, opened into the focused
 pane) and Recent Pairs (left+right sessions, order preserved). Both cap at 9 entries with 1..9
@@ -445,10 +469,49 @@ PdfSideViewer/
 - `SaveSession` must persist the pre-fullscreen `WINDOWPLACEMENT` while full screen: entering
   full screen rewrites the live placement with the monitor rect, so saving the live one would
   make the window come back monitor-sized and borderless-shaped after a fullscreen exit+restart.
-- Toolbars must not use `TBSTYLE_FLAT` here: flat toolbars are transparent and delegate their
-  background to the parent, which paints nothing under children (`WS_CLIPCHILDREN` +
-  `WM_ERASEBKGND` returning 1), leaving a black band. The comctl v6 theme renders the non-flat
-  style modern anyway.
+- `TBSTYLE_FLAT` is forbidden on a toolbar parented to a window that paints nothing under its
+  children (`WS_CLIPCHILDREN` + `WM_ERASEBKGND` returning 1): flat = transparent background
+  delegated to that parent, i.e. a black band. INSIDE a rebar band the opposite holds:
+  `TBSTYLE_FLAT|TBSTYLE_TRANSPARENT` is the documented REQUIRED pattern, because the rebar
+  itself paints the themed band background.
+- The MenuBand track loop: the `WH_MSGFILTER` hook is thread-local and scoped strictly to the
+  `TrackPopupMenuEx` call (RAII unhook on every exit path); hover-switching to an adjacent
+  top-level popup goes through `EndMenu()` + re-track, never a second nested track; popup
+  nesting depth comes from counting the frame-forwarded `WM_INITMENUPOPUP`/`WM_UNINITMENUPOPUP`
+  (reset at every track entry), and `WM_MENUSELECT` says whether Right should open a submenu
+  instead of switching. The `SC_KEYMENU` handler keeps the Alt+scroll gesture swallow FIRST;
+  `WM_INITMENU` (also sent by TrackPopupMenu) keeps resetting that flag.
+- MenuBand mouse truths (each cost a debug session): tracking must NOT start inside
+  `TBN_DROPDOWN` — while that notification is in flight comctl32 keeps its own "dropped
+  button" bookkeeping and paints that button hot regardless of TBSTATE, so after a hover
+  switch the previous button stays lit for the whole chain; the notify posts a private message
+  and tracking starts after comctl32 unwinds. Inside the hook the hit-test position is
+  `MSG::pt`, never `GetMessagePos()` (stale inside the menu modal loop, whose `PM_NOREMOVE`
+  peeks skip the refresh: switches fired one event late, not at all, or on the wrong button).
+  The toolbar subclass swallows `WM_MOUSEMOVE` while a chain is open: the only moves reaching
+  the toolbar then are synthetic reposts with stale positions, and native hot-tracking on them
+  re-lights the previous button.
+- Rebar band truths: bands are addressed by `RBBIM_ID`, never by index — the unlocked rebar
+  lets the user reorder them. `RBN_HEIGHTCHANGE` must re-run Layout or band drags leave the
+  panes under the bar (guarded by `m_layingOut`: Layout's own rebar MoveWindow fires the same
+  notification back). comctl32 forces an `RBBS_FIXEDSIZE` band to the END of its row and
+  re-applies that relocation on every re-layout: the page box carries the bit only while it
+  already closes its row (`ApplyPageBoxFixedSize`), `SetRebarLocked` snapshots the visual
+  order and restores it after the style pass, and `ApplyRebarLayout` writes styles/widths
+  BEFORE positions. `RBBS_USECHEVRON` compares the CHILD width against `cxIdeal`, and the
+  child loses band borders that no API exposes (`RBBIM_HEADERSIZE` reads 0 on gripper-less
+  bands while ~4px of `RBS_BANDBORDERS` still apply), so a band sized exactly to its ideal
+  clips into the chevron at rest: the menu band's cx is derived by MEASURING (oversize, read
+  the child's client width, land it exactly on the ideal — `UpdateRebarBandSizes`), and the
+  lock toggle compensates each band's header delta so child widths stay stable. The menu
+  band's chevron popup reuses the bar's popups as submenus: every item is detached with
+  `RemoveMenu` before `DestroyMenu`, or the destroy cascade takes the real menu bar down
+  with it.
+- Cross-process E2E gotchas (they cost real debugging time): `GetWindowText`/`SetWindowText`
+  on another process's CONTROL do not exchange `WM_GETTEXT`/`WM_SETTEXT` — SetWindowText even
+  returns success while only touching the caption cache. Test scripts must SEND `WM_SETTEXT`
+  explicitly (marshaled) and read edits the same way; `SB_GETTEXTW`/`SB_GETRECT` need a
+  `VirtualAllocEx` buffer in the target process.
 - Toolbar glyphs are drawn white-on-black with `ANTIALIASED_QUALITY` (never ClearType: subpixel
   RGB fringes corrupt the coverage) and converted to premultiplied ARGB; `GdiFlush()` before
   touching DIB bits.

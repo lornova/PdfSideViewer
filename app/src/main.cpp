@@ -1,5 +1,6 @@
 #include "MainWindow.h"
 #include "framework.h"
+#include "util/ShellIntegration.h"
 
 #include <commctrl.h>
 #include <shellapi.h>
@@ -45,11 +46,37 @@ bool SendForwardSearch(HWND target, const ForwardSearchRequest& req) {
            handled != 0;
 }
 
+// Hand an Explorer-verb open ("-open-left/right FILE") to the running
+// instance; the caller cold-starts on failure so the verb always lands.
+bool SendOpenDocument(HWND target, bool rightPane, const std::wstring& path) {
+    OpenDocumentBlob blob{};
+    blob.side = rightPane ? 1u : 0u;
+    blob.pathLen = static_cast<uint32_t>(path.size());
+    std::vector<BYTE> payload(sizeof(blob) + path.size() * sizeof(wchar_t));
+    memcpy(payload.data(), &blob, sizeof(blob));
+    memcpy(payload.data() + sizeof(blob), path.data(), path.size() * sizeof(wchar_t));
+
+    COPYDATASTRUCT cds{};
+    cds.dwData = kCdOpenDocument;
+    cds.cbData = static_cast<DWORD>(payload.size());
+    cds.lpData = payload.data();
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(target, &pid);
+    AllowSetForegroundWindow(pid);
+
+    DWORD_PTR handled = 0;
+    return SendMessageTimeoutW(target, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cds),
+                               SMTO_ABORTIFHUNG, 5000, &handled) != 0 &&
+           handled != 0;
+}
+
 } // namespace
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int nCmdShow) {
     try {
-        INITCOMMONCONTROLSEX icc{sizeof(icc), ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES};
+        INITCOMMONCONTROLSEX icc{sizeof(icc),
+                                 ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES | ICC_COOL_CLASSES};
         InitCommonControlsEx(&icc);
         MainWindow::RegisterWindowClass(hInstance);
         PaneWindow::RegisterWindowClass(hInstance);
@@ -62,7 +89,34 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             std::wstring first = argc > 1 ? argv[1] : L"";
             while (!first.empty() && first.front() == L'-')
                 first.erase(first.begin());
-            if (argc >= 5 && lstrcmpiW(first.c_str(), L"forward-search") == 0) {
+            if (lstrcmpiW(first.c_str(), L"register-shell") == 0 ||
+                lstrcmpiW(first.c_str(), L"unregister-shell") == 0) {
+                // Headless: used by the Options dialog docs, scripts and
+                // uninstall instructions. Labels are written in the default
+                // (English) language on this path.
+                const bool ok = lstrcmpiW(first.c_str(), L"register-shell") == 0
+                                    ? ShellIntegration::Register()
+                                    : ShellIntegration::Unregister();
+                LocalFree(argv);
+                return ok ? 0 : 1;
+            }
+            if (argc >= 3 && (lstrcmpiW(first.c_str(), L"open-left") == 0 ||
+                              lstrcmpiW(first.c_str(), L"open-right") == 0)) {
+                // Explorer context-menu verbs. Reuse a running instance via
+                // WM_COPYDATA; otherwise fall through to a cold start with
+                // the file on that side (a verb must always land somewhere).
+                const bool right = lstrcmpiW(first.c_str(), L"open-right") == 0;
+                std::wstring path = Absolutize(argv[2]);
+                if (!path.empty()) {
+                    if (HWND running = FindWindowW(MainWindow::kClassName, nullptr)) {
+                        if (SendOpenDocument(running, right, path)) {
+                            LocalFree(argv);
+                            return 0;
+                        }
+                    }
+                    (right ? rightFile : leftFile) = std::move(path);
+                }
+            } else if (argc >= 5 && lstrcmpiW(first.c_str(), L"forward-search") == 0) {
                 // PdfSideViewer.exe -forward-search TEX LINE PDF (SumatraPDF
                 // argument order, what LaTeX Workshop templates expect).
                 ForwardSearchRequest req;
@@ -99,6 +153,8 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             {FVIRTKEY, VK_F7, IDC_TOGGLE_SCROLL_SYNC},
             {FCONTROL | FVIRTKEY, VK_F7, IDC_TOGGLE_ZOOM_SYNC},
             {FCONTROL | FVIRTKEY, 'F', IDC_FIND_SHOW},
+            {FCONTROL | FVIRTKEY, 'G', IDC_GOTO_PAGE},
+            {FVIRTKEY, VK_F8, IDC_SWAP_PANES},
             {FVIRTKEY, VK_F3, IDC_FIND_NEXT},
             {FSHIFT | FVIRTKEY, VK_F3, IDC_FIND_PREV},
             {FVIRTKEY, VK_F9, IDC_TOGGLE_OUTLINE},

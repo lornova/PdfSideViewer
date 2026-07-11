@@ -1,8 +1,10 @@
 #include "MainWindow.h"
 
 #include "resource.h"
+#include "util/DialogTemplate.h"
 #include "util/GlyphIcons.h"
 #include "util/Settings.h"
+#include "util/ShellIntegration.h"
 #include "util/Strings.h"
 
 #include <commctrl.h> // SetWindowSubclass for the find-box keyboard handling
@@ -105,6 +107,42 @@ constexpr wchar_t kToolbarGlyphs[] = {
     0xE740, // 8 full screen
     0xEC8F, // 9 continuous scrolling (ScrollUpDown)
     0xE7C3, // 10 page-by-page (Page)
+    0xE8A9, // 11 actual size / 1:1 (ViewAll)
+};
+
+constexpr UINT_PTR kPageBoxId = 2001; // rebar band 2: editable current-page box
+
+// Rebar band ids (RBBIM_ID). Bands are addressed by id, never by index: with
+// the rebar unlocked the user can reorder them freely.
+constexpr UINT kBandMenu = 0;
+constexpr UINT kBandToolbar = 1;
+constexpr UINT kBandPageBox = 2;
+
+// Lock-dependent band style, IE "lock the toolbars" semantics: locked = no
+// grippers; unlocked = grippers always (first-in-row included) and everything
+// draggable. Breaks/hidden bits are layout state preserved by the callers;
+// RBBS_FIXEDSIZE is decided separately (ApplyPageBoxFixedSize): comctl32
+// forces fixed bands to the end of their row, so the bit is position-bound.
+UINT BandStyle(UINT id, bool locked) {
+    UINT style = locked ? RBBS_NOGRIPPER : RBBS_GRIPPERALWAYS;
+    if (id == kBandMenu || id == kBandToolbar)
+        style |= RBBS_USECHEVRON; // both clip into an overflow popup when squeezed
+    return style;
+}
+
+// Options dialog control ids (2100+ control-id space) and its modal state.
+constexpr WORD kOptRestoreId = 2101;
+constexpr WORD kOptScrollModeId = 2102;
+constexpr WORD kOptZoomModeId = 2103;
+constexpr WORD kOptScrollSyncId = 2104;
+constexpr WORD kOptZoomSyncId = 2105;
+constexpr WORD kOptSynctexId = 2106;
+constexpr WORD kOptShellId = 2107;
+constexpr WORD kOptClearMruId = 2108;
+constexpr WORD kOptWheelId = 2109;
+struct OptionsDialogState {
+    MainWindow* self = nullptr;
+    bool clearRecent = false; // armed by the button, applied on OK (cancel-safe)
 };
 
 // The find bar is a plain container: forward its children's notifications to
@@ -184,6 +222,16 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_statusVisible = session.statusbar;
     m_outlineVisible = session.outline;
     m_synctexInverse = session.synctexInverse;
+    m_restoreSession = session.restoreSession;
+    m_wheelLines = session.wheelLines;
+    m_outlineWidthDip = session.outlineWidth;
+    m_rebarLocked = session.rebarLocked;
+    m_rebarBandsSaved = session.rebarBands; // applied by BuildRebar in WM_CREATE
+    m_defaults.scrollMode = session.defScrollMode != 0 ? PaneWindow::ScrollMode::Paged
+                                                       : PaneWindow::ScrollMode::Continuous;
+    m_defaults.zoomMode = static_cast<PaneWindow::ZoomMode>(session.defZoomMode);
+    m_defaults.scrollSync = session.defScrollSync;
+    m_defaults.zoomSync = session.defZoomSync;
     m_mruFiles = session.mruFiles;
     m_mruPairs = session.mruPairs;
 
@@ -203,11 +251,12 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_right = std::make_unique<PaneWindow>(m_dx, Str(StrId::PlaceholderRight));
     m_sync = std::make_unique<SyncController>(*m_left, *m_right);
 
-    // Attached before creation so the very first GetClientRect already
-    // excludes the menu band.
+    // The HMENU is NEVER attached to the window: it is the popup source for
+    // the rebar-hosted menu band, and the band lives in the client area (the
+    // rebar height comes out of Layout, not the non-client menu band).
     m_menu = BuildMenuBar();
     CreateWindowExW(0, kClassName, L"PdfSideViewer", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
-                    CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, nullptr, m_menu,
+                    CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, nullptr, nullptr,
                     hinst, this);
     if (!m_hwnd)
         return false;
@@ -218,9 +267,13 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_dpi = GetDpiForWindow(m_hwnd);
     SetWindowPos(m_hwnd, nullptr, 0, 0, MulDiv(kInitialWidthDip, m_dpi, 96),
                  MulDiv(kInitialHeightDip, m_dpi, 96), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    // UIPI hardening: accept WM_COPYDATA (forward search, Explorer verbs)
+    // even from a lower-integrity second instance.
+    ChangeWindowMessageFilterEx(m_hwnd, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
 
     const auto onViewChanged = [this](PaneWindow& p, PaneWindow::ViewEvent e, float r) {
         if (e == PaneWindow::ViewEvent::FocusGained) {
+            m_activePane = &p; // the page box targets the last-focused pane
             if (m_outlineVisible && m_outlinePane != &p)
                 UpdateOutlineSidebar(&p);
             else
@@ -250,6 +303,8 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
             }
         }
         UpdateStatusBar();
+        if (&p == m_activePane)
+            UpdatePageBox(); // cheap: change-guarded, skipped while it has focus
         // Scroll ticks are too frequent for menu/toolbar churn; the checked
         // state only depends on zoom mode and focus anyway.
         if (e != PaneWindow::ViewEvent::Scrolled)
@@ -266,10 +321,17 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
 
     // Applied before any document opens (panes are still closed: only the
     // flag lands); the restore path then adopts the saved page under it.
-    m_scrollMode = session.scrollMode != 0 ? PaneWindow::ScrollMode::Paged
-                                           : PaneWindow::ScrollMode::Continuous;
+    // Session restore off = the configured DEFAULTS drive the launch state.
+    m_scrollMode = (m_restoreSession ? session.scrollMode != 0
+                                     : m_defaults.scrollMode == PaneWindow::ScrollMode::Paged)
+                       ? PaneWindow::ScrollMode::Paged
+                       : PaneWindow::ScrollMode::Continuous;
     m_left->SetScrollMode(m_scrollMode);
     m_right->SetScrollMode(m_scrollMode);
+    m_left->SetDefaultZoomMode(m_defaults.zoomMode);
+    m_right->SetDefaultZoomMode(m_defaults.zoomMode);
+    m_left->SetWheelLinesOverride(m_wheelLines);
+    m_right->SetWheelLinesOverride(m_wheelLines);
     const auto toggleScrollMode = [this] {
         ApplyScrollMode(m_scrollMode == PaneWindow::ScrollMode::Paged
                             ? PaneWindow::ScrollMode::Continuous
@@ -318,12 +380,12 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
         // Explicit command line wins over the saved session for the DOCUMENTS
         // only; the sync preference applies to every launch path (same order
         // as ApplySession: anchors recapture when the opens complete).
-        m_sync->SetZoomSync(session.zoomSync);
+        m_sync->SetZoomSync(m_restoreSession ? session.zoomSync : m_defaults.zoomSync);
         if (!leftFile.empty())
             m_left->OpenDocument(std::move(leftFile));
         if (!rightFile.empty())
             m_right->OpenDocument(std::move(rightFile));
-        m_sync->SetScrollSync(session.scrollSync);
+        m_sync->SetScrollSync(m_restoreSession ? session.scrollSync : m_defaults.scrollSync);
     } else {
         ApplySession(session);
     }
@@ -338,23 +400,31 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
 
 void MainWindow::ApplySession(const AppSettings& session) {
     m_splitRatio = session.splitRatio;
-    m_sync->SetZoomSync(session.zoomSync);
-    // m_fallback* already hold the DPI-rescaled offsets; a later WM_DPICHANGED
-    // (e.g. from the placement below) rescales the panes' pending restores.
-    if (!m_fallbackLeft.path.empty() &&
-        GetFileAttributesW(m_fallbackLeft.path.c_str()) != INVALID_FILE_ATTRIBUTES)
-        m_left->OpenDocumentWithView(m_fallbackLeft.path, m_fallbackLeft.zoom,
-                                     m_fallbackLeft.scrollX, m_fallbackLeft.scrollY,
-                                     static_cast<PaneWindow::ZoomMode>(m_fallbackLeft.zoomMode));
-    if (!m_fallbackRight.path.empty() &&
-        GetFileAttributesW(m_fallbackRight.path.c_str()) != INVALID_FILE_ATTRIBUTES)
-        m_right->OpenDocumentWithView(
-            m_fallbackRight.path, m_fallbackRight.zoom, m_fallbackRight.scrollX,
-            m_fallbackRight.scrollY,
-            static_cast<PaneWindow::ZoomMode>(m_fallbackRight.zoomMode));
+    m_sync->SetZoomSync(m_restoreSession ? session.zoomSync : m_defaults.zoomSync);
+    // Session restore off: chrome, placement and splitter still restore, but
+    // the panes start empty and the sync locks come from the defaults. The
+    // fallbacks stay seeded from the session either way, so a restore-less
+    // launch does not wipe the stored panes at the next SaveSession.
+    if (m_restoreSession) {
+        // m_fallback* already hold the DPI-rescaled offsets; a later
+        // WM_DPICHANGED (e.g. from the placement below) rescales the panes'
+        // pending restores.
+        if (!m_fallbackLeft.path.empty() &&
+            GetFileAttributesW(m_fallbackLeft.path.c_str()) != INVALID_FILE_ATTRIBUTES)
+            m_left->OpenDocumentWithView(
+                m_fallbackLeft.path, m_fallbackLeft.zoom, m_fallbackLeft.scrollX,
+                m_fallbackLeft.scrollY,
+                static_cast<PaneWindow::ZoomMode>(m_fallbackLeft.zoomMode));
+        if (!m_fallbackRight.path.empty() &&
+            GetFileAttributesW(m_fallbackRight.path.c_str()) != INVALID_FILE_ATTRIBUTES)
+            m_right->OpenDocumentWithView(
+                m_fallbackRight.path, m_fallbackRight.zoom, m_fallbackRight.scrollX,
+                m_fallbackRight.scrollY,
+                static_cast<PaneWindow::ZoomMode>(m_fallbackRight.zoomMode));
+    }
     // After the restored positions land, DocumentOpened events recapture the
     // anchor, so enabling scroll sync here preserves the saved alignment.
-    m_sync->SetScrollSync(session.scrollSync);
+    m_sync->SetScrollSync(m_restoreSession ? session.scrollSync : m_defaults.scrollSync);
     // Apply the placement only if the rect still touches a live monitor
     // (after a monitor disconnect the window would come up fully off-screen),
     // and without showing: Create issues the single ShowWindow, honoring the
@@ -386,6 +456,15 @@ void MainWindow::SaveSession() const {
     s.scrollSync = m_sync->ScrollSync();
     s.zoomSync = m_sync->ZoomSync();
     s.scrollMode = m_scrollMode == PaneWindow::ScrollMode::Paged ? 1 : 0;
+    s.restoreSession = m_restoreSession;
+    s.wheelLines = m_wheelLines;
+    s.outlineWidth = m_outlineWidthDip;
+    s.rebarLocked = m_rebarLocked;
+    s.rebarBands = SerializeRebarLayout();
+    s.defScrollMode = m_defaults.scrollMode == PaneWindow::ScrollMode::Paged ? 1 : 0;
+    s.defZoomMode = static_cast<int>(m_defaults.zoomMode);
+    s.defScrollSync = m_defaults.scrollSync;
+    s.defZoomSync = m_defaults.zoomSync;
     s.dpi = m_dpi;
     s.toolbar = m_toolbarVisible;
     s.statusbar = m_statusVisible;
@@ -427,6 +506,8 @@ HMENU MainWindow::BuildMenuBar() {
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(m_mruPairsMenu),
                 Str(StrId::MenuRecentPairs));
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
+    append(file, IDC_OPTIONS, StrId::MenuOptions);
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     append(file, IDC_EXIT, StrId::MenuExit);
 
     HMENU lang = CreatePopupMenu();
@@ -437,6 +518,7 @@ HMENU MainWindow::BuildMenuBar() {
     append(view, IDC_TOGGLE_TOOLBAR, StrId::MenuToolbar);
     append(view, IDC_TOGGLE_STATUSBAR, StrId::MenuStatusBar);
     append(view, IDC_TOGGLE_OUTLINE, StrId::MenuOutline);
+    append(view, IDC_LOCK_TOOLBARS, StrId::MenuLockToolbars);
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     append(view, IDC_ZOOM_IN, StrId::MenuZoomIn);
     append(view, IDC_ZOOM_OUT, StrId::MenuZoomOut);
@@ -447,6 +529,8 @@ HMENU MainWindow::BuildMenuBar() {
     append(view, IDC_SCROLL_CONTINUOUS, StrId::MenuScrollContinuous);
     append(view, IDC_SCROLL_PAGED, StrId::MenuScrollPaged);
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+    append(view, IDC_GOTO_PAGE, StrId::MenuGotoPage);
+    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(view, MF_POPUP, reinterpret_cast<UINT_PTR>(lang), Str(StrId::MenuLanguage));
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     append(view, IDC_FULLSCREEN, StrId::MenuFullScreen);
@@ -454,6 +538,8 @@ HMENU MainWindow::BuildMenuBar() {
     HMENU sync = CreatePopupMenu();
     append(sync, IDC_TOGGLE_SCROLL_SYNC, StrId::MenuScrollSync);
     append(sync, IDC_TOGGLE_ZOOM_SYNC, StrId::MenuZoomSync);
+    AppendMenuW(sync, MF_SEPARATOR, 0, nullptr);
+    append(sync, IDC_SWAP_PANES, StrId::MenuSwapPanes);
 
     HMENU help = CreatePopupMenu();
     append(help, IDC_ABOUT, StrId::MenuAbout);
@@ -562,14 +648,15 @@ void MainWindow::OpenMruPair(size_t index) {
 }
 
 void MainWindow::CreateToolbar(HINSTANCE hinst) {
-    // No TBSTYLE_FLAT: flat toolbars are transparent and delegate their
-    // background to the parent, which paints nothing under children
-    // (WS_CLIPCHILDREN + WM_ERASEBKGND returning 1), leaving a black band.
-    // The comctl v6 theme already renders the non-flat style modern.
+    // FLAT|TRANSPARENT is REQUIRED inside a rebar band: the rebar paints the
+    // band background under the transparent toolbar. (The historical "black
+    // band" bug only applies to a flat toolbar parented to a window that
+    // paints nothing beneath its children.)
     m_toolbar = CreateWindowExW(0, TOOLBARCLASSNAMEW, nullptr,
-                                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TBSTYLE_TOOLTIPS |
-                                    CCS_TOP | CCS_NODIVIDER,
-                                0, 0, 0, 0, m_hwnd,
+                                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TBSTYLE_FLAT |
+                                    TBSTYLE_TRANSPARENT | TBSTYLE_TOOLTIPS | CCS_NORESIZE |
+                                    CCS_NOPARENTALIGN | CCS_NODIVIDER,
+                                0, 0, 0, 0, m_rebar,
                                 reinterpret_cast<HMENU>(static_cast<UINT_PTR>(102)), hinst,
                                 nullptr);
     if (!m_toolbar)
@@ -597,6 +684,7 @@ void MainWindow::CreateToolbar(HINSTANCE hinst) {
         button(2, IDC_TOGGLE_SCROLL_SYNC, BTNS_CHECK),
         button(3, IDC_TOGGLE_ZOOM_SYNC, BTNS_CHECK),
         separator(),
+        button(11, IDC_ZOOM_ACTUAL, BTNS_BUTTON), // momentary: manual zoom drifts
         // A manual check pair, not BTNS_CHECKGROUP: Manual zoom mode means
         // NEITHER fit button is pressed, which a radio group cannot show.
         button(4, IDC_FIT_WIDTH, BTNS_CHECK),
@@ -613,6 +701,653 @@ void MainWindow::CreateToolbar(HINSTANCE hinst) {
     };
     SendMessageW(m_toolbar, TB_ADDBUTTONSW, std::size(buttons),
                  reinterpret_cast<LPARAM>(buttons));
+}
+
+void MainWindow::BuildRebar(HINSTANCE hinst) {
+    // Menu band + command toolbar + page box, one row by default. Locked =
+    // IE "lock the toolbars" (no grippers); unlocked the bands drag, reorder
+    // and wrap to extra rows, and the layout persists in the session.
+    m_rebar = CreateWindowExW(0, REBARCLASSNAMEW, nullptr,
+                              WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS |
+                                  RBS_VARHEIGHT | RBS_BANDBORDERS | CCS_NODIVIDER |
+                                  CCS_NOPARENTALIGN,
+                              0, 0, 0, 0, m_hwnd,
+                              reinterpret_cast<HMENU>(static_cast<UINT_PTR>(104)), hinst,
+                              nullptr);
+    if (!m_rebar)
+        return;
+    m_menuBand.Create(m_hwnd, m_rebar, hinst, m_menu);
+    CreateToolbar(hinst);
+    m_pageBox = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+                                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | ES_AUTOHSCROLL |
+                                    ES_CENTER,
+                                0, 0, 0, 0, m_rebar, reinterpret_cast<HMENU>(kPageBoxId), hinst,
+                                nullptr);
+    if (m_pageBox)
+        SetWindowSubclass(m_pageBox, PageBoxProc, 1, reinterpret_cast<DWORD_PTR>(this));
+
+    const auto insertBand = [this](UINT id, HWND child, int cxMin, int cyMin, int cxIdeal) {
+        REBARBANDINFOW band{};
+        band.cbSize = sizeof(band);
+        band.fMask = RBBIM_ID | RBBIM_CHILD | RBBIM_CHILDSIZE | RBBIM_STYLE | RBBIM_SIZE |
+                     RBBIM_IDEALSIZE;
+        band.wID = id;
+        band.fStyle = BandStyle(id, m_rebarLocked);
+        band.hwndChild = child;
+        band.cxMinChild = static_cast<UINT>(cxMin);
+        band.cyMinChild = static_cast<UINT>(cyMin);
+        band.cx = static_cast<UINT>(cxIdeal);
+        band.cxIdeal = static_cast<UINT>(cxIdeal);
+        SendMessageW(m_rebar, RB_INSERTBANDW, static_cast<WPARAM>(-1),
+                     reinterpret_cast<LPARAM>(&band));
+    };
+    const SIZE menuSize = m_menuBand.IdealSize();
+    const DWORD menuBtn =
+        static_cast<DWORD>(SendMessageW(m_menuBand.Toolbar(), TB_GETBUTTONSIZE, 0, 0));
+    // cxMinChild is one button, not the ideal width: a dragged (or squeezed)
+    // menu band shrinks and overflows into its chevron instead of pinning the
+    // row width.
+    insertBand(kBandMenu, m_menuBand.Toolbar(), LOWORD(menuBtn), HIWORD(menuBtn), menuSize.cx);
+    SIZE toolSize{};
+    SendMessageW(m_toolbar, TB_GETMAXSIZE, 0, reinterpret_cast<LPARAM>(&toolSize));
+    const DWORD toolBtn = static_cast<DWORD>(SendMessageW(m_toolbar, TB_GETBUTTONSIZE, 0, 0));
+    insertBand(kBandToolbar, m_toolbar, MulDiv(80, m_dpi, 96), HIWORD(toolBtn), toolSize.cx);
+    insertBand(kBandPageBox, m_pageBox, MulDiv(64, m_dpi, 96), MulDiv(22, m_dpi, 96),
+               MulDiv(64, m_dpi, 96));
+    UpdateRebarBandSizes();              // menu band cx += header (chevron math)
+    ApplyRebarLayout(m_rebarBandsSaved); // saved order/widths/rows, if any
+    ApplyPageBoxFixedSize();
+}
+
+void MainWindow::UpdateRebarBandSizes() {
+    if (!m_rebar)
+        return;
+    // DPI change: button and text extents moved; refresh every band's
+    // child-size metrics or the row keeps the stale height. By id: the user
+    // may have reordered the bands.
+    const auto setBand = [this](UINT id, int cxMin, int cyMin, int cxIdeal) {
+        const LRESULT index = SendMessageW(m_rebar, RB_IDTOINDEX, id, 0);
+        if (index == -1)
+            return;
+        REBARBANDINFOW band{};
+        band.cbSize = sizeof(band);
+        band.fMask = RBBIM_CHILDSIZE | RBBIM_IDEALSIZE;
+        band.cxMinChild = static_cast<UINT>(cxMin);
+        band.cyMinChild = static_cast<UINT>(cyMin);
+        band.cxIdeal = static_cast<UINT>(cxIdeal);
+        SendMessageW(m_rebar, RB_SETBANDINFOW, static_cast<WPARAM>(index),
+                     reinterpret_cast<LPARAM>(&band));
+    };
+    SendMessageW(m_menuBand.Toolbar(), TB_AUTOSIZE, 0, 0);
+    SendMessageW(m_toolbar, TB_AUTOSIZE, 0, 0);
+    const SIZE menuSize = m_menuBand.IdealSize();
+    const DWORD menuBtn =
+        static_cast<DWORD>(SendMessageW(m_menuBand.Toolbar(), TB_GETBUTTONSIZE, 0, 0));
+    setBand(kBandMenu, LOWORD(menuBtn), HIWORD(menuBtn), menuSize.cx);
+    SIZE toolSize{};
+    SendMessageW(m_toolbar, TB_GETMAXSIZE, 0, reinterpret_cast<LPARAM>(&toolSize));
+    const DWORD toolBtn = static_cast<DWORD>(SendMessageW(m_toolbar, TB_GETBUTTONSIZE, 0, 0));
+    setBand(kBandToolbar, MulDiv(80, m_dpi, 96), HIWORD(toolBtn), toolSize.cx);
+    setBand(kBandPageBox, MulDiv(64, m_dpi, 96), MulDiv(22, m_dpi, 96), MulDiv(64, m_dpi, 96));
+    // The menu band never stretches (the toolbar band absorbs the row slack),
+    // and USECHEVRON clips the CHILD as soon as it dips under cxIdeal. The
+    // child gets cx minus header minus BAND BORDERS, and the border share is
+    // not exposed by any API (RBBIM_HEADERSIZE reads 0 for gripper-less
+    // bands while ~4px of RBS_BANDBORDERS still apply): measure it. Oversize
+    // the band so no chevron can trigger, read what the child actually got,
+    // then set cx so the child lands exactly on its ideal.
+    const LRESULT menuIndex = SendMessageW(m_rebar, RB_IDTOINDEX, kBandMenu, 0);
+    if (menuIndex != -1) {
+        REBARBANDINFOW band{};
+        band.cbSize = sizeof(band);
+        band.fMask = RBBIM_SIZE;
+        band.cx = static_cast<UINT>(menuSize.cx) + MulDiv(64, m_dpi, 96);
+        SendMessageW(m_rebar, RB_SETBANDINFOW, static_cast<WPARAM>(menuIndex),
+                     reinterpret_cast<LPARAM>(&band));
+        RECT child{};
+        GetClientRect(m_menuBand.Toolbar(), &child); // resized synchronously above
+        const int overhead =
+            std::max(0, static_cast<int>(band.cx) - static_cast<int>(child.right));
+        band.cx = static_cast<UINT>(menuSize.cx + overhead);
+        SendMessageW(m_rebar, RB_SETBANDINFOW, static_cast<WPARAM>(menuIndex),
+                     reinterpret_cast<LPARAM>(&band));
+    }
+}
+
+void MainWindow::SetRebarLocked(bool locked) {
+    m_rebarLocked = locked;
+    if (!m_rebar)
+        return;
+    const int count = static_cast<int>(SendMessageW(m_rebar, RB_GETBANDCOUNT, 0, 0));
+    // Snapshot order and breaks FIRST: applying RBBS_FIXEDSIZE makes the
+    // rebar RELOCATE that band behind its row sibling (observed, comctl32
+    // v6), which would skew an index-based loop and destroy the user's
+    // arrangement. Styles are written by id, then the order is put back.
+    struct BandPos {
+        UINT id;
+        UINT brk;
+    };
+    std::vector<BandPos> order;
+    for (int i = 0; i < count; ++i) {
+        REBARBANDINFOW band{};
+        band.cbSize = sizeof(band);
+        band.fMask = RBBIM_ID | RBBIM_STYLE;
+        if (SendMessageW(m_rebar, RB_GETBANDINFOW, static_cast<WPARAM>(i),
+                         reinterpret_cast<LPARAM>(&band)))
+            order.push_back({band.wID, band.fStyle & RBBS_BREAK});
+    }
+    for (const BandPos& pos : order) {
+        const LRESULT index = SendMessageW(m_rebar, RB_IDTOINDEX, pos.id, 0);
+        if (index == -1)
+            continue;
+        REBARBANDINFOW band{};
+        band.cbSize = sizeof(band);
+        band.fMask = RBBIM_STYLE | RBBIM_SIZE | RBBIM_HEADERSIZE;
+        if (!SendMessageW(m_rebar, RB_GETBANDINFOW, static_cast<WPARAM>(index),
+                          reinterpret_cast<LPARAM>(&band)))
+            continue;
+        const int oldHeader = static_cast<int>(band.cxHeader);
+        const int oldCx = static_cast<int>(band.cx);
+        // Only the lock-dependent bits change: the break comes from the
+        // snapshot (a relocation may have shuffled the live one) and hidden
+        // state survives as-is.
+        const UINT hidden = band.fStyle & RBBS_HIDDEN;
+        band.fMask = RBBIM_STYLE;
+        band.fStyle = BandStyle(pos.id, locked) | pos.brk | hidden;
+        SendMessageW(m_rebar, RB_SETBANDINFOW, static_cast<WPARAM>(index),
+                     reinterpret_cast<LPARAM>(&band));
+        // The gripper lives in the band header: keep the CHILD width stable
+        // across the toggle or every band shifts and chevrons pop.
+        band.fMask = RBBIM_HEADERSIZE;
+        if (SendMessageW(m_rebar, RB_GETBANDINFOW, static_cast<WPARAM>(index),
+                         reinterpret_cast<LPARAM>(&band)) &&
+            static_cast<int>(band.cxHeader) != oldHeader) {
+            band.fMask = RBBIM_SIZE;
+            band.cx = static_cast<UINT>(
+                std::max(0, oldCx + static_cast<int>(band.cxHeader) - oldHeader));
+            SendMessageW(m_rebar, RB_SETBANDINFOW, static_cast<WPARAM>(index),
+                         reinterpret_cast<LPARAM>(&band));
+        }
+    }
+    for (int target = 0; target < static_cast<int>(order.size()); ++target) {
+        const LRESULT current = SendMessageW(m_rebar, RB_IDTOINDEX, order[target].id, 0);
+        if (current != -1 && current != target)
+            SendMessageW(m_rebar, RB_MOVEBAND, static_cast<WPARAM>(current),
+                         static_cast<LPARAM>(target));
+    }
+    ApplyPageBoxFixedSize();
+    Layout(); // gripper widths shift the row metrics
+    UpdateCommandUi();
+}
+
+void MainWindow::ApplyPageBoxFixedSize() {
+    if (!m_rebar)
+        return;
+    // RBBS_FIXEDSIZE keeps the page box from absorbing the row leftover in
+    // the locked default layout, but comctl32 RELOCATES a fixed band that
+    // precedes others in its row (fixed bands are forced to the row end, and
+    // every re-layout re-applies it): the bit is legal ONLY while the band
+    // already closes its row; anywhere else it stays a normal band.
+    const LRESULT index = SendMessageW(m_rebar, RB_IDTOINDEX, kBandPageBox, 0);
+    if (index == -1)
+        return;
+    const int count = static_cast<int>(SendMessageW(m_rebar, RB_GETBANDCOUNT, 0, 0));
+    bool rowLast = index == count - 1;
+    if (!rowLast) {
+        REBARBANDINFOW next{};
+        next.cbSize = sizeof(next);
+        next.fMask = RBBIM_STYLE;
+        if (SendMessageW(m_rebar, RB_GETBANDINFOW, static_cast<WPARAM>(index + 1),
+                         reinterpret_cast<LPARAM>(&next)))
+            rowLast = (next.fStyle & RBBS_BREAK) != 0;
+    }
+    REBARBANDINFOW band{};
+    band.cbSize = sizeof(band);
+    band.fMask = RBBIM_STYLE;
+    if (!SendMessageW(m_rebar, RB_GETBANDINFOW, static_cast<WPARAM>(index),
+                      reinterpret_cast<LPARAM>(&band)))
+        return;
+    const UINT want = (m_rebarLocked && rowLast) ? (band.fStyle | RBBS_FIXEDSIZE)
+                                                 : (band.fStyle & ~RBBS_FIXEDSIZE);
+    if (want != band.fStyle) {
+        band.fStyle = want;
+        SendMessageW(m_rebar, RB_SETBANDINFOW, static_cast<WPARAM>(index),
+                     reinterpret_cast<LPARAM>(&band));
+    }
+}
+
+std::wstring MainWindow::SerializeRebarLayout() const {
+    if (!m_rebar)
+        return m_rebarBandsSaved;
+    std::wstring out;
+    const int count = static_cast<int>(SendMessageW(m_rebar, RB_GETBANDCOUNT, 0, 0));
+    for (int i = 0; i < count; ++i) {
+        REBARBANDINFOW band{};
+        band.cbSize = sizeof(band);
+        band.fMask = RBBIM_STYLE | RBBIM_ID | RBBIM_SIZE;
+        if (!SendMessageW(m_rebar, RB_GETBANDINFOW, static_cast<WPARAM>(i),
+                          reinterpret_cast<LPARAM>(&band)))
+            continue;
+        wchar_t buf[48];
+        swprintf_s(buf, L"%u,%u,%u;", band.wID, band.cx,
+                   (band.fStyle & RBBS_BREAK) ? 1u : 0u);
+        out += buf;
+    }
+    return out;
+}
+
+void MainWindow::ApplyRebarLayout(const std::wstring& layout) {
+    if (!m_rebar || layout.empty())
+        return;
+    struct Entry {
+        UINT id, cx, brk;
+    };
+    std::vector<Entry> entries;
+    size_t pos = 0;
+    while (pos < layout.size()) {
+        size_t end = layout.find(L';', pos);
+        if (end == std::wstring::npos)
+            end = layout.size();
+        Entry e{};
+        if (swscanf_s(layout.c_str() + pos, L"%u,%u,%u", &e.id, &e.cx, &e.brk) == 3)
+            entries.push_back(e);
+        pos = end + 1;
+    }
+    // Only a complete, duplicate-free description of the existing bands is
+    // applied; anything else (older builds, hand edits) keeps the defaults.
+    const int count = static_cast<int>(SendMessageW(m_rebar, RB_GETBANDCOUNT, 0, 0));
+    if (static_cast<int>(entries.size()) != count)
+        return;
+    UINT seen = 0;
+    for (const Entry& e : entries) {
+        if (SendMessageW(m_rebar, RB_IDTOINDEX, e.id, 0) == -1 || (seen & (1u << e.id)))
+            return;
+        seen |= 1u << e.id;
+    }
+    // Styles and widths first, positions LAST: writing RBBS_FIXEDSIZE can
+    // make the rebar relocate that band (see SetRebarLocked), which would
+    // undo any move already performed. Bands are found by id at write time
+    // because a relocation shifts the indices mid-pass.
+    for (int target = 0; target < count; ++target) {
+        const Entry& e = entries[target];
+        const LRESULT index = SendMessageW(m_rebar, RB_IDTOINDEX, e.id, 0);
+        if (index == -1)
+            continue;
+        REBARBANDINFOW band{};
+        band.cbSize = sizeof(band);
+        band.fMask = RBBIM_STYLE;
+        if (!SendMessageW(m_rebar, RB_GETBANDINFOW, static_cast<WPARAM>(index),
+                          reinterpret_cast<LPARAM>(&band)))
+            continue;
+        // The first visual band never carries a break: a stray one would
+        // waste an empty leading row.
+        if (e.brk != 0 && target > 0)
+            band.fStyle |= RBBS_BREAK;
+        else
+            band.fStyle &= ~RBBS_BREAK;
+        band.fMask = RBBIM_STYLE | RBBIM_SIZE;
+        band.cx = e.cx;
+        SendMessageW(m_rebar, RB_SETBANDINFOW, static_cast<WPARAM>(index),
+                     reinterpret_cast<LPARAM>(&band));
+    }
+    for (int target = 0; target < count; ++target) {
+        const LRESULT current = SendMessageW(m_rebar, RB_IDTOINDEX, entries[target].id, 0);
+        if (current != -1 && current != target)
+            SendMessageW(m_rebar, RB_MOVEBAND, static_cast<WPARAM>(current),
+                         static_cast<LPARAM>(target));
+    }
+}
+
+void MainWindow::ShowRebarContextMenu(POINT screenPt) {
+    // IE-style bar context menu: the toolbar toggle plus the lock. No
+    // TPM_RETURNCMD: the picked item posts an ordinary WM_COMMAND.
+    HMENU menu = CreatePopupMenu();
+    AppendMenuW(menu, MF_STRING | (m_toolbarVisible ? MF_CHECKED : 0u), IDC_TOGGLE_TOOLBAR,
+                Str(StrId::MenuToolbar));
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING | (m_rebarLocked ? MF_CHECKED : 0u), IDC_LOCK_TOOLBARS,
+                Str(StrId::MenuLockToolbars));
+    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON, screenPt.x, screenPt.y,
+                   0, m_hwnd, nullptr);
+    DestroyMenu(menu);
+}
+
+void MainWindow::ShowChevronMenu(const NMREBARCHEVRON* nm) {
+    if (!m_toolbar)
+        return;
+    // Overflow popup listing the command toolbar's actions (tooltip strings
+    // double as labels); checked state mirrors the buttons.
+    HMENU menu = CreatePopupMenu();
+    const int count = static_cast<int>(SendMessageW(m_toolbar, TB_BUTTONCOUNT, 0, 0));
+    for (int i = 0; i < count; ++i) {
+        TBBUTTON b{};
+        if (!SendMessageW(m_toolbar, TB_GETBUTTON, i, reinterpret_cast<LPARAM>(&b)))
+            continue;
+        if (b.fsStyle & BTNS_SEP) {
+            AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+            continue;
+        }
+        UINT flags = MF_STRING;
+        if (SendMessageW(m_toolbar, TB_ISBUTTONCHECKED, static_cast<WPARAM>(b.idCommand), 0))
+            flags |= MF_CHECKED;
+        AppendMenuW(menu, flags, static_cast<UINT_PTR>(b.idCommand),
+                    Str(CommandTipId(static_cast<UINT>(b.idCommand))));
+    }
+    RECT rc = nm->rc;
+    MapWindowPoints(m_rebar, nullptr, reinterpret_cast<LPPOINT>(&rc), 2);
+    TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN, rc.left, rc.bottom, 0, m_hwnd, nullptr);
+    DestroyMenu(menu);
+}
+
+StrId MainWindow::CommandTipId(UINT id) {
+    // Doubles as the chevron overflow labels; keep every toolbar id covered.
+    switch (id) {
+    case IDC_OPEN_LEFT:
+        return StrId::TipOpenLeft;
+    case IDC_OPEN_RIGHT:
+        return StrId::TipOpenRight;
+    case IDC_TOGGLE_SCROLL_SYNC:
+        return StrId::TipScrollSync;
+    case IDC_TOGGLE_ZOOM_SYNC:
+        return StrId::TipZoomSync;
+    case IDC_ZOOM_ACTUAL:
+        return StrId::TipActualSize;
+    case IDC_FIT_WIDTH:
+        return StrId::TipFitWidth;
+    case IDC_FIT_PAGE:
+        return StrId::TipFitPage;
+    case IDC_SCROLL_CONTINUOUS:
+        return StrId::TipScrollContinuous;
+    case IDC_SCROLL_PAGED:
+        return StrId::TipScrollPaged;
+    case IDC_FIND_SHOW:
+        return StrId::TipFind;
+    case IDC_TOGGLE_OUTLINE:
+        return StrId::TipOutline;
+    default:
+        return StrId::TipFullScreen;
+    }
+}
+
+void MainWindow::UpdatePageBox() {
+    if (!m_pageBox || GetFocus() == m_pageBox)
+        return; // never fight the user's caret
+    PaneWindow* pane = m_activePane ? m_activePane : m_left.get();
+    std::wstring text;
+    if (pane && pane->HasDocument()) {
+        const int count = pane->PageCount();
+        const int page = std::clamp(static_cast<int>(pane->SyncPosition()), 0, count - 1);
+        const std::wstring& label = pane->PageLabel(page);
+        text = label.empty() ? std::to_wstring(page + 1) : label;
+    }
+    wchar_t current[64] = L"";
+    GetWindowTextW(m_pageBox, current, ARRAYSIZE(current));
+    if (text != current)
+        SetWindowTextW(m_pageBox, text.c_str());
+}
+
+bool MainWindow::GotoFromText(const std::wstring& text) {
+    PaneWindow* pane = m_activePane ? m_activePane : m_left.get();
+    if (!pane || !pane->HasDocument() || text.empty())
+        return false;
+    // Label-first, deliberately: in a document labeled i, ii, 1, 2 the input
+    // "2" goes to the page LABELED 2 (ordinal 4), not to ordinal page 2.
+    int page = pane->FindPageByLabel(text);
+    if (page < 0) {
+        wchar_t* end = nullptr;
+        const long n = wcstol(text.c_str(), &end, 10);
+        if (end && *end == L'\0' && n >= 1 && n <= pane->PageCount())
+            page = static_cast<int>(n) - 1;
+    }
+    if (page < 0)
+        return false;
+    pane->GotoPage(page);
+    return true;
+}
+
+void MainWindow::ShowGotoPageDialog() {
+    PaneWindow* pane = m_activePane ? m_activePane : m_left.get();
+    if (!pane || !pane->HasDocument())
+        return;
+    constexpr WORD kGotoEditId = 2201;
+    DialogTemplate dlg(Str(StrId::GotoTitle), 190, 62);
+    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 7, 7, 176, 10, 0xFFFF,
+                   Str(StrId::GotoPrompt));
+    dlg.AddControl(DialogTemplate::kEdit, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 0, 7, 20,
+                   176, 13, kGotoEditId, L"");
+    dlg.AddControl(DialogTemplate::kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 79, 41, 50, 14,
+                   IDOK, Str(StrId::DlgOk));
+    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 133, 41, 50, 14,
+                   IDCANCEL, Str(StrId::DlgCancel));
+    const HINSTANCE hinst =
+        reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(m_hwnd, GWLP_HINSTANCE));
+    DialogBoxIndirectParamW(hinst, dlg.Data(), m_hwnd, GotoDlgProc,
+                            reinterpret_cast<LPARAM>(this));
+}
+
+INT_PTR CALLBACK MainWindow::GotoDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    constexpr int kGotoEditId = 2201;
+    auto* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(dlg, DWLP_USER));
+    switch (msg) {
+    case WM_INITDIALOG: {
+        SetWindowLongPtrW(dlg, DWLP_USER, lParam);
+        self = reinterpret_cast<MainWindow*>(lParam);
+        // Prefill with the current short form (label if any, else ordinal).
+        PaneWindow* pane = self->m_activePane ? self->m_activePane : self->m_left.get();
+        if (pane && pane->HasDocument()) {
+            const int count = pane->PageCount();
+            const int page = std::clamp(static_cast<int>(pane->SyncPosition()), 0, count - 1);
+            const std::wstring& label = pane->PageLabel(page);
+            const std::wstring prefill =
+                label.empty() ? std::to_wstring(page + 1) : label;
+            SetDlgItemTextW(dlg, kGotoEditId, prefill.c_str());
+        }
+        SendDlgItemMessageW(dlg, kGotoEditId, EM_SETSEL, 0, static_cast<LPARAM>(-1));
+        SetFocus(GetDlgItem(dlg, kGotoEditId));
+        return FALSE; // focus set manually
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDOK: {
+            wchar_t text[64] = L"";
+            GetDlgItemTextW(dlg, kGotoEditId, text, ARRAYSIZE(text));
+            if (self && self->GotoFromText(text)) {
+                EndDialog(dlg, 1);
+            } else {
+                MessageBeep(MB_ICONWARNING);
+                SendDlgItemMessageW(dlg, kGotoEditId, EM_SETSEL, 0, static_cast<LPARAM>(-1));
+                SetFocus(GetDlgItem(dlg, kGotoEditId));
+            }
+            return TRUE;
+        }
+        case IDCANCEL:
+            EndDialog(dlg, 0);
+            return TRUE;
+        default:
+            break;
+        }
+        break;
+    default:
+        break;
+    }
+    return FALSE;
+}
+
+void MainWindow::ShowOptionsDialog() {
+    DialogTemplate dlg(Str(StrId::OptTitle), 260, 208);
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 7, 246, 10,
+                   kOptRestoreId, Str(StrId::OptRestoreSession));
+    dlg.AddControl(DialogTemplate::kButton, BS_GROUPBOX, 0, 7, 22, 246, 74, 0xFFFF,
+                   Str(StrId::OptDefaultsGroup));
+    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 15, 37, 90, 10, 0xFFFF,
+                   Str(StrId::OptDefScrollMode));
+    dlg.AddControl(DialogTemplate::kComboBox, CBS_DROPDOWNLIST | WS_TABSTOP, 0, 110, 35, 138,
+                   60, kOptScrollModeId, L"");
+    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 15, 53, 90, 10, 0xFFFF,
+                   Str(StrId::OptDefZoomMode));
+    dlg.AddControl(DialogTemplate::kComboBox, CBS_DROPDOWNLIST | WS_TABSTOP, 0, 110, 51, 138,
+                   60, kOptZoomModeId, L"");
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 15, 68, 230, 10,
+                   kOptScrollSyncId, Str(StrId::OptDefScrollSync));
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 15, 80, 230, 10,
+                   kOptZoomSyncId, Str(StrId::OptDefZoomSync));
+    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 7, 102, 246, 10, 0xFFFF,
+                   Str(StrId::OptSynctexInverse));
+    dlg.AddControl(DialogTemplate::kEdit, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 0, 7, 113,
+                   246, 13, kOptSynctexId, L"");
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | BS_MULTILINE | BS_TOP | WS_TABSTOP,
+                   0, 7, 131, 246, 18, kOptShellId, Str(StrId::OptShellIntegration));
+    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 7, 156, 188, 10, 0xFFFF,
+                   Str(StrId::OptWheelLines));
+    dlg.AddControl(DialogTemplate::kEdit, ES_NUMBER | ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
+                   0, 200, 154, 48, 13, kOptWheelId, L"");
+    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 7, 187, 120, 14,
+                   kOptClearMruId, Str(StrId::OptClearRecent));
+    dlg.AddControl(DialogTemplate::kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 149, 187, 50, 14,
+                   IDOK, Str(StrId::DlgOk));
+    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 203, 187, 50, 14,
+                   IDCANCEL, Str(StrId::DlgCancel));
+    OptionsDialogState state{this, false};
+    const HINSTANCE hinst =
+        reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(m_hwnd, GWLP_HINSTANCE));
+    DialogBoxIndirectParamW(hinst, dlg.Data(), m_hwnd, OptionsDlgProc,
+                            reinterpret_cast<LPARAM>(&state));
+}
+
+INT_PTR CALLBACK MainWindow::OptionsDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
+    auto* state = reinterpret_cast<OptionsDialogState*>(GetWindowLongPtrW(dlg, DWLP_USER));
+    switch (msg) {
+    case WM_INITDIALOG: {
+        SetWindowLongPtrW(dlg, DWLP_USER, lParam);
+        state = reinterpret_cast<OptionsDialogState*>(lParam);
+        MainWindow* self = state->self;
+        CheckDlgButton(dlg, kOptRestoreId,
+                       self->m_restoreSession ? BST_CHECKED : BST_UNCHECKED);
+        const HWND scrollCombo = GetDlgItem(dlg, kOptScrollModeId);
+        SendMessageW(scrollCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(Str(StrId::OptScrollContinuous)));
+        SendMessageW(scrollCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(Str(StrId::OptScrollPaged)));
+        SendMessageW(scrollCombo, CB_SETCURSEL,
+                     self->m_defaults.scrollMode == PaneWindow::ScrollMode::Paged ? 1 : 0, 0);
+        const HWND zoomCombo = GetDlgItem(dlg, kOptZoomModeId);
+        SendMessageW(zoomCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(Str(StrId::OptZoomActual)));
+        SendMessageW(zoomCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(Str(StrId::OptZoomFitWidth)));
+        SendMessageW(zoomCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(Str(StrId::OptZoomFitPage)));
+        SendMessageW(zoomCombo, CB_SETCURSEL,
+                     static_cast<WPARAM>(self->m_defaults.zoomMode), 0);
+        CheckDlgButton(dlg, kOptScrollSyncId,
+                       self->m_defaults.scrollSync ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dlg, kOptZoomSyncId,
+                       self->m_defaults.zoomSync ? BST_CHECKED : BST_UNCHECKED);
+        SetDlgItemTextW(dlg, kOptSynctexId, self->m_synctexInverse.c_str());
+        CheckDlgButton(dlg, kOptShellId,
+                       ShellIntegration::IsRegistered() ? BST_CHECKED : BST_UNCHECKED);
+        SetDlgItemInt(dlg, kOptWheelId, static_cast<UINT>(self->m_wheelLines), FALSE);
+        return TRUE;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case kOptClearMruId:
+            if (state) {
+                state->clearRecent = true;
+                EnableWindow(GetDlgItem(dlg, kOptClearMruId), FALSE);
+            }
+            return TRUE;
+        case IDOK: {
+            if (!state)
+                return TRUE;
+            MainWindow* self = state->self;
+            self->m_restoreSession = IsDlgButtonChecked(dlg, kOptRestoreId) == BST_CHECKED;
+            self->m_defaults.scrollMode =
+                SendDlgItemMessageW(dlg, kOptScrollModeId, CB_GETCURSEL, 0, 0) == 1
+                    ? PaneWindow::ScrollMode::Paged
+                    : PaneWindow::ScrollMode::Continuous;
+            const int zoomSel = std::clamp(
+                static_cast<int>(SendDlgItemMessageW(dlg, kOptZoomModeId, CB_GETCURSEL, 0, 0)),
+                0, 2);
+            self->m_defaults.zoomMode = static_cast<PaneWindow::ZoomMode>(zoomSel);
+            self->m_defaults.scrollSync =
+                IsDlgButtonChecked(dlg, kOptScrollSyncId) == BST_CHECKED;
+            self->m_defaults.zoomSync = IsDlgButtonChecked(dlg, kOptZoomSyncId) == BST_CHECKED;
+            wchar_t synctex[512] = L"";
+            GetDlgItemTextW(dlg, kOptSynctexId, synctex, ARRAYSIZE(synctex));
+            self->m_synctexInverse = synctex;
+            BOOL parsed = FALSE;
+            const UINT lines = GetDlgItemInt(dlg, kOptWheelId, &parsed, FALSE);
+            self->m_wheelLines = parsed ? static_cast<int>(std::min(lines, 100u)) : 0;
+            // Live pushes: fresh documents and the very next wheel tick see
+            // the new values; persistence happens at SaveSession like every
+            // other setting.
+            self->m_left->SetDefaultZoomMode(self->m_defaults.zoomMode);
+            self->m_right->SetDefaultZoomMode(self->m_defaults.zoomMode);
+            self->m_left->SetWheelLinesOverride(self->m_wheelLines);
+            self->m_right->SetWheelLinesOverride(self->m_wheelLines);
+            const bool wantShell = IsDlgButtonChecked(dlg, kOptShellId) == BST_CHECKED;
+            if (wantShell != ShellIntegration::IsRegistered()) {
+                const bool applied = wantShell ? ShellIntegration::Register()
+                                               : ShellIntegration::Unregister();
+                if (!applied)
+                    MessageBeep(MB_ICONWARNING);
+            }
+            if (state->clearRecent) {
+                self->m_mruFiles.clear();
+                self->m_mruPairs.clear();
+                self->RebuildMruMenus();
+            }
+            EndDialog(dlg, 1);
+            return TRUE;
+        }
+        case IDCANCEL:
+            EndDialog(dlg, 0);
+            return TRUE;
+        default:
+            break;
+        }
+        break;
+    default:
+        break;
+    }
+    return FALSE;
+}
+
+LRESULT CALLBACK MainWindow::PageBoxProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam,
+                                         UINT_PTR /*id*/, DWORD_PTR data) {
+    auto* self = reinterpret_cast<MainWindow*>(data);
+    switch (msg) {
+    case WM_KEYDOWN:
+        if (wParam == VK_RETURN) {
+            wchar_t text[64] = L"";
+            GetWindowTextW(hwnd, text, ARRAYSIZE(text));
+            if (self->GotoFromText(text)) {
+                PaneWindow* pane = self->m_activePane ? self->m_activePane
+                                                      : self->m_left.get();
+                SetFocus(pane->Hwnd());
+                self->UpdatePageBox();
+            } else {
+                MessageBeep(MB_ICONWARNING);
+                SendMessageW(hwnd, EM_SETSEL, 0, static_cast<LPARAM>(-1));
+            }
+            return 0;
+        }
+        if (wParam == VK_ESCAPE) {
+            PaneWindow* pane = self->m_activePane ? self->m_activePane : self->m_left.get();
+            SetFocus(pane->Hwnd());
+            self->UpdatePageBox(); // restore the live page text
+            return 0;
+        }
+        break;
+    case WM_CHAR:
+        if (wParam == L'\r' || wParam == 0x1B)
+            return 0; // the WM_KEYDOWN branch handled it: swallow the beep
+        break;
+    default:
+        break;
+    }
+    return DefSubclassProc(hwnd, msg, wParam, lParam);
 }
 
 void MainWindow::RebuildToolbarIcons() {
@@ -643,6 +1378,7 @@ void MainWindow::UpdateCommandUi() {
         check(IDC_TOGGLE_TOOLBAR, m_toolbarVisible);
         check(IDC_TOGGLE_STATUSBAR, m_statusVisible);
         check(IDC_TOGGLE_OUTLINE, m_outlineVisible);
+        check(IDC_LOCK_TOOLBARS, m_rebarLocked);
         check(IDC_FULLSCREEN, m_fullscreen);
         check(IDC_TOGGLE_SCROLL_SYNC, m_sync->ScrollSync());
         check(IDC_TOGGLE_ZOOM_SYNC, m_sync->ZoomSync());
@@ -689,8 +1425,8 @@ void MainWindow::UpdateStatusBar() {
         if (!pane.HasDocument())
             return std::wstring(Str(noDoc));
         const int count = pane.PageCount();
-        const int page = std::clamp(static_cast<int>(pane.SyncPosition()), 0, count - 1) + 1;
-        return Str(prefix) + std::to_wstring(page) + L" / " + std::to_wstring(count);
+        const int page = std::clamp(static_cast<int>(pane.SyncPosition()), 0, count - 1);
+        return Str(prefix) + pane.FormatPageText(page); // "ix (9/314)" when labeled
     };
     const auto zoomText = [](PaneWindow& pane) {
         if (!pane.HasDocument())
@@ -705,18 +1441,23 @@ void MainWindow::UpdateStatusBar() {
     else if (m_sync->ZoomSync())
         sync = StrId::StatusSyncZoom;
 
-    const std::wstring texts[5] = {
+    // Layout: [L page][L zoom][filler][sync centered][R page][R zoom][filler].
+    const std::wstring texts[7] = {
         pageText(*m_left, StrId::StatusLeftPrefix, StrId::StatusLeftNoDoc),
         zoomText(*m_left),
+        std::wstring(),
+        Str(sync),
         pageText(*m_right, StrId::StatusRightPrefix, StrId::StatusRightNoDoc),
         zoomText(*m_right),
-        Str(sync),
+        std::wstring(),
     };
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < 7; ++i) {
         if (m_statusText[i] == texts[i])
             continue; // SB_SETTEXT repaints the part even when nothing changed
         m_statusText[i] = texts[i];
-        SendMessageW(m_status, SB_SETTEXTW, static_cast<WPARAM>(i),
+        // The fillers are visual gaps, not cells: no sunken border on them.
+        const WPARAM part = static_cast<WPARAM>(i) | ((i == 2 || i == 6) ? SBT_NOBORDERS : 0);
+        SendMessageW(m_status, SB_SETTEXTW, part,
                      reinterpret_cast<LPARAM>(m_statusText[i].c_str()));
     }
 }
@@ -736,16 +1477,50 @@ void MainWindow::ApplyScrollMode(PaneWindow::ScrollMode mode) {
     UpdateCommandUi();
 }
 
+void MainWindow::SwapPanes() {
+    struct Snapshot {
+        bool has = false;
+        std::wstring path;
+        float zoom = 1.0f;
+        float scrollX = 0;
+        float scrollY = 0;
+        PaneWindow::ZoomMode zoomMode = PaneWindow::ZoomMode::FitPage;
+    };
+    const auto snap = [](PaneWindow& pane) {
+        return Snapshot{pane.HasPersistableDocument(), pane.DocumentPath(), pane.PersistZoom(),
+                        pane.PersistScrollX(), pane.PersistScrollY(), pane.PersistZoomMode()};
+    };
+    const Snapshot left = snap(*m_left);
+    const Snapshot right = snap(*m_right);
+    if (!left.has && !right.has)
+        return;
+    std::swap(m_fallbackLeft, m_fallbackRight);
+    // The documents reload through their workers (a live Document cannot
+    // change pane: the worker posts to its pane's HWND); the views ride the
+    // session-restore path and the sync anchors recapture on DocumentOpened.
+    // The swapped MRU pair that gets recorded is intended: the new
+    // arrangement genuinely is reversed.
+    if (right.has)
+        m_left->OpenDocumentWithView(right.path, right.zoom, right.scrollX, right.scrollY,
+                                     right.zoomMode);
+    else
+        m_left->CloseDocument();
+    if (left.has)
+        m_right->OpenDocumentWithView(left.path, left.zoom, left.scrollX, left.scrollY,
+                                      left.zoomMode);
+    else
+        m_right->CloseDocument();
+}
+
 void MainWindow::SwitchLanguage(Lang lang) {
     if (lang == UiLanguage())
         return;
     SetUiLanguage(lang);
     HMENU old = m_menu;
     m_menu = BuildMenuBar();
-    if (!m_fullscreen) { // while full screen the new handle just stays parked
-        SetMenu(m_hwnd, m_menu);
-        DrawMenuBar(m_hwnd);
-    }
+    // Repoint the band BEFORE destroying the old handle it still references.
+    m_menuBand.SetMenu(m_menu);
+    UpdateRebarBandSizes(); // the new titles change the menu band's width
     if (old)
         DestroyMenu(old);
     UpdateTitle();
@@ -760,9 +1535,10 @@ void MainWindow::SwitchLanguage(Lang lang) {
 void MainWindow::ShowStatusMessage(StrId id) {
     if (!m_status)
         return;
-    // Borrow the sync part for a transient message; the timer restores it.
-    m_statusText[4] = Str(id);
-    SendMessageW(m_status, SB_SETTEXTW, 4, reinterpret_cast<LPARAM>(m_statusText[4].c_str()));
+    // Borrow the sync part (index 3) for a transient message; the timer
+    // restores it.
+    m_statusText[3] = Str(id);
+    SendMessageW(m_status, SB_SETTEXTW, 3, reinterpret_cast<LPARAM>(m_statusText[3].c_str()));
     SetTimer(m_hwnd, kStatusMsgTimer, 4000, nullptr);
 }
 
@@ -795,6 +1571,34 @@ void MainWindow::LaunchInverseSearch(const SyncTexIndex::InverseHit& hit) {
     } else {
         ShowStatusMessage(StrId::SyncTexEditorError);
     }
+}
+
+BOOL MainWindow::HandleOpenDocumentCopyData(const COPYDATASTRUCT& cds) {
+    // Same validation discipline as the forward-search op: caps, exact size,
+    // copy-now (the buffer dies at return), rooted paths only.
+    if (cds.cbData < sizeof(OpenDocumentBlob))
+        return FALSE;
+    OpenDocumentBlob blob{};
+    memcpy(&blob, cds.lpData, sizeof(blob));
+    if (blob.side > 1 || blob.pathLen == 0 || blob.pathLen > 0x8000)
+        return FALSE;
+    const size_t expected =
+        sizeof(OpenDocumentBlob) + static_cast<size_t>(blob.pathLen) * sizeof(wchar_t);
+    if (cds.cbData != expected)
+        return FALSE;
+    const auto* chars = reinterpret_cast<const wchar_t*>(
+        static_cast<const BYTE*>(cds.lpData) + sizeof(OpenDocumentBlob));
+    std::wstring path(chars, blob.pathLen);
+    const bool rooted = path.size() >= 3 && (path[1] == L':' || path.rfind(L"\\\\", 0) == 0);
+    if (!rooted)
+        return FALSE;
+    // The sender granted AllowSetForegroundWindow; flash as the fallback cue.
+    if (!SetForegroundWindow(m_hwnd)) {
+        FLASHWINFO fi{sizeof(fi), m_hwnd, FLASHW_TRAY | FLASHW_TIMERNOFG, 3, 0};
+        FlashWindowEx(&fi);
+    }
+    (blob.side != 0 ? m_right : m_left)->OpenDocument(std::move(path));
+    return TRUE;
 }
 
 void MainWindow::RouteForwardSearch(ForwardSearchRequest req) {
@@ -840,7 +1644,8 @@ void MainWindow::ToggleFullScreen() {
         if (!GetWindowPlacement(m_hwnd, &m_fsRestorePlacement))
             return;
         m_fsRestoreStyle = static_cast<LONG>(GetWindowLongW(m_hwnd, GWL_STYLE));
-        SetMenu(m_hwnd, nullptr); // the handle stays parked in m_menu
+        // The menu lives in the rebar band; Layout's !m_fullscreen guard
+        // hides the whole rebar, so no SetMenu dance is needed anymore.
         SetWindowLongW(m_hwnd, GWL_STYLE, m_fsRestoreStyle & ~WS_OVERLAPPEDWINDOW);
         MONITORINFO mi{};
         mi.cbSize = sizeof(mi);
@@ -855,7 +1660,6 @@ void MainWindow::ToggleFullScreen() {
     } else {
         m_fullscreen = false;
         SetWindowLongW(m_hwnd, GWL_STYLE, m_fsRestoreStyle);
-        SetMenu(m_hwnd, m_menu);
         SetWindowPlacement(m_hwnd, &m_fsRestorePlacement); // normal AND maximized state
         SetWindowPos(m_hwnd, nullptr, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
@@ -896,8 +1700,9 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(m_hwnd, GWLP_HINSTANCE));
         m_left->Create(m_hwnd, 100);
         m_right->Create(m_hwnd, 101);
-        CreateToolbar(hinst);
-        CreateFindBar(); // after the panes: overlays must be above them
+        m_activePane = m_left.get();
+        BuildRebar(hinst); // menu band + command toolbar + page box, one row
+        CreateFindBar();   // after the panes: overlays must be above them
         m_outlineTree = CreateWindowExW(
             0, WC_TREEVIEWW, nullptr,
             WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | TVS_HASBUTTONS | TVS_HASLINES |
@@ -933,6 +1738,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         m_dpi = HIWORD(wParam);
         UpdateUiFont();
         RebuildToolbarIcons();
+        UpdateRebarBandSizes();
         // Panes must know the new DPI before SetWindowPos: its synchronous
         // WM_SIZE cascade rebuilds and presents their targets immediately.
         m_left->OnDpiChanged(m_dpi);
@@ -969,7 +1775,8 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             GetCursorPos(&pt);
             ScreenToClient(m_hwnd, &pt);
             const RECT splitter = SplitterRect();
-            if (PtInRect(&splitter, pt)) {
+            const RECT divider = OutlineDividerRect();
+            if (PtInRect(&splitter, pt) || PtInRect(&divider, pt)) {
                 SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
                 return TRUE;
             }
@@ -979,35 +1786,44 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_LBUTTONDOWN: {
         const POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         const RECT splitter = SplitterRect();
-        if (PtInRect(&splitter, pt)) {
-            m_draggingSplitter = true;
+        const RECT divider = OutlineDividerRect();
+        if (PtInRect(&splitter, pt))
+            m_drag = DragTarget::PaneSplitter;
+        else if (PtInRect(&divider, pt))
+            m_drag = DragTarget::OutlineDivider;
+        if (m_drag != DragTarget::None)
             SetCapture(m_hwnd);
-        }
         return 0;
     }
 
     case WM_MOUSEMOVE:
-        if (m_draggingSplitter) {
+        if (m_drag == DragTarget::PaneSplitter) {
             SetSplitRatioFromX(GET_X_LPARAM(lParam));
+            Layout();
+        } else if (m_drag == DragTarget::OutlineDivider) {
+            SetOutlineWidthFromX(GET_X_LPARAM(lParam));
             Layout();
         }
         return 0;
 
     case WM_LBUTTONUP:
-        if (m_draggingSplitter)
+        if (m_drag != DragTarget::None)
             ReleaseCapture();
         return 0;
 
     case WM_CAPTURECHANGED:
-        m_draggingSplitter = false;
+        m_drag = DragTarget::None;
         return 0;
 
     case WM_LBUTTONDBLCLK: {
         const POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         const RECT splitter = SplitterRect();
+        const RECT divider = OutlineDividerRect();
         if (PtInRect(&splitter, pt)) {
             m_splitRatio = 0.5f;
             Layout();
+        } else if (PtInRect(&divider, pt)) {
+            FitOutlineToContent(); // best fit: no horizontal scroll in the tree
         }
         return 0;
     }
@@ -1024,18 +1840,22 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (wParam == kStatusMsgTimer) {
             KillTimer(m_hwnd, kStatusMsgTimer);
-            m_statusText[4].assign(1, L'\xFFFF'); // force the part to rewrite
+            m_statusText[3].assign(1, L'\xFFFF'); // force the sync part to rewrite
             UpdateStatusBar();
             return 0;
         }
         break;
 
     case WM_COPYDATA: {
-        // SyncTeX forward search from a short-lived second instance. The
-        // message crosses process boundaries: validate the payload exactly.
+        // Requests from short-lived second instances (SyncTeX forward search,
+        // Explorer-verb opens). The message crosses process boundaries:
+        // validate every payload exactly.
         const auto* cds = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
-        if (!cds || cds->dwData != kCdForwardSearch || !cds->lpData ||
-            cds->cbData < sizeof(ForwardSearchBlob))
+        if (!cds || !cds->lpData)
+            return FALSE;
+        if (cds->dwData == kCdOpenDocument)
+            return HandleOpenDocumentCopyData(*cds);
+        if (cds->dwData != kCdForwardSearch || cds->cbData < sizeof(ForwardSearchBlob))
             return FALSE;
         ForwardSearchBlob blob;
         memcpy(&blob, cds->lpData, sizeof(blob));
@@ -1150,6 +1970,9 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             Layout();
             UpdateCommandUi();
             return 0;
+        case IDC_LOCK_TOOLBARS:
+            SetRebarLocked(!m_rebarLocked);
+            return 0;
         case IDC_TOGGLE_STATUSBAR:
             m_statusVisible = !m_statusVisible;
             Layout();
@@ -1181,6 +2004,15 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_SCROLL_PAGED:
             ApplyScrollMode(PaneWindow::ScrollMode::Paged);
             return 0;
+        case IDC_GOTO_PAGE:
+            ShowGotoPageDialog();
+            return 0;
+        case IDC_OPTIONS:
+            ShowOptionsDialog();
+            return 0;
+        case IDC_SWAP_PANES:
+            SwapPanes();
+            return 0;
         case IDC_FULLSCREEN:
             ToggleFullScreen();
             return 0;
@@ -1203,6 +2035,27 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_NOTIFY: {
         const NMHDR* hdr = reinterpret_cast<const NMHDR*>(lParam);
+        LRESULT bandResult = 0;
+        if (m_menuBand.OnNotify(hdr, &bandResult))
+            return bandResult;
+        if (hdr->hwndFrom == m_rebar && hdr->code == RBN_CHEVRONPUSHED) {
+            const auto* nm = reinterpret_cast<const NMREBARCHEVRON*>(lParam);
+            if (nm->wID == kBandMenu) {
+                RECT rc = nm->rc;
+                MapWindowPoints(m_rebar, nullptr, reinterpret_cast<LPPOINT>(&rc), 2);
+                m_menuBand.ShowChevron(rc);
+            } else {
+                ShowChevronMenu(nm);
+            }
+            return 0;
+        }
+        if (hdr->hwndFrom == m_rebar && hdr->code == RBN_HEIGHTCHANGE) {
+            // Band drags rewrap the rows: the panes must follow the new bar
+            // height (guarded against Layout's own rebar MoveWindow).
+            if (!m_layingOut)
+                Layout();
+            return 0;
+        }
         if (hdr->idFrom == IDC_OUTLINE_TREE && hdr->code == TVN_SELCHANGEDW &&
             m_outlineVisible && !m_populatingOutline && m_outlinePane) {
             const NMTREEVIEWW* tv = reinterpret_cast<const NMTREEVIEWW*>(lParam);
@@ -1212,45 +2065,24 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (hdr->code == TTN_GETDISPINFOW) { // toolbar tooltips; idFrom = command id
             auto* info = reinterpret_cast<NMTTDISPINFOW*>(lParam);
-            StrId tip;
-            switch (hdr->idFrom) {
-            case IDC_OPEN_LEFT:
-                tip = StrId::TipOpenLeft;
-                break;
-            case IDC_OPEN_RIGHT:
-                tip = StrId::TipOpenRight;
-                break;
-            case IDC_TOGGLE_SCROLL_SYNC:
-                tip = StrId::TipScrollSync;
-                break;
-            case IDC_TOGGLE_ZOOM_SYNC:
-                tip = StrId::TipZoomSync;
-                break;
-            case IDC_FIT_WIDTH:
-                tip = StrId::TipFitWidth;
-                break;
-            case IDC_FIT_PAGE:
-                tip = StrId::TipFitPage;
-                break;
-            case IDC_SCROLL_CONTINUOUS:
-                tip = StrId::TipScrollContinuous;
-                break;
-            case IDC_SCROLL_PAGED:
-                tip = StrId::TipScrollPaged;
-                break;
-            case IDC_FIND_SHOW:
-                tip = StrId::TipFind;
-                break;
-            case IDC_TOGGLE_OUTLINE:
-                tip = StrId::TipOutline;
-                break;
-            case IDC_FULLSCREEN:
-                tip = StrId::TipFullScreen;
-                break;
-            default:
-                return 0;
+            info->lpszText = const_cast<wchar_t*>(Str(CommandTipId(static_cast<UINT>(hdr->idFrom))));
+            return 0;
+        }
+        break;
+    }
+
+    case WM_CONTEXTMENU: {
+        // Right-click anywhere on the bar area (rebar background or a band
+        // child): the IE-style toolbar context menu.
+        const HWND from = reinterpret_cast<HWND>(wParam);
+        if (m_rebar && !m_fullscreen && (from == m_rebar || IsChild(m_rebar, from))) {
+            POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            if (pt.x == -1 && pt.y == -1) { // keyboard invocation: anchor to the bar
+                RECT rc;
+                GetWindowRect(m_rebar, &rc);
+                pt = {rc.left, rc.bottom};
             }
-            info->lpszText = const_cast<wchar_t*>(Str(tip));
+            ShowRebarContextMenu(pt);
             return 0;
         }
         break;
@@ -1287,9 +2119,15 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         // DefWindowProc would focus the menu bar. When that Alt modified a
         // scroll (the temporary sync unlock), swallow it; Alt+letter
         // mnemonics carry the character in lParam and pass through.
-        if ((wParam & 0xFFF0) == SC_KEYMENU && lParam == 0 && m_altScrollGesture) {
-            m_altScrollGesture = false;
-            return 0;
+        if ((wParam & 0xFFF0) == SC_KEYMENU) {
+            if (lParam == 0 && m_altScrollGesture) {
+                m_altScrollGesture = false;
+                return 0;
+            }
+            // The rebar band owns menu-bar keyboarding now: plain Alt/F10
+            // arms the band, Alt+letter tracks the matching popup.
+            if (m_menuBand.OnSysKeyMenu(lParam))
+                return 0;
         }
         // NOT worth also hiding the accelerator underlines while Alt stays
         // held after the scroll: the system repaints them from the physical
@@ -1300,8 +2138,20 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_INITMENU:
         // The menu opened some other way (click, mnemonic): a stale gesture
-        // flag must not swallow the NEXT genuine Alt tap.
+        // flag must not swallow the NEXT genuine Alt tap. TrackPopupMenuEx
+        // sends this too, so the band's popups keep the reset behavior.
         m_altScrollGesture = false;
+        break;
+
+    // Menu-loop bookkeeping for the band's Left/Right top-level navigation.
+    case WM_MENUSELECT:
+        m_menuBand.OnMenuSelect(wParam);
+        break;
+    case WM_INITMENUPOPUP:
+        m_menuBand.OnInitMenuPopup();
+        break;
+    case WM_UNINITMENUPOPUP:
+        m_menuBand.OnUninitMenuPopup();
         break;
 
     case WM_SETTINGCHANGE:
@@ -1316,9 +2166,9 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_DESTROY:
         m_destroying = true;
-        // While full screen the menu is detached: window destruction only
-        // frees an attached menu, so this one must be freed by hand.
-        if (m_menu && !GetMenu(m_hwnd)) {
+        // The menu is never attached (it feeds the rebar band), so window
+        // destruction never frees it: always free it by hand.
+        if (m_menu) {
             DestroyMenu(m_menu);
             m_menu = nullptr;
         }
@@ -1336,57 +2186,84 @@ void MainWindow::Layout() {
     GetClientRect(m_hwnd, &rc);
 
     // Full screen hides the bars without touching the persisted visibility
-    // flags. The bars self-position (CCS_TOP / SBARS grip) and never resize
-    // the frame, so no WM_SIZE recursion: only the panes shrink, and their
-    // fit zoom is derived from their own window rect.
-    const bool toolbarOn = m_toolbar && m_toolbarVisible && !m_fullscreen;
+    // flags: the whole rebar (menu included) disappears, matching the old
+    // SetMenu(nullptr) behavior. "View > Toolbar" only hides the command
+    // toolbar and page box BANDS; the menu band always stays.
+    const bool rebarOn = m_rebar && !m_fullscreen;
     const bool statusOn = m_status && m_statusVisible && !m_fullscreen;
-    if (m_toolbar)
-        ShowWindow(m_toolbar, toolbarOn ? SW_SHOW : SW_HIDE);
+    if (m_rebar) {
+        // Bands by id, not index: the user can reorder them when unlocked.
+        const auto showBand = [this](UINT id, BOOL show) {
+            const LRESULT index = SendMessageW(m_rebar, RB_IDTOINDEX, id, 0);
+            if (index != -1)
+                SendMessageW(m_rebar, RB_SHOWBAND, static_cast<WPARAM>(index), show);
+        };
+        showBand(kBandToolbar, m_toolbarVisible ? TRUE : FALSE);
+        showBand(kBandPageBox, m_toolbarVisible ? TRUE : FALSE);
+        ShowWindow(m_rebar, rebarOn ? SW_SHOW : SW_HIDE);
+    }
     if (m_status)
         ShowWindow(m_status, statusOn ? SW_SHOW : SW_HIDE);
     int top = 0;
     int bottom = rc.bottom;
-    if (toolbarOn) {
-        SendMessageW(m_toolbar, TB_AUTOSIZE, 0, 0);
-        RECT bar;
-        GetWindowRect(m_toolbar, &bar);
-        top = bar.bottom - bar.top;
+    if (rebarOn) {
+        // Width first, then measure: RB_GETBARHEIGHT needs the row layout.
+        // The guard breaks the cycle with RBN_HEIGHTCHANGE, whose handler
+        // calls Layout right back.
+        m_layingOut = true;
+        MoveWindow(m_rebar, 0, 0, rc.right, 0, TRUE);
+        top = static_cast<int>(SendMessageW(m_rebar, RB_GETBARHEIGHT, 0, 0));
+        MoveWindow(m_rebar, 0, 0, rc.right, top, TRUE);
+        m_layingOut = false;
     }
     if (statusOn) {
         SendMessageW(m_status, WM_SIZE, 0, 0);
         RECT bar;
         GetWindowRect(m_status, &bar);
         bottom -= bar.bottom - bar.top;
-        // Right edges of the five parts; the sync summary takes the rest.
-        constexpr int kPartDip[] = {130, 60, 130, 60};
-        int parts[5];
-        int edge = 0;
-        for (size_t i = 0; i < std::size(kPartDip); ++i) {
-            edge += MulDiv(kPartDip[i], m_dpi, 96);
-            parts[i] = edge;
-        }
-        parts[4] = -1;
+        // Seven parts mirroring the pane geometry: left half = left pane
+        // (page, zoom), sync summary CENTERED straddling the midline, right
+        // half = right pane; two borderless fillers absorb the slack (the
+        // last one also hosts the size grip).
+        const int pageW = MulDiv(170, m_dpi, 96);
+        const int zoomW = MulDiv(60, m_dpi, 96);
+        const int syncW = MulDiv(150, m_dpi, 96);
+        int parts[7];
+        parts[0] = pageW;
+        parts[1] = parts[0] + zoomW;
+        parts[2] = std::max(parts[1], static_cast<int>(rc.right) / 2 - syncW / 2); // filler
+        parts[3] = parts[2] + syncW; // sync, astride the midline
+        parts[4] = parts[3] + pageW;
+        parts[5] = parts[4] + zoomW;
+        parts[6] = -1; // filler under the grip
         SendMessageW(m_status, SB_SETPARTS, std::size(parts), reinterpret_cast<LPARAM>(parts));
     }
     m_contentTop = top;
     m_contentBottom = bottom;
 
     const int h = bottom - top;
-    const int sidebarW = m_outlineVisible ? MulDiv(260, m_dpi, 96) : 0;
-    const int x0 = sidebarW;
+    const int splitterW = MulDiv(kSplitterDip, m_dpi, 96);
+    const int minPane = MulDiv(kMinPaneDip, m_dpi, 96);
+    if (m_outlineVisible) {
+        // User-resizable width, clamped so both panes keep their minimum.
+        const int minSidebar = MulDiv(120, m_dpi, 96);
+        const int maxSidebar =
+            std::max(minSidebar, static_cast<int>(rc.right) - 2 * minPane - 2 * splitterW);
+        m_sidebarPx = std::clamp(MulDiv(m_outlineWidthDip, m_dpi, 96), minSidebar, maxSidebar);
+    } else {
+        m_sidebarPx = 0;
+    }
+    const int x0 = m_sidebarPx + (m_outlineVisible ? splitterW : 0);
     const int w = rc.right - x0;
     if (w <= 0 || h <= 0 || !m_left || !m_left->Hwnd())
         return;
 
     if (m_outlineTree) {
         if (m_outlineVisible)
-            MoveWindow(m_outlineTree, 0, top, sidebarW, h, TRUE);
+            MoveWindow(m_outlineTree, 0, top, m_sidebarPx, h, TRUE);
         ShowWindow(m_outlineTree, m_outlineVisible ? SW_SHOW : SW_HIDE);
     }
 
-    const int splitterW = MulDiv(kSplitterDip, m_dpi, 96);
-    const int minPane = MulDiv(kMinPaneDip, m_dpi, 96);
     int leftW = static_cast<int>(static_cast<float>(w - splitterW) * m_splitRatio + 0.5f);
     if (w - splitterW >= 2 * minPane)
         leftW = std::clamp(leftW, minPane, w - splitterW - minPane);
@@ -1442,10 +2319,11 @@ void MainWindow::UpdateUiFont() {
     if (!font)
         return;
     for (HWND child : {m_findEdit, m_findCount, m_findPrev, m_findNext, m_findClose,
-                       m_outlineTree, m_status}) {
+                       m_outlineTree, m_status, m_pageBox}) {
         if (child)
             SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     }
+    m_menuBand.SetFont(font); // text buttons; the icon toolbar keeps its own
     if (m_uiFont)
         DeleteObject(m_uiFont);
     m_uiFont = font;
@@ -1569,17 +2447,59 @@ RECT MainWindow::SplitterRect() const {
     return {m_splitterX, m_contentTop, m_splitterX + splitterW, m_contentBottom};
 }
 
+RECT MainWindow::OutlineDividerRect() const {
+    if (!m_outlineVisible || m_sidebarPx <= 0)
+        return {0, 0, 0, 0}; // PtInRect is always false on an empty rect
+    const int splitterW = MulDiv(kSplitterDip, m_dpi, 96);
+    return {m_sidebarPx, m_contentTop, m_sidebarPx + splitterW, m_contentBottom};
+}
+
 void MainWindow::SetSplitRatioFromX(int x) {
     RECT rc;
     GetClientRect(m_hwnd, &rc);
-    const int sidebarW = m_outlineVisible ? MulDiv(260, m_dpi, 96) : 0;
     const int splitterW = MulDiv(kSplitterDip, m_dpi, 96);
-    const int usable = rc.right - sidebarW - splitterW;
+    // Live sidebar geometry (the outline divider shifts the pane strip).
+    const int x0 = m_sidebarPx + (m_outlineVisible ? splitterW : 0);
+    const int usable = rc.right - x0 - splitterW;
     if (usable <= 0)
         return;
-    const float ratio =
-        static_cast<float>(x - sidebarW - splitterW / 2) / static_cast<float>(usable);
+    const float ratio = static_cast<float>(x - x0 - splitterW / 2) / static_cast<float>(usable);
     m_splitRatio = std::clamp(ratio, 0.1f, 0.9f);
+}
+
+void MainWindow::SetOutlineWidthFromX(int x) {
+    // The drag position is the divider's left edge = the sidebar width;
+    // Layout re-clamps against the live client width.
+    m_outlineWidthDip = std::clamp(MulDiv(x, 96, m_dpi), 120, 600);
+}
+
+void MainWindow::FitOutlineToContent() {
+    if (!m_outlineTree || !m_outlineVisible)
+        return;
+    // The width that makes the tree's horizontal scrollbar vanish: the
+    // widest EXPANDED item's text right edge (collapsed branches do not feed
+    // the horizontal extent). Item rects are client-relative, so a tree that
+    // is currently h-scrolled needs the offset added back.
+    int maxRight = 0;
+    HTREEITEM item = TreeView_GetRoot(m_outlineTree);
+    while (item) {
+        RECT rc{};
+        if (TreeView_GetItemRect(m_outlineTree, item, &rc, TRUE))
+            maxRight = std::max(maxRight, static_cast<int>(rc.right));
+        item = TreeView_GetNextVisible(m_outlineTree, item);
+    }
+    if (maxRight <= 0)
+        return; // empty outline: keep the current width
+    const int scrollX = GetScrollPos(m_outlineTree, SB_HORZ);
+    const LONG style = GetWindowLongW(m_outlineTree, GWL_STYLE);
+    const int vsb =
+        (style & WS_VSCROLL) != 0 ? GetSystemMetricsForDpi(SM_CXVSCROLL, m_dpi) : 0;
+    const int border = GetSystemMetricsForDpi(SM_CXBORDER, m_dpi); // WS_BORDER edges
+    const int pad = MulDiv(8, m_dpi, 96); // breathing room past the longest title
+    const int desired = maxRight + scrollX + pad + vsb + 2 * border;
+    // Same bounds as the drag: panes must stay usable (Layout re-clamps too).
+    m_outlineWidthDip = std::clamp(MulDiv(desired, 96, m_dpi), 120, 600);
+    Layout();
 }
 
 void MainWindow::OpenDocumentDialog(bool rightPane) {

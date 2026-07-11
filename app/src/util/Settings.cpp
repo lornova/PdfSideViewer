@@ -4,6 +4,7 @@ namespace {
 
 constexpr PCWSTR kWindowSection = L"window";
 constexpr PCWSTR kSyncSection = L"sync";
+constexpr PCWSTR kDefaultsSection = L"defaults";
 constexpr PCWSTR kMruFilesSection = L"mru-files";
 constexpr PCWSTR kMruPairsSection = L"mru-pairs";
 constexpr PCWSTR kSynctexSection = L"synctex";
@@ -31,6 +32,18 @@ private:
 };
 
 std::wstring SettingsPath() {
+    // Test isolation hook: E2E suites point this at a scratch directory so
+    // they can never wipe or overwrite the user's real settings.ini (which
+    // has happened: a suite window plus a concurrent user launch empties the
+    // MRU lists the user then persists on close).
+    wchar_t override[MAX_PATH];
+    const DWORD overrideLen =
+        GetEnvironmentVariableW(L"PSV_SETTINGS_DIR", override, MAX_PATH);
+    if (overrideLen > 0 && overrideLen < MAX_PATH) {
+        std::wstring dir(override, overrideLen);
+        CreateDirectoryW(dir.c_str(), nullptr);
+        return dir + L"\\settings.ini";
+    }
     wchar_t appData[MAX_PATH];
     const DWORD len = GetEnvironmentVariableW(L"APPDATA", appData, MAX_PATH);
     if (len == 0 || len >= MAX_PATH)
@@ -133,6 +146,15 @@ AppSettings AppSettings::Load() {
     s.scrollSync = ReadInt(file, kSyncSection, L"scroll", 1) != 0;
     s.zoomSync = ReadInt(file, kSyncSection, L"zoom", 1) != 0;
     s.scrollMode = std::clamp(ReadInt(file, kWindowSection, L"scrollMode", 0), 0, 1);
+    s.restoreSession = ReadInt(file, kWindowSection, L"restoreSession", 1) != 0;
+    s.wheelLines = std::clamp(ReadInt(file, kWindowSection, L"wheelLines", 0), 0, 100);
+    s.outlineWidth = std::clamp(ReadInt(file, kWindowSection, L"outlineWidth", 260), 120, 600);
+    s.rebarLocked = ReadInt(file, kWindowSection, L"rebarLocked", 1) != 0;
+    s.rebarBands = ReadString(file, kWindowSection, L"rebarBands");
+    s.defScrollMode = std::clamp(ReadInt(file, kDefaultsSection, L"scrollMode", 0), 0, 1);
+    s.defZoomMode = std::clamp(ReadInt(file, kDefaultsSection, L"zoomMode", 2), 0, 2);
+    s.defScrollSync = ReadInt(file, kDefaultsSection, L"scrollSync", 1) != 0;
+    s.defZoomSync = ReadInt(file, kDefaultsSection, L"zoomSync", 1) != 0;
     {
         std::wstring inverse = ReadString(file, kSynctexSection, L"inverse");
         if (!inverse.empty())
@@ -179,6 +201,15 @@ void AppSettings::Save() const {
     WriteInt(file, kWindowSection, L"outline", outline ? 1 : 0);
     WriteString(file, kWindowSection, L"language", language);
     WriteInt(file, kWindowSection, L"scrollMode", scrollMode);
+    WriteInt(file, kWindowSection, L"restoreSession", restoreSession ? 1 : 0);
+    WriteInt(file, kWindowSection, L"wheelLines", wheelLines);
+    WriteInt(file, kWindowSection, L"outlineWidth", outlineWidth);
+    WriteInt(file, kWindowSection, L"rebarLocked", rebarLocked ? 1 : 0);
+    WriteString(file, kWindowSection, L"rebarBands", rebarBands);
+    WriteInt(file, kDefaultsSection, L"scrollMode", defScrollMode);
+    WriteInt(file, kDefaultsSection, L"zoomMode", defZoomMode);
+    WriteInt(file, kDefaultsSection, L"scrollSync", defScrollSync ? 1 : 0);
+    WriteInt(file, kDefaultsSection, L"zoomSync", defZoomSync ? 1 : 0);
     WriteInt(file, kSyncSection, L"scroll", scrollSync ? 1 : 0);
     WriteInt(file, kSyncSection, L"zoom", zoomSync ? 1 : 0);
     WriteString(file, kSynctexSection, L"inverse", synctexInverse);

@@ -57,6 +57,12 @@ public:
     void OnDpiChanged(UINT dpi);
     void SetZoomMode(ZoomMode mode);
     ZoomMode GetZoomMode() const { return m_zoomMode; }
+    // Configurable zoom mode applied to every FRESH document (session/reload
+    // restores still override it through OpenDocumentWithView).
+    void SetDefaultZoomMode(ZoomMode mode) { m_defaultZoomMode = mode; }
+    // Options override for SPI_GETWHEELSCROLLLINES; 0 = use the system value
+    // (which is also the only way to get WHEEL_PAGESCROLL semantics).
+    void SetWheelLinesOverride(int lines) { m_wheelLinesOverride = lines; }
 
     // Continuous = classic whole-document scrolling. Paged = the view is
     // clamped to one page and edge scrolling flips pages. The mode is global
@@ -131,6 +137,18 @@ public:
     // Document outline (flattened tree; empty when the document has none).
     const std::vector<Document::OutlineItem>& Outline() const { return m_outline; }
     void GotoOutlineItem(int index);
+
+    // ------------------------------------------------------------ page labels --
+    // /PageLabels label for a 0-based page (empty when the document has none).
+    const std::wstring& PageLabel(int pageIndex) const;
+    // The one shared page formatter (status bar, scrollbar tooltip, go-to):
+    // "label (N/count)" when a label exists and differs from the ordinal,
+    // plain "N / count" otherwise.
+    std::wstring FormatPageText(int pageIndex) const;
+    // Exact case-insensitive label match; -1 when no label matches.
+    int FindPageByLabel(const std::wstring& text) const;
+    // Top-aligned jump to a 0-based page (adopts it in paged mode).
+    void GotoPage(int pageIndex);
 
     // ---------------------------------------------------------------- synctex --
     // Inverse search resolved: the frame owns launching the editor. A null
@@ -258,6 +276,11 @@ private:
     void EvictStale(int firstKeep, int lastKeep);
 
     void ResetDocumentState(); // shared clear list: the current document goes away
+    // Scrollbar-drag page tooltip ("ix (9/314)" beside the vertical bar).
+    void EnsureScrollTip();
+    void UpdateScrollTip(float trackY);
+    void HideScrollTip();
+
     void TryReloadDocument();
     void InverseSearchAt(POINT client);
     void FlashSyncTarget(int pageIndex, std::vector<Document::RectPt> rects);
@@ -312,6 +335,7 @@ private:
     InverseSearchHandler m_onInverseSearch;
     PageLayout m_layout;
     std::vector<Document::OutlineItem> m_outline;
+    std::vector<std::wstring> m_pageLabels; // empty when the doc has no /PageLabels
     ZoomMode m_zoomMode = ZoomMode::FitPage;
     float m_zoom = 1.0f;
     float m_scrollX = 0; // content px
@@ -319,6 +343,9 @@ private:
     ScrollMode m_scrollMode = ScrollMode::Continuous;
     int m_currentPage = 0;  // paged mode: the one page drawn and clamped to
     float m_wheelAccum = 0; // paged mode: signed wheel credit toward one detent
+    ZoomMode m_defaultZoomMode = ZoomMode::FitPage; // for fresh documents
+    int m_wheelLinesOverride = 0;                   // 0 = system wheel lines
+    HWND m_scrollTip = nullptr; // lazy tracking tooltip for scrollbar drags
     std::map<int, CachedBitmap> m_previews; // whole page, capped size; tile fallback
     std::map<TileKey, CachedBitmap> m_tiles; // exact-scale tiles when res > 0
     uint64_t m_frame = 0; // bumped per DrawDocument; drives tile eviction
