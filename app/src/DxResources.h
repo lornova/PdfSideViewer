@@ -21,6 +21,9 @@ public:
     ID3D11Device* D3dDevice() const { return m_d3dDevice.Get(); }
     IDXGIFactory2* DxgiFactory() const { return m_dxgiFactory.Get(); }
     ID2D1Device* D2dDevice() const { return m_d2dDevice.Get(); }
+    // Discard() resets this too: factory-owned objects (stroke styles) follow
+    // the device generation, unlike the DWrite factory below.
+    ID2D1Factory1* D2dFactory() const { return m_d2dFactory.Get(); }
     IDWriteFactory* DWriteFactory() const { return m_dwriteFactory.Get(); }
 
 private:

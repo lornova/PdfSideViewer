@@ -3,6 +3,7 @@
 #include "PaneWindow.h"
 #include "framework.h"
 
+#include <functional>
 #include <vector>
 
 // One WinMerge-style synchronization point: a pair of WHOLE pages the user
@@ -80,6 +81,31 @@ public:
     // non-empty map and both panes have documents.
     void RealignFollower(PaneWindow& leader);
 
+    // Fired after EVERY change to the point map, including the implicit clear
+    // on DocumentOpened (which has no frame-visible call site): the frame
+    // reacts by rebuilding alignment gaps and marker lists for both panes.
+    void SetMapChangedHandler(std::function<void()> handler) {
+        m_onMapChanged = std::move(handler);
+    }
+    // Mirrors the "Show Alignment Gaps" menu toggle. Gaps on + non-empty map:
+    // the panes' layouts are slot-aligned and scroll sync is IDENTITY on
+    // virtual (slot) coordinates; off = the waiting behavior of MapTarget.
+    void SetAlignmentGapsEnabled(bool on) { m_gapsEnabled = on; }
+    bool AlignmentGapsEnabled() const { return m_gapsEnabled; }
+    // Reinstalls a complete map wholesale (swap mirroring). The caller
+    // guarantees the both-coordinates-increasing invariant. Fires the map
+    // change; touches neither the anchors, the sync flags nor the parked
+    // regen (mirrored generated points re-arm regen via HasAutoPoints on the
+    // next reload). No-op on empty input.
+    void RestorePoints(std::vector<SyncPoint> points);
+    // Routes programmatic pane moves (gap rebuilds) past the sync echo,
+    // exactly like the controller's own writes. Reentrant-safe.
+    void ApplySilently(const std::function<void()>& fn);
+    // Re-captures the zoom pairing at the panes' current zooms: the frame
+    // uses it after driving BOTH panes to an absolute preset (zoom sync on),
+    // which bypasses the normal ratio routing.
+    void ResyncZoomAnchor() { RecaptureZoomAnchor(); }
+
     void OnViewChanged(PaneWindow& source, PaneWindow::ViewEvent event, float zoomRatio);
 
 private:
@@ -87,6 +113,8 @@ private:
     void RecaptureZoomAnchor();
     double MapTarget(bool leftLeads, double pos) const; // requires !m_points.empty()
     void OnMapEmptied();
+    void NotifyMapChanged();
+    void DriveFollower(PaneWindow& leader, PaneWindow& follower); // caller holds m_applying
 
     PaneWindow& m_left;
     PaneWindow& m_right;
@@ -97,4 +125,6 @@ private:
     float m_zoomAnchor = 1.0f; // right zoom / left zoom
     std::vector<SyncPoint> m_points; // sorted; strictly increasing in BOTH coords
     bool m_regenPending = false;     // see AutoRegenPending()
+    bool m_gapsEnabled = true;       // see SetAlignmentGapsEnabled()
+    std::function<void()> m_onMapChanged;
 };

@@ -96,19 +96,27 @@ std::wstring PercentEncode(const std::wstring& s) {
 
 // Segoe MDL2 Assets codepoints; the order is the imagelist order referenced
 // by the TBBUTTON iBitmap indices in CreateToolbar.
-constexpr wchar_t kToolbarGlyphs[] = {
-    0xE8A0, // 0 open left (arrow into the left pane)
-    0xE89F, // 1 open right
-    0xE71B, // 2 scroll sync (link)
-    0xE895, // 3 zoom sync (circular arrows)
-    0xE8AB, // 4 fit width (horizontal arrows)
-    0xE9A6, // 5 fit page
-    0xE721, // 6 find
-    0xE8FD, // 7 outline (bulleted list)
-    0xE740, // 8 full screen
-    0xEC8F, // 9 continuous scrolling (ScrollUpDown)
-    0xE7C3, // 10 page-by-page (Page)
-    0xE8A9, // 11 actual size / 1:1 (ViewAll)
+constexpr GlyphSpec kToolbarGlyphs[] = {
+    {0xE8A0}, // 0 open left (arrow into the left pane)
+    {0xE89F}, // 1 open right
+    {0xE71B}, // 2 scroll sync (link)
+    {0xE895}, // 3 zoom sync (circular arrows)
+    {0xE8AB}, // 4 fit width (horizontal arrows)
+    {0xE9A6}, // 5 fit page
+    {0xE721}, // 6 find
+    {0xE8FD}, // 7 outline (bulleted list)
+    // Full screen: MDL2 has no single 4-corner-arrows glyph; E740 (one
+    // diagonal pair) plus its mirror composes all four.
+    {0xE740, true}, // 8 full screen
+    {0xEC8F},       // 9 continuous scrolling (ScrollUpDown)
+    {0xE7C3},       // 10 page-by-page (Page)
+    {0xE8A9},       // 11 actual size / 1:1 (ViewAll)
+    {0xE718},       // 12 add sync point here (Pin)
+    {0xE82D},       // 13 sync points from bookmarks (Dictionary)
+    {0xE762},       // 14 sync points list (MultiSelect)
+    {0xE894},       // 15 clear sync points (Clear)
+    {0xE8E4},       // 16 alignment gaps (uneven rows)
+    {0xE748},       // 17 swap panes (Switch)
 };
 
 constexpr UINT_PTR kPageBoxId = 2001; // rebar band 2: editable current-page box
@@ -141,9 +149,17 @@ constexpr WORD kOptSynctexId = 2106;
 constexpr WORD kOptShellId = 2107;
 constexpr WORD kOptClearMruId = 2108;
 constexpr WORD kOptWheelId = 2109;
+constexpr WORD kOptAnchorsId = 2110;
+constexpr WORD kOptTicksId = 2111;
+constexpr WORD kOptFsToolbarId = 2112;
+constexpr WORD kOptFsStatusId = 2113;
 constexpr WORD kSyncPtsListId = 2401;
 constexpr WORD kSyncPtsRemoveId = 2402;
 constexpr WORD kSyncPtsClearId = 2403;
+// Posted to the (modal) sync-points dialog when the map changes underneath it:
+// the modal loop still dispatches WM_PSV_* messages, so an auto-reload can
+// clear/regenerate the map while the dialog shows stale rows.
+constexpr UINT kMsgSyncPtsRefresh = WM_APP + 20;
 struct OptionsDialogState {
     MainWindow* self = nullptr;
     bool clearRecent = false; // armed by the button, applied on OK (cancel-safe)
@@ -209,6 +225,8 @@ MainWindow::~MainWindow() {
         DeleteObject(m_bgBrush);
     if (m_toolbarIcons)
         ImageList_Destroy(m_toolbarIcons);
+    if (m_fsBarIcons)
+        ImageList_Destroy(m_fsBarIcons);
 }
 
 bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
@@ -231,6 +249,9 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_outlineWidthDip = session.outlineWidth;
     m_rebarLocked = session.rebarLocked;
     m_rebarBandsSaved = session.rebarBands; // applied by BuildRebar in WM_CREATE
+    m_toolbarText = std::clamp(session.toolbarText, 0, 2); // read by CreateToolbar
+    m_fsShowToolbar = session.fsToolbar;
+    m_fsShowStatus = session.fsStatus;
     m_defaults.scrollMode = session.defScrollMode != 0 ? PaneWindow::ScrollMode::Paged
                                                        : PaneWindow::ScrollMode::Continuous;
     m_defaults.zoomMode = static_cast<PaneWindow::ZoomMode>(session.defZoomMode);
@@ -238,6 +259,7 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_defaults.zoomSync = session.defZoomSync;
     m_mruFiles = session.mruFiles;
     m_mruPairs = session.mruPairs;
+    m_savedPoints = session.syncPoints;
 
     if (forward) {
         // Cold-start forward search: prefer the saved session when it already
@@ -254,6 +276,14 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_left = std::make_unique<PaneWindow>(m_dx, Str(StrId::PlaceholderLeft));
     m_right = std::make_unique<PaneWindow>(m_dx, Str(StrId::PlaceholderRight));
     m_sync = std::make_unique<SyncController>(*m_left, *m_right);
+    // UI preferences like the toolbar flags: applied on every launch path.
+    m_showAlignmentGaps = session.showGaps;
+    m_showAnchors = session.showAnchors;
+    m_showTicks = session.showTicks;
+    m_sync->SetAlignmentGapsEnabled(m_showAlignmentGaps);
+    m_sync->SetMapChangedHandler([this] { ApplyAlignmentGaps(); });
+    m_left->SetMarkerVisibility(m_showAnchors, m_showTicks);
+    m_right->SetMarkerVisibility(m_showAnchors, m_showTicks);
 
     // The HMENU is NEVER attached to the window: it is the popup source for
     // the rebar-hosted menu band, and the band lives in the client area (the
@@ -300,13 +330,39 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
                 // reload: they reference pages the rebuild may have moved.
                 std::wstring& lastDoc = (&p == m_right.get()) ? m_lastDocRight : m_lastDocLeft;
                 const std::wstring& cur = p.DocumentPath();
-                if (cur.empty() || lstrcmpiW(cur.c_str(), lastDoc.c_str()) != 0)
+                const bool pathChanged =
+                    cur.empty() || lstrcmpiW(cur.c_str(), lastDoc.c_str()) != 0;
+                if (pathChanged)
                     m_sync->CancelAutoRegen();
                 lastDoc = cur;
                 if (m_sync->AutoRegenPending() && m_left->HasDocument() &&
                     m_right->HasDocument() && !m_left->Outline().empty() &&
                     !m_right->Outline().empty())
                     GenerateSyncPointsFromBookmarks(false);
+                if (m_swapMap.pending) {
+                    const std::wstring& expect =
+                        (&p == m_left.get()) ? m_swapMap.expectLeft : m_swapMap.expectRight;
+                    if (!p.HasDocument() ||
+                        lstrcmpiW(p.DocumentPath().c_str(), expect.c_str()) != 0) {
+                        // Failed reopen, close, or an interleaved open of a
+                        // different file: the parked map's context is gone.
+                        m_swapMap = {};
+                    } else {
+                        ((&p == m_left.get()) ? m_swapMap.leftSettled
+                                              : m_swapMap.rightSettled) = true;
+                        if (m_swapMap.leftSettled && m_swapMap.rightSettled) {
+                            m_sync->RestorePoints(std::move(m_swapMap.points));
+                            m_swapMap = {};
+                            if (m_sync->ScrollSync())
+                                m_sync->RealignFollower(*FocusedPane());
+                            RememberSyncPoints(); // the mirrored pair persists too
+                        }
+                    }
+                }
+                // A NEW pair (not a reload) with no map of its own: bring
+                // back its remembered sync points, if any.
+                if (pathChanged)
+                    TryRestoreSavedPoints();
             }
             // Every successful open funnels through here (dialog, MRU, drag &
             // drop, command line, session restore), so this is the one MRU
@@ -357,13 +413,9 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_right->SetDefaultZoomMode(m_defaults.zoomMode);
     m_left->SetWheelLinesOverride(m_wheelLines);
     m_right->SetWheelLinesOverride(m_wheelLines);
-    const auto toggleScrollMode = [this] {
-        ApplyScrollMode(m_scrollMode == PaneWindow::ScrollMode::Paged
-                            ? PaneWindow::ScrollMode::Continuous
-                            : PaneWindow::ScrollMode::Paged);
-    };
-    m_left->SetToggleScrollModeHandler(toggleScrollMode);
-    m_right->SetToggleScrollModeHandler(toggleScrollMode);
+    const auto requestScrollMode = [this](PaneWindow::ScrollMode mode) { ApplyScrollMode(mode); };
+    m_left->SetScrollModeRequestHandler(requestScrollMode);
+    m_right->SetScrollModeRequestHandler(requestScrollMode);
 
     const auto onInverseSearch = [this](PaneWindow&, const SyncTexIndex::InverseHit* hit,
                                         bool hadData) {
@@ -480,12 +532,18 @@ void MainWindow::SaveSession() const {
     s.splitRatio = m_splitRatio;
     s.scrollSync = m_sync->ScrollSync();
     s.zoomSync = m_sync->ZoomSync();
+    s.showGaps = m_showAlignmentGaps;
+    s.showAnchors = m_showAnchors;
+    s.showTicks = m_showTicks;
     s.scrollMode = m_scrollMode == PaneWindow::ScrollMode::Paged ? 1 : 0;
     s.restoreSession = m_restoreSession;
     s.wheelLines = m_wheelLines;
     s.outlineWidth = m_outlineWidthDip;
     s.rebarLocked = m_rebarLocked;
     s.rebarBands = SerializeRebarLayout();
+    s.toolbarText = m_toolbarText;
+    s.fsToolbar = m_fsShowToolbar;
+    s.fsStatus = m_fsShowStatus;
     s.defScrollMode = m_defaults.scrollMode == PaneWindow::ScrollMode::Paged ? 1 : 0;
     s.defZoomMode = static_cast<int>(m_defaults.zoomMode);
     s.defScrollSync = m_defaults.scrollSync;
@@ -498,6 +556,7 @@ void MainWindow::SaveSession() const {
     s.synctexInverse = m_synctexInverse;
     s.mruFiles = m_mruFiles;
     s.mruPairs = m_mruPairs;
+    s.syncPoints = m_savedPoints;
     s.left = m_left->HasPersistableDocument()
                  ? PaneSettings{m_left->DocumentPath(), m_left->PersistZoom(),
                                 m_left->PersistScrollX(), m_left->PersistScrollY(),
@@ -568,6 +627,8 @@ HMENU MainWindow::BuildMenuBar() {
     append(sync, IDC_SYNC_FROM_BOOKMARKS, StrId::MenuSyncFromBookmarks);
     append(sync, IDC_SYNC_POINTS, StrId::MenuSyncPoints);
     append(sync, IDC_CLEAR_SYNC_POINTS, StrId::MenuClearSyncPoints);
+    AppendMenuW(sync, MF_SEPARATOR, 0, nullptr);
+    append(sync, IDC_TOGGLE_ALIGNMENT_GAPS, StrId::MenuAlignmentGaps);
     AppendMenuW(sync, MF_SEPARATOR, 0, nullptr);
     append(sync, IDC_SWAP_PANES, StrId::MenuSwapPanes);
 
@@ -682,24 +743,44 @@ void MainWindow::CreateToolbar(HINSTANCE hinst) {
     // band background under the transparent toolbar. (The historical "black
     // band" bug only applies to a flat toolbar parented to a window that
     // paints nothing beneath its children.)
-    m_toolbar = CreateWindowExW(0, TOOLBARCLASSNAMEW, nullptr,
-                                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TBSTYLE_FLAT |
-                                    TBSTYLE_TRANSPARENT | TBSTYLE_TOOLTIPS | CCS_NORESIZE |
-                                    CCS_NOPARENTALIGN | CCS_NODIVIDER,
-                                0, 0, 0, 0, m_rebar,
+    // IE's toolbar text options: mode 1 shows every label BELOW its icon (a
+    // plain toolbar with strings); mode 2 = TBSTYLE_LIST (text beside the
+    // icon) + TBSTYLE_EX_MIXEDBUTTONS, where only BTNS_SHOWTEXT buttons show
+    // their label - "Selective text on right". TBSTYLE_LIST cannot be
+    // toggled reliably on a live toolbar: SetToolbarTextMode recreates it.
+    DWORD style = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | TBSTYLE_FLAT |
+                  TBSTYLE_TRANSPARENT | TBSTYLE_TOOLTIPS | CCS_NORESIZE | CCS_NOPARENTALIGN |
+                  CCS_NODIVIDER;
+    if (m_toolbarText == 2)
+        style |= TBSTYLE_LIST;
+    m_toolbar = CreateWindowExW(0, TOOLBARCLASSNAMEW, nullptr, style, 0, 0, 0, 0, m_rebar,
                                 reinterpret_cast<HMENU>(static_cast<UINT_PTR>(102)), hinst,
                                 nullptr);
     if (!m_toolbar)
         return;
     SendMessageW(m_toolbar, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+    if (m_toolbarText == 2)
+        SendMessageW(m_toolbar, TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_MIXEDBUTTONS);
+    SendMessageW(m_toolbar, TB_SETMAXTEXTROWS, m_toolbarText == 0 ? 0 : 1, 0);
     RebuildToolbarIcons();
 
-    const auto button = [](int image, WORD id, BYTE style) {
+    // selective = IE's primary-action set for "Selective text on right".
+    const int textMode = m_toolbarText;
+    const auto button = [textMode](int image, WORD id, BYTE style, StrId label,
+                                   bool selective = false) {
         TBBUTTON b{};
         b.iBitmap = image;
         b.idCommand = id;
         b.fsState = TBSTATE_ENABLED;
         b.fsStyle = style;
+        if (textMode != 0) {
+            b.fsStyle |= BTNS_AUTOSIZE; // width follows the label
+            if (textMode == 1 || selective)
+                b.fsStyle |= BTNS_SHOWTEXT; // only honored under MIXEDBUTTONS
+            // Str() points into the static language tables: safe to hand the
+            // pointer straight to comctl32.
+            b.iString = reinterpret_cast<INT_PTR>(Str(label));
+        }
         return b;
     };
     const auto separator = [] {
@@ -708,29 +789,117 @@ void MainWindow::CreateToolbar(HINSTANCE hinst) {
         return b;
     };
     const TBBUTTON buttons[] = {
-        button(0, IDC_OPEN_LEFT, BTNS_BUTTON),
-        button(1, IDC_OPEN_RIGHT, BTNS_BUTTON),
+        button(0, IDC_OPEN_LEFT, BTNS_BUTTON, StrId::LblOpenLeft, true),
+        button(1, IDC_OPEN_RIGHT, BTNS_BUTTON, StrId::LblOpenRight, true),
         separator(),
-        button(2, IDC_TOGGLE_SCROLL_SYNC, BTNS_CHECK),
-        button(3, IDC_TOGGLE_ZOOM_SYNC, BTNS_CHECK),
+        button(2, IDC_TOGGLE_SCROLL_SYNC, BTNS_CHECK, StrId::LblScrollSync),
+        button(3, IDC_TOGGLE_ZOOM_SYNC, BTNS_CHECK, StrId::LblZoomSync),
         separator(),
-        button(11, IDC_ZOOM_ACTUAL, BTNS_BUTTON), // momentary: manual zoom drifts
+        button(12, IDC_ADD_SYNC_POINT, BTNS_BUTTON, StrId::LblAddSyncPoint),
+        button(13, IDC_SYNC_FROM_BOOKMARKS, BTNS_BUTTON, StrId::LblSyncFromBookmarks, true),
+        button(14, IDC_SYNC_POINTS, BTNS_BUTTON, StrId::LblSyncPoints),
+        button(15, IDC_CLEAR_SYNC_POINTS, BTNS_BUTTON, StrId::LblClearSyncPoints),
+        button(16, IDC_TOGGLE_ALIGNMENT_GAPS, BTNS_CHECK, StrId::LblAlignmentGaps),
+        separator(),
+        button(17, IDC_SWAP_PANES, BTNS_BUTTON, StrId::LblSwapPanes, true),
+        separator(),
+        button(11, IDC_ZOOM_ACTUAL, BTNS_BUTTON, StrId::LblActualSize), // momentary
         // A manual check pair, not BTNS_CHECKGROUP: Manual zoom mode means
         // NEITHER fit button is pressed, which a radio group cannot show.
-        button(4, IDC_FIT_WIDTH, BTNS_CHECK),
-        button(5, IDC_FIT_PAGE, BTNS_CHECK),
+        button(4, IDC_FIT_WIDTH, BTNS_CHECK, StrId::LblFitWidth),
+        button(5, IDC_FIT_PAGE, BTNS_CHECK, StrId::LblFitPage),
         separator(),
         // Scroll-mode pair: exactly one is always pressed (UpdateCommandUi).
-        button(9, IDC_SCROLL_CONTINUOUS, BTNS_CHECK),
-        button(10, IDC_SCROLL_PAGED, BTNS_CHECK),
+        button(9, IDC_SCROLL_CONTINUOUS, BTNS_CHECK, StrId::LblScrollContinuous),
+        button(10, IDC_SCROLL_PAGED, BTNS_CHECK, StrId::LblScrollPaged),
         separator(),
-        button(6, IDC_FIND_SHOW, BTNS_BUTTON),
-        button(7, IDC_TOGGLE_OUTLINE, BTNS_CHECK),
+        button(6, IDC_FIND_SHOW, BTNS_BUTTON, StrId::LblFind),
+        button(7, IDC_TOGGLE_OUTLINE, BTNS_CHECK, StrId::LblOutline),
         separator(),
-        button(8, IDC_FULLSCREEN, BTNS_BUTTON),
+        button(8, IDC_FULLSCREEN, BTNS_BUTTON, StrId::LblFullScreen),
     };
     SendMessageW(m_toolbar, TB_ADDBUTTONSW, std::size(buttons),
                  reinterpret_cast<LPARAM>(buttons));
+}
+
+void MainWindow::RebuildToolbarInBand() {
+    // TBSTYLE_LIST cannot be flipped on a live toolbar (and comctl32's string
+    // pool ownership across language switches is murky): rebuild it and hand
+    // the band the new child (bands are addressed by RBBIM_ID; the new window
+    // replaces the old one in place).
+    if (!m_rebar || !m_toolbar)
+        return;
+    const HINSTANCE hinst =
+        reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(m_hwnd, GWLP_HINSTANCE));
+    DestroyWindow(m_toolbar);
+    m_toolbar = nullptr;
+    if (m_toolbarIcons) {
+        ImageList_Destroy(m_toolbarIcons);
+        m_toolbarIcons = nullptr;
+    }
+    CreateToolbar(hinst);
+    const LRESULT index = SendMessageW(m_rebar, RB_IDTOINDEX, kBandToolbar, 0);
+    if (index != -1 && m_toolbar) {
+        REBARBANDINFOW band{};
+        band.cbSize = sizeof(band);
+        band.fMask = RBBIM_CHILD;
+        band.hwndChild = m_toolbar;
+        SendMessageW(m_rebar, RB_SETBANDINFOW, static_cast<WPARAM>(index),
+                     reinterpret_cast<LPARAM>(&band));
+    }
+    UpdateRebarBandSizes(); // new button extents: band min/ideal sizes moved
+    UpdateCommandUi();      // re-press the checked states on the fresh buttons
+    Layout();               // the band height likely changed
+}
+
+void MainWindow::SetToolbarTextMode(int mode) {
+    mode = std::clamp(mode, 0, 2);
+    if (mode == m_toolbarText)
+        return;
+    m_toolbarText = mode;
+    RebuildToolbarInBand();
+}
+
+void MainWindow::EnsureFsBar() {
+    if (m_fsBar && m_fsBarDpi == m_dpi)
+        return;
+    if (m_fsBar) {
+        DestroyWindow(m_fsBar);
+        m_fsBar = nullptr;
+    }
+    if (m_fsBarIcons) {
+        ImageList_Destroy(m_fsBarIcons);
+        m_fsBarIcons = nullptr;
+    }
+    const HINSTANCE hinst =
+        reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(m_hwnd, GWLP_HINSTANCE));
+    // NOT TBSTYLE_FLAT: this toolbar's parent is the main window, which clips
+    // its children and paints nothing beneath them (the documented
+    // flat-toolbar black-band trap); the standard raised look is intended.
+    m_fsBar = CreateWindowExW(0, TOOLBARCLASSNAMEW, nullptr,
+                              WS_CHILD | WS_CLIPSIBLINGS | TBSTYLE_TOOLTIPS | CCS_NORESIZE |
+                                  CCS_NOPARENTALIGN | CCS_NODIVIDER,
+                              0, 0, 0, 0, m_hwnd,
+                              reinterpret_cast<HMENU>(static_cast<UINT_PTR>(105)), hinst,
+                              nullptr);
+    if (!m_fsBar)
+        return;
+    SendMessageW(m_fsBar, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+    const int glyphPx = MulDiv(16, m_dpi, 96);
+    const GlyphSpec glyph[] = {{0xE740, true}}; // same composed 4-corner arrows
+    m_fsBarIcons = CreateGlyphImageList(std::span<const GlyphSpec>(glyph), glyphPx, glyphPx,
+                                        GetSysColor(COLOR_BTNTEXT));
+    SendMessageW(m_fsBar, TB_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(m_fsBarIcons));
+    TBBUTTON b{};
+    b.iBitmap = 0;
+    b.idCommand = IDC_FULLSCREEN; // ordinary dispatch: toggles right back out
+    b.fsState = TBSTATE_ENABLED;
+    b.fsStyle = BTNS_BUTTON;
+    SendMessageW(m_fsBar, TB_ADDBUTTONSW, 1, reinterpret_cast<LPARAM>(&b));
+    const int btn = MulDiv(28, m_dpi, 96);
+    SendMessageW(m_fsBar, TB_SETBUTTONSIZE, 0, MAKELPARAM(btn, btn));
+    SendMessageW(m_fsBar, TB_AUTOSIZE, 0, 0);
+    m_fsBarDpi = m_dpi;
 }
 
 void MainWindow::BuildRebar(HINSTANCE hinst) {
@@ -756,13 +925,16 @@ void MainWindow::BuildRebar(HINSTANCE hinst) {
     if (m_pageBox)
         SetWindowSubclass(m_pageBox, PageBoxProc, 1, reinterpret_cast<DWORD_PTR>(this));
 
-    const auto insertBand = [this](UINT id, HWND child, int cxMin, int cyMin, int cxIdeal) {
+    const auto insertBand = [this](UINT id, HWND child, int cxMin, int cyMin, int cxIdeal,
+                                   bool newRow = false) {
         REBARBANDINFOW band{};
         band.cbSize = sizeof(band);
         band.fMask = RBBIM_ID | RBBIM_CHILD | RBBIM_CHILDSIZE | RBBIM_STYLE | RBBIM_SIZE |
                      RBBIM_IDEALSIZE;
         band.wID = id;
-        band.fStyle = BandStyle(id, m_rebarLocked);
+        // The default row break survives lock toggles (SetRebarLocked
+        // snapshots RBBS_BREAK per band) and is overridden by a saved layout.
+        band.fStyle = BandStyle(id, m_rebarLocked) | (newRow ? RBBS_BREAK : 0u);
         band.hwndChild = child;
         band.cxMinChild = static_cast<UINT>(cxMin);
         band.cyMinChild = static_cast<UINT>(cyMin);
@@ -781,7 +953,10 @@ void MainWindow::BuildRebar(HINSTANCE hinst) {
     SIZE toolSize{};
     SendMessageW(m_toolbar, TB_GETMAXSIZE, 0, reinterpret_cast<LPARAM>(&toolSize));
     const DWORD toolBtn = static_cast<DWORD>(SendMessageW(m_toolbar, TB_GETBUTTONSIZE, 0, 0));
-    insertBand(kBandToolbar, m_toolbar, MulDiv(80, m_dpi, 96), HIWORD(toolBtn), toolSize.cx);
+    // Default layout: menu row on top, toolbar + page box on their own row
+    // (the labeled default toolbar would not share a row comfortably).
+    insertBand(kBandToolbar, m_toolbar, MulDiv(80, m_dpi, 96), HIWORD(toolBtn), toolSize.cx,
+               /*newRow=*/true);
     insertBand(kBandPageBox, m_pageBox, MulDiv(64, m_dpi, 96), MulDiv(22, m_dpi, 96),
                MulDiv(64, m_dpi, 96));
     UpdateRebarBandSizes();              // menu band cx += header (chevron math)
@@ -1035,6 +1210,17 @@ void MainWindow::ShowRebarContextMenu(POINT screenPt) {
     AppendMenuW(menu, MF_STRING | (m_toolbarVisible ? MF_CHECKED : 0u), IDC_TOGGLE_TOOLBAR,
                 Str(StrId::MenuToolbar));
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    // IE's toolbar text options, verbatim (its Customize dialog's "Text
+    // options" values), as a radio group.
+    AppendMenuW(menu, MF_STRING, IDC_TOOLBAR_TEXT_BELOW, Str(StrId::MenuToolbarTextBelow));
+    AppendMenuW(menu, MF_STRING, IDC_TOOLBAR_TEXT_RIGHT, Str(StrId::MenuToolbarTextRight));
+    AppendMenuW(menu, MF_STRING, IDC_TOOLBAR_TEXT_NONE, Str(StrId::MenuToolbarTextNone));
+    const UINT textSel = m_toolbarText == 1   ? IDC_TOOLBAR_TEXT_BELOW
+                         : m_toolbarText == 2 ? IDC_TOOLBAR_TEXT_RIGHT
+                                              : IDC_TOOLBAR_TEXT_NONE;
+    CheckMenuRadioItem(menu, IDC_TOOLBAR_TEXT_BELOW, IDC_TOOLBAR_TEXT_NONE, textSel,
+                       MF_BYCOMMAND);
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (m_rebarLocked ? MF_CHECKED : 0u), IDC_LOCK_TOOLBARS,
                 Str(StrId::MenuLockToolbars));
     TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON, screenPt.x, screenPt.y,
@@ -1094,6 +1280,18 @@ StrId MainWindow::CommandTipId(UINT id) {
         return StrId::TipFind;
     case IDC_TOGGLE_OUTLINE:
         return StrId::TipOutline;
+    case IDC_ADD_SYNC_POINT:
+        return StrId::TipAddSyncPoint;
+    case IDC_SYNC_FROM_BOOKMARKS:
+        return StrId::TipSyncFromBookmarks;
+    case IDC_SYNC_POINTS:
+        return StrId::TipSyncPoints;
+    case IDC_CLEAR_SYNC_POINTS:
+        return StrId::TipClearSyncPoints;
+    case IDC_TOGGLE_ALIGNMENT_GAPS:
+        return StrId::TipAlignmentGaps;
+    case IDC_SWAP_PANES:
+        return StrId::TipSwapPanes;
     default:
         return StrId::TipFullScreen;
     }
@@ -1204,7 +1402,7 @@ INT_PTR CALLBACK MainWindow::GotoDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPAR
 }
 
 void MainWindow::ShowOptionsDialog() {
-    DialogTemplate dlg(Str(StrId::OptTitle), 260, 208);
+    DialogTemplate dlg(Str(StrId::OptTitle), 260, 264);
     dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 7, 246, 10,
                    kOptRestoreId, Str(StrId::OptRestoreSession));
     dlg.AddControl(DialogTemplate::kButton, BS_GROUPBOX, 0, 7, 22, 246, 74, 0xFFFF,
@@ -1227,15 +1425,23 @@ void MainWindow::ShowOptionsDialog() {
                    246, 13, kOptSynctexId, L"");
     dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | BS_MULTILINE | BS_TOP | WS_TABSTOP,
                    0, 7, 131, 246, 18, kOptShellId, Str(StrId::OptShellIntegration));
-    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 7, 156, 188, 10, 0xFFFF,
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 152, 246, 10,
+                   kOptAnchorsId, Str(StrId::OptShowAnchors));
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 164, 246, 10,
+                   kOptTicksId, Str(StrId::OptShowTicks));
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 176, 246, 10,
+                   kOptFsToolbarId, Str(StrId::OptFsToolbar));
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 188, 246, 10,
+                   kOptFsStatusId, Str(StrId::OptFsStatus));
+    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 7, 208, 188, 10, 0xFFFF,
                    Str(StrId::OptWheelLines));
     dlg.AddControl(DialogTemplate::kEdit, ES_NUMBER | ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
-                   0, 200, 154, 48, 13, kOptWheelId, L"");
-    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 7, 187, 120, 14,
+                   0, 200, 206, 48, 13, kOptWheelId, L"");
+    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 7, 243, 120, 14,
                    kOptClearMruId, Str(StrId::OptClearRecent));
-    dlg.AddControl(DialogTemplate::kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 149, 187, 50, 14,
+    dlg.AddControl(DialogTemplate::kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 149, 243, 50, 14,
                    IDOK, Str(StrId::DlgOk));
-    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 203, 187, 50, 14,
+    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 203, 243, 50, 14,
                    IDCANCEL, Str(StrId::DlgCancel));
     OptionsDialogState state{this, false};
     const HINSTANCE hinst =
@@ -1276,6 +1482,11 @@ INT_PTR CALLBACK MainWindow::OptionsDlgProc(HWND dlg, UINT msg, WPARAM wParam, L
         SetDlgItemTextW(dlg, kOptSynctexId, self->m_synctexInverse.c_str());
         CheckDlgButton(dlg, kOptShellId,
                        ShellIntegration::IsRegistered() ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dlg, kOptAnchorsId, self->m_showAnchors ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dlg, kOptTicksId, self->m_showTicks ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dlg, kOptFsToolbarId,
+                       self->m_fsShowToolbar ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dlg, kOptFsStatusId, self->m_fsShowStatus ? BST_CHECKED : BST_UNCHECKED);
         SetDlgItemInt(dlg, kOptWheelId, static_cast<UINT>(self->m_wheelLines), FALSE);
         return TRUE;
     }
@@ -1316,6 +1527,14 @@ INT_PTR CALLBACK MainWindow::OptionsDlgProc(HWND dlg, UINT msg, WPARAM wParam, L
             self->m_right->SetDefaultZoomMode(self->m_defaults.zoomMode);
             self->m_left->SetWheelLinesOverride(self->m_wheelLines);
             self->m_right->SetWheelLinesOverride(self->m_wheelLines);
+            self->m_showAnchors = IsDlgButtonChecked(dlg, kOptAnchorsId) == BST_CHECKED;
+            self->m_showTicks = IsDlgButtonChecked(dlg, kOptTicksId) == BST_CHECKED;
+            self->m_left->SetMarkerVisibility(self->m_showAnchors, self->m_showTicks);
+            self->m_right->SetMarkerVisibility(self->m_showAnchors, self->m_showTicks);
+            self->m_fsShowToolbar = IsDlgButtonChecked(dlg, kOptFsToolbarId) == BST_CHECKED;
+            self->m_fsShowStatus = IsDlgButtonChecked(dlg, kOptFsStatusId) == BST_CHECKED;
+            if (self->m_fullscreen)
+                self->Layout(); // apply the full-screen chrome choice live
             const bool wantShell = IsDlgButtonChecked(dlg, kOptShellId) == BST_CHECKED;
             if (wantShell != ShellIntegration::IsRegistered()) {
                 const bool applied = wantShell ? ShellIntegration::Register()
@@ -1385,7 +1604,7 @@ void MainWindow::RebuildToolbarIcons() {
         return;
     const int glyphPx = MulDiv(16, m_dpi, 96);
     HIMAGELIST icons =
-        CreateGlyphImageList(std::span<const wchar_t>(kToolbarGlyphs), glyphPx, glyphPx,
+        CreateGlyphImageList(std::span<const GlyphSpec>(kToolbarGlyphs), glyphPx, glyphPx,
                              GetSysColor(COLOR_BTNTEXT));
     if (!icons)
         return;
@@ -1393,30 +1612,43 @@ void MainWindow::RebuildToolbarIcons() {
     if (m_toolbarIcons)
         ImageList_Destroy(m_toolbarIcons);
     m_toolbarIcons = icons;
-    const int btn = MulDiv(24, m_dpi, 96);
-    SendMessageW(m_toolbar, TB_SETBUTTONSIZE, 0, MAKELPARAM(btn, btn));
+    if (m_toolbarText == 0) {
+        // Icon-only: pin the compact square. With labels the toolbar sizes
+        // its own buttons (BTNS_AUTOSIZE widths, text-row height).
+        const int btn = MulDiv(24, m_dpi, 96);
+        SendMessageW(m_toolbar, TB_SETBUTTONSIZE, 0, MAKELPARAM(btn, btn));
+    }
     SendMessageW(m_toolbar, TB_AUTOSIZE, 0, 0);
 }
 
 namespace {
 void PopulateSyncPointsList(HWND list, const std::vector<SyncPoint>& points) {
-    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    ListView_DeleteAllItems(list);
     for (size_t i = 0; i < points.size(); ++i) {
         const SyncPoint& p = points[i];
-        const std::wstring row =
-            std::to_wstring(i + 1) + L".\t" + p.label + L"\tp" + std::to_wstring(p.left + 1) +
-            L" \x2194 p" + std::to_wstring(p.right + 1) + L"\t" +
-            Str(p.manual ? StrId::SyncPtOriginManual : StrId::SyncPtOriginAuto);
-        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(row.c_str()));
+        const int row = static_cast<int>(i);
+        const std::wstring ordinal = std::to_wstring(i + 1);
+        LVITEMW item{};
+        item.mask = LVIF_TEXT;
+        item.iItem = row;
+        item.pszText = const_cast<wchar_t*>(ordinal.c_str());
+        ListView_InsertItem(list, &item);
+        ListView_SetItemText(list, row, 1, const_cast<wchar_t*>(p.label.c_str()));
+        const std::wstring pages = L"p" + std::to_wstring(p.left + 1) + L" \x2194 p" +
+                                   std::to_wstring(p.right + 1);
+        ListView_SetItemText(list, row, 2, const_cast<wchar_t*>(pages.c_str()));
+        ListView_SetItemText(list, row, 3,
+                             const_cast<wchar_t*>(Str(p.manual ? StrId::SyncPtOriginManual
+                                                               : StrId::SyncPtOriginAuto)));
     }
 }
 } // namespace
 
 void MainWindow::ShowSyncPointsDialog() {
     DialogTemplate dlg(Str(StrId::SyncPtsDlgTitle), 300, 182);
-    dlg.AddControl(DialogTemplate::kListBox,
-                   LBS_NOTIFY | LBS_USETABSTOPS | WS_VSCROLL | WS_BORDER | WS_TABSTOP, 0, 7, 7,
-                   286, 146, kSyncPtsListId, L"");
+    dlg.AddControl(WC_LISTVIEWW,
+                   LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | WS_BORDER | WS_TABSTOP, 0, 7,
+                   7, 286, 146, kSyncPtsListId, L"");
     // Remove starts disabled: it follows the listbox selection.
     dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP | WS_DISABLED, 0, 7, 161,
                    60, 14, kSyncPtsRemoveId, Str(StrId::SyncPtsDlgRemove));
@@ -1430,6 +1662,7 @@ void MainWindow::ShowSyncPointsDialog() {
         reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(m_hwnd, GWLP_HINSTANCE));
     DialogBoxIndirectParamW(hinst, dlg.Data(), m_hwnd, SyncPointsDlgProc,
                             reinterpret_cast<LPARAM>(this));
+    m_syncPtsDlg = nullptr;
     // The map may have been emptied from inside the dialog.
     UpdateCommandUi();
     UpdateStatusBar();
@@ -1443,35 +1676,76 @@ INT_PTR CALLBACK MainWindow::SyncPointsDlgProc(HWND dlg, UINT msg, WPARAM wParam
         SetWindowLongPtrW(dlg, DWLP_USER, lParam);
         self = reinterpret_cast<MainWindow*>(lParam);
         const HWND list = GetDlgItem(dlg, kSyncPtsListId);
-        const int tabs[] = {18, 60, 160}; // ordinal | label | pages | origin
-        SendMessageW(list, LB_SETTABSTOPS, ARRAYSIZE(tabs), reinterpret_cast<LPARAM>(tabs));
+        ListView_SetExtendedListViewStyle(list, LVS_EX_FULLROWSELECT);
+        const int dpi = static_cast<int>(GetDpiForWindow(dlg));
+        const auto addCol = [list, dpi](int idx, int widthDip, StrId text) {
+            LVCOLUMNW col{};
+            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+            col.cx = MulDiv(widthDip, dpi, 96);
+            col.pszText = const_cast<wchar_t*>(Str(text));
+            col.iSubItem = idx;
+            ListView_InsertColumn(list, idx, &col);
+        };
+        addCol(0, 34, StrId::SyncPtsColIndex);
+        addCol(1, 96, StrId::SyncPtsColNumbering);
+        addCol(2, 120, StrId::SyncPtsColPages);
+        addCol(3, 82, StrId::SyncPtsColOrigin);
         PopulateSyncPointsList(list, self->m_sync->Points());
+        self->m_syncPtsDlg = dlg; // reset by ShowSyncPointsDialog on return
         return TRUE;
+    }
+    case kMsgSyncPtsRefresh: {
+        // The map changed outside the dialog (auto-reload regen, swap settle):
+        // repopulate so row indexes match the live map again. Idempotent for
+        // the dialog's own mutations, which posted this after their inline
+        // repopulate; keep the selection by (clamped) index.
+        if (!self)
+            return TRUE;
+        const HWND list = GetDlgItem(dlg, kSyncPtsListId);
+        const int sel = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+        PopulateSyncPointsList(list, self->m_sync->Points());
+        const int n = static_cast<int>(self->m_sync->Points().size());
+        if (n > 0 && sel >= 0) {
+            const int keep = std::min(sel, n - 1);
+            ListView_SetItemState(list, keep, LVIS_SELECTED | LVIS_FOCUSED,
+                                  LVIS_SELECTED | LVIS_FOCUSED);
+        }
+        if (n == 0 && GetFocus() != GetDlgItem(dlg, IDCANCEL))
+            SetFocus(GetDlgItem(dlg, IDCANCEL)); // don't strand focus on a disabling button
+        EnableWindow(GetDlgItem(dlg, kSyncPtsRemoveId),
+                     n > 0 && ListView_GetNextItem(list, -1, LVNI_SELECTED) != -1);
+        EnableWindow(GetDlgItem(dlg, kSyncPtsClearId), n > 0);
+        return TRUE;
+    }
+    case WM_NOTIFY: {
+        const auto* hdr = reinterpret_cast<const NMHDR*>(lParam);
+        if (hdr->idFrom == kSyncPtsListId && hdr->code == LVN_ITEMCHANGED) {
+            const HWND list = GetDlgItem(dlg, kSyncPtsListId);
+            EnableWindow(GetDlgItem(dlg, kSyncPtsRemoveId),
+                         ListView_GetNextItem(list, -1, LVNI_SELECTED) != -1);
+        }
+        break;
     }
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
-        case kSyncPtsListId:
-            if (HIWORD(wParam) == LBN_SELCHANGE) {
-                const LRESULT sel = SendDlgItemMessageW(dlg, kSyncPtsListId, LB_GETCURSEL, 0, 0);
-                EnableWindow(GetDlgItem(dlg, kSyncPtsRemoveId), sel != LB_ERR);
-            }
-            return TRUE;
         case kSyncPtsRemoveId: {
-            const LRESULT sel = SendDlgItemMessageW(dlg, kSyncPtsListId, LB_GETCURSEL, 0, 0);
-            if (self && sel != LB_ERR) {
+            const HWND list = GetDlgItem(dlg, kSyncPtsListId);
+            const int sel = ListView_GetNextItem(list, -1, LVNI_SELECTED);
+            if (self && sel >= 0) {
                 self->m_sync->RemovePoint(static_cast<size_t>(sel));
-                const HWND list = GetDlgItem(dlg, kSyncPtsListId);
-                const size_t n = self->m_sync->Points().size();
+                const int n = static_cast<int>(self->m_sync->Points().size());
                 PopulateSyncPointsList(list, self->m_sync->Points());
                 if (n > 0) {
-                    SendMessageW(list, LB_SETCURSEL,
-                                 std::min(static_cast<size_t>(sel), n - 1), 0);
+                    const int keep = std::min(sel, n - 1);
+                    ListView_SetItemState(list, keep, LVIS_SELECTED | LVIS_FOCUSED,
+                                          LVIS_SELECTED | LVIS_FOCUSED);
                 } else {
                     // Disabling the focused button strands keyboard focus.
                     SetFocus(GetDlgItem(dlg, IDCANCEL));
                     EnableWindow(GetDlgItem(dlg, kSyncPtsRemoveId), FALSE);
                     EnableWindow(GetDlgItem(dlg, kSyncPtsClearId), FALSE);
                 }
+                self->RememberSyncPoints();
                 self->UpdateCommandUi();
                 self->UpdateStatusBar();
             }
@@ -1484,6 +1758,7 @@ INT_PTR CALLBACK MainWindow::SyncPointsDlgProc(HWND dlg, UINT msg, WPARAM wParam
                 SetFocus(GetDlgItem(dlg, IDCANCEL)); // Clear had focus and gets disabled
                 EnableWindow(GetDlgItem(dlg, kSyncPtsRemoveId), FALSE);
                 EnableWindow(GetDlgItem(dlg, kSyncPtsClearId), FALSE);
+                self->RememberSyncPoints(); // an emptied map forgets the pair
                 self->UpdateCommandUi();
                 self->UpdateStatusBar();
             }
@@ -1504,6 +1779,10 @@ INT_PTR CALLBACK MainWindow::SyncPointsDlgProc(HWND dlg, UINT msg, WPARAM wParam
 void MainWindow::UpdateCommandUi() {
     if (!m_sync)
         return;
+    const bool bothDocs = m_left->HasDocument() && m_right->HasDocument();
+    const bool canGenerate =
+        bothDocs && !m_left->Outline().empty() && !m_right->Outline().empty();
+    const bool hasPoints = m_sync->HasPoints();
     if (m_menu) {
         const auto check = [this](UINT id, bool on) {
             CheckMenuItem(m_menu, id, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED));
@@ -1515,6 +1794,7 @@ void MainWindow::UpdateCommandUi() {
         check(IDC_FULLSCREEN, m_fullscreen);
         check(IDC_TOGGLE_SCROLL_SYNC, m_sync->ScrollSync());
         check(IDC_TOGGLE_ZOOM_SYNC, m_sync->ZoomSync());
+        check(IDC_TOGGLE_ALIGNMENT_GAPS, m_showAlignmentGaps);
         UINT fitId = IDC_ZOOM_ACTUAL;
         switch (FocusedPane()->GetZoomMode()) {
         case PaneWindow::ZoomMode::FitWidth:
@@ -1538,12 +1818,10 @@ void MainWindow::UpdateCommandUi() {
         const auto enable = [this](UINT id, bool on) {
             EnableMenuItem(m_menu, id, MF_BYCOMMAND | (on ? MF_ENABLED : MF_GRAYED));
         };
-        const bool bothDocs = m_left->HasDocument() && m_right->HasDocument();
         enable(IDC_ADD_SYNC_POINT, bothDocs);
-        enable(IDC_SYNC_FROM_BOOKMARKS,
-               bothDocs && !m_left->Outline().empty() && !m_right->Outline().empty());
-        enable(IDC_SYNC_POINTS, m_sync->HasPoints());
-        enable(IDC_CLEAR_SYNC_POINTS, m_sync->HasPoints());
+        enable(IDC_SYNC_FROM_BOOKMARKS, canGenerate);
+        enable(IDC_SYNC_POINTS, hasPoints);
+        enable(IDC_CLEAR_SYNC_POINTS, hasPoints);
     }
     if (m_toolbar) {
         const auto press = [this](WORD id, bool on) {
@@ -1552,11 +1830,19 @@ void MainWindow::UpdateCommandUi() {
         const PaneWindow::ZoomMode mode = FocusedPane()->GetZoomMode();
         press(IDC_TOGGLE_SCROLL_SYNC, m_sync->ScrollSync());
         press(IDC_TOGGLE_ZOOM_SYNC, m_sync->ZoomSync());
+        press(IDC_TOGGLE_ALIGNMENT_GAPS, m_showAlignmentGaps);
         press(IDC_TOGGLE_OUTLINE, m_outlineVisible);
         press(IDC_FIT_WIDTH, mode == PaneWindow::ZoomMode::FitWidth);
         press(IDC_FIT_PAGE, mode == PaneWindow::ZoomMode::FitPage);
         press(IDC_SCROLL_CONTINUOUS, m_scrollMode == PaneWindow::ScrollMode::Continuous);
         press(IDC_SCROLL_PAGED, m_scrollMode == PaneWindow::ScrollMode::Paged);
+        const auto tbEnable = [this](WORD id, bool on) {
+            SendMessageW(m_toolbar, TB_ENABLEBUTTON, id, MAKELPARAM(on ? TRUE : FALSE, 0));
+        };
+        tbEnable(IDC_ADD_SYNC_POINT, bothDocs);
+        tbEnable(IDC_SYNC_FROM_BOOKMARKS, canGenerate);
+        tbEnable(IDC_SYNC_POINTS, hasPoints);
+        tbEnable(IDC_CLEAR_SYNC_POINTS, hasPoints);
     }
 }
 
@@ -1642,6 +1928,24 @@ void MainWindow::SwapPanes() {
     const Snapshot right = snap(*m_right);
     if (!left.has && !right.has)
         return;
+    // Park the map MIRRORED before the reopen storm: each side's
+    // DocumentOpened clears the live map, and the path change cancels the
+    // parked regen (the parked map replaces it). A swap-during-swap discards
+    // the older park (its expected paths will not match the newer arrivals).
+    m_swapMap = {};
+    // HasDocument, not the snapshots' HasPersistableDocument: during an
+    // in-flight open the pane's path is already the NEW file while the live
+    // map still describes the dying document (it clears only at
+    // DocumentOpened), and parking that map would reinstall alien
+    // coordinates. Same guard makes a second swap issued mid-reopen simply
+    // discard (the panes are Opening), as the parked-map contract promises.
+    if (m_sync->HasPoints() && m_left->HasDocument() && m_right->HasDocument()) {
+        m_swapMap.pending = true;
+        m_swapMap.expectLeft = right.path;
+        m_swapMap.expectRight = left.path;
+        for (const SyncPoint& p : m_sync->Points())
+            m_swapMap.points.push_back(SyncPoint{p.right, p.left, p.manual, p.label});
+    }
     std::swap(m_fallbackLeft, m_fallbackRight);
     // The documents reload through their workers (a live Document cannot
     // change pane: the worker posts to its pane's HWND); the views ride the
@@ -1671,6 +1975,8 @@ void MainWindow::SwitchLanguage(Lang lang) {
     UpdateRebarBandSizes(); // the new titles change the menu band's width
     if (old)
         DestroyMenu(old);
+    if (m_toolbarText != 0)
+        RebuildToolbarInBand(); // button labels live in the language tables
     UpdateTitle();
     m_left->SetPlaceholderHint(Str(StrId::PlaceholderLeft));
     m_right->SetPlaceholderHint(Str(StrId::PlaceholderRight));
@@ -1703,9 +2009,12 @@ void MainWindow::GenerateSyncPointsFromBookmarks(bool interactive) {
         const Document::OutlineItem& r = m_right->Outline()[static_cast<size_t>(ri)];
         if (l.targetPage < 0 || r.targetPage < 0)
             continue;
+        // Numbered match: the numbering key. Title match: the title itself.
         std::wstring label;
         if (const auto key = ParseOutlineNumbering(l.title))
             label = FormatOutlineNumbering(*key);
+        else
+            label = l.title;
         candidates.push_back(SyncPoint{l.targetPage, r.targetPage, false, std::move(label)});
     }
     if (candidates.empty()) {
@@ -1726,6 +2035,13 @@ void MainWindow::GenerateSyncPointsFromBookmarks(bool interactive) {
         }
         m_sync->RealignFollower(*FocusedPane());
     }
+    // Persist only on the USER command: the reload path regenerates from a
+    // map whose manual points were just cleared (they decay in-session by
+    // design), and remembering that state would wipe the saved manual points
+    // the entry deliberately keeps for the next launch. Auto-only flows are
+    // covered: their entries already carry hadAuto=1.
+    if (interactive)
+        RememberSyncPoints();
     UpdateCommandUi();
     UpdateStatusBar();
     // Last: the realign/update traffic above rewrites the sync cell, which
@@ -1735,6 +2051,172 @@ void MainWindow::GenerateSyncPointsFromBookmarks(bool interactive) {
     // re-derived count is already visible in the sync cell.
     if (interactive)
         ShowStatusMessage(Str(StrId::SyncPtsGenerated) + std::to_wstring(n));
+}
+
+namespace {
+// One pass over the sorted map. A segment spans the interior pages between
+// consecutive points; prev = (-1,-1) seeds the pre-first segment so
+// different-length preambles align from the top. Within a segment the
+// interiors pair 1:1 from the segment start; the shorter side gets one gap
+// slot per unmatched counterpart page, inserted just before its own point
+// page, silhouetted like the page it mirrors (top-to-bottom order). The tail
+// after the last point gets no gaps: free divergence, the virtual sync
+// clamps. Each segment contributes max(a, b) slots to both sides, so by
+// induction every point's two pages land on the same slot index.
+void ComputeAlignmentGaps(const std::vector<SyncPoint>& points, const PaneWindow& left,
+                          const PaneWindow& right, std::vector<PageLayout::AlignmentGap>& outLeft,
+                          std::vector<PageLayout::AlignmentGap>& outRight) {
+    int prevL = -1;
+    int prevR = -1;
+    for (const SyncPoint& p : points) {
+        const int l = std::clamp(p.left, 0, left.PageCount() - 1);
+        const int r = std::clamp(p.right, 0, right.PageCount() - 1);
+        if (l <= prevL || r <= prevR)
+            continue; // defensive only: the map invariant says impossible
+        const int a = l - prevL - 1; // interior page counts
+        const int b = r - prevR - 1;
+        const int common = std::min(a, b);
+        for (int i = common; i < a; ++i) // left surplus -> right-side gaps
+            outRight.push_back({r, left.PageSizePt(prevL + 1 + i)});
+        for (int i = common; i < b; ++i) // right surplus -> left-side gaps
+            outLeft.push_back({l, right.PageSizePt(prevR + 1 + i)});
+        prevL = l;
+        prevR = r;
+    }
+}
+} // namespace
+
+namespace {
+std::wstring FormatManualPoints(const std::vector<SyncPoint>& points) {
+    // Capped well under ReadString's 2048-wchar buffer (~14 wchars per pair):
+    // GetPrivateProfileString truncates SILENTLY, and a torn trailing pair
+    // could restore a wrong anchor instead of a missing one.
+    constexpr size_t kMaxSavedManualPoints = 100;
+    std::wstring out;
+    size_t saved = 0;
+    for (const SyncPoint& p : points) {
+        if (!p.manual)
+            continue;
+        if (++saved > kMaxSavedManualPoints)
+            break;
+        if (!out.empty())
+            out.push_back(L';');
+        out += std::to_wstring(p.left) + L":" + std::to_wstring(p.right);
+    }
+    return out;
+}
+
+std::vector<SyncPoint> ParseManualPoints(const std::wstring& text, int leftCount,
+                                         int rightCount) {
+    std::vector<SyncPoint> points;
+    size_t pos = 0;
+    while (pos < text.size()) {
+        size_t end = text.find(L';', pos);
+        if (end == std::wstring::npos)
+            end = text.size();
+        const std::wstring item = text.substr(pos, end - pos);
+        pos = end + 1;
+        const size_t colon = item.find(L':');
+        if (colon == std::wstring::npos)
+            continue;
+        // Both halves must be FULLY numeric: wcstol returns 0 on garbage
+        // (":", "abc:def"), which would otherwise restore a phantom {0,0}.
+        wchar_t* endL = nullptr;
+        const long l = wcstol(item.c_str(), &endL, 10);
+        wchar_t* endR = nullptr;
+        const long r = wcstol(item.c_str() + colon + 1, &endR, 10);
+        if (endL != item.c_str() + colon || endR != item.c_str() + item.size())
+            continue;
+        // Out-of-range pairs mean the pagination changed since the save (or
+        // the file was hand-edited): drop them, and enforce the map's double
+        // monotonicity defensively for the same reason.
+        if (l < 0 || r < 0 || l >= leftCount || r >= rightCount)
+            continue;
+        if (!points.empty() && (points.back().left >= static_cast<int>(l) ||
+                                points.back().right >= static_cast<int>(r)))
+            continue;
+        points.push_back(SyncPoint{static_cast<int>(l), static_cast<int>(r), true, {}});
+    }
+    return points;
+}
+} // namespace
+
+void MainWindow::RememberSyncPoints() {
+    if (!m_sync || !m_left->HasDocument() || !m_right->HasDocument())
+        return;
+    const std::wstring& l = m_left->DocumentPath();
+    const std::wstring& r = m_right->DocumentPath();
+    std::erase_if(m_savedPoints, [&](const SavedSyncPoints& e) {
+        return lstrcmpiW(e.left.c_str(), l.c_str()) == 0 &&
+               lstrcmpiW(e.right.c_str(), r.c_str()) == 0;
+    });
+    SavedSyncPoints entry;
+    entry.left = l;
+    entry.right = r;
+    entry.manual = FormatManualPoints(m_sync->Points());
+    entry.hadAuto = m_sync->HasAutoPoints();
+    // An emptied map FORGETS the pair: a deliberate clear must not resurrect
+    // at the next launch.
+    if (entry.manual.empty() && !entry.hadAuto)
+        return;
+    m_savedPoints.insert(m_savedPoints.begin(), std::move(entry));
+    if (m_savedPoints.size() > kMruMaxEntries)
+        m_savedPoints.resize(kMruMaxEntries);
+}
+
+void MainWindow::TryRestoreSavedPoints() {
+    // Only when a pair OPENS with no map of its own: a live map (the swap's
+    // reinstalled mirror, points the user already placed) always wins.
+    if (!m_sync || m_sync->HasPoints() || !m_left->HasDocument() || !m_right->HasDocument())
+        return;
+    const std::wstring& l = m_left->DocumentPath();
+    const std::wstring& r = m_right->DocumentPath();
+    const auto it = std::find_if(
+        m_savedPoints.begin(), m_savedPoints.end(), [&](const SavedSyncPoints& e) {
+            return lstrcmpiW(e.left.c_str(), l.c_str()) == 0 &&
+                   lstrcmpiW(e.right.c_str(), r.c_str()) == 0;
+        });
+    if (it == m_savedPoints.end())
+        return;
+    std::vector<SyncPoint> manual =
+        ParseManualPoints(it->manual, m_left->PageCount(), m_right->PageCount());
+    if (!manual.empty())
+        m_sync->RestorePoints(std::move(manual));
+    if (it->hadAuto)
+        GenerateSyncPointsFromBookmarks(false); // merges from fresh outlines; manual wins
+    UpdateCommandUi();
+    UpdateStatusBar();
+}
+
+void MainWindow::ApplyAlignmentGaps() {
+    if (!m_sync || !m_left || !m_right)
+        return;
+    std::vector<PageLayout::AlignmentGap> gapsLeft;
+    std::vector<PageLayout::AlignmentGap> gapsRight;
+    if (m_showAlignmentGaps && m_sync->HasPoints() && m_left->HasDocument() &&
+        m_right->HasDocument())
+        ComputeAlignmentGaps(m_sync->Points(), *m_left, *m_right, gapsLeft, gapsRight);
+    // The rebuilds scroll the panes; their echoes must not drive the sibling
+    // mid-operation (this runs inside the controller's own event handling on
+    // the DocumentOpened clear). Both panes get the same fresh gap epoch:
+    // virtual sync only runs between matching nonzero epochs.
+    const uint64_t version = ++m_gapsEpoch;
+    m_sync->ApplySilently([&] {
+        m_left->SetAlignmentGaps(std::move(gapsLeft), version);
+        m_right->SetAlignmentGaps(std::move(gapsRight), version);
+    });
+    // Markers are toggle-INDEPENDENT: the anchors and ticks show wherever a
+    // map exists, gaps or not.
+    std::vector<PaneWindow::SyncMarker> markersLeft;
+    std::vector<PaneWindow::SyncMarker> markersRight;
+    for (const SyncPoint& p : m_sync->Points()) {
+        markersLeft.push_back({p.left, p.manual, p.label});
+        markersRight.push_back({p.right, p.manual, p.label});
+    }
+    m_left->SetSyncMarkers(std::move(markersLeft));
+    m_right->SetSyncMarkers(std::move(markersRight));
+    if (m_syncPtsDlg)
+        PostMessageW(m_syncPtsDlg, kMsgSyncPtsRefresh, 0, 0);
 }
 
 void MainWindow::LaunchInverseSearch(const SyncTexIndex::InverseHit& hit) {
@@ -2137,6 +2619,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         // fire regardless of the menu items' greyed state.
         case IDC_ADD_SYNC_POINT:
             if (m_sync->AddPointHere()) {
+                RememberSyncPoints();
                 UpdateCommandUi();
                 UpdateStatusBar();
             }
@@ -2150,8 +2633,26 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         case IDC_CLEAR_SYNC_POINTS:
             m_sync->ClearPoints();
+            RememberSyncPoints(); // an emptied map forgets the pair
             UpdateCommandUi();
             UpdateStatusBar();
+            return 0;
+        case IDC_TOGGLE_ALIGNMENT_GAPS:
+            m_showAlignmentGaps = !m_showAlignmentGaps;
+            m_sync->SetAlignmentGapsEnabled(m_showAlignmentGaps);
+            ApplyAlignmentGaps();
+            if (m_showAlignmentGaps && m_sync->ScrollSync() && m_sync->HasPoints())
+                m_sync->RealignFollower(*FocusedPane()); // snap onto the 1:1 alignment
+            UpdateCommandUi();
+            return 0;
+        case IDC_TOOLBAR_TEXT_BELOW:
+            SetToolbarTextMode(1);
+            return 0;
+        case IDC_TOOLBAR_TEXT_RIGHT:
+            SetToolbarTextMode(2);
+            return 0;
+        case IDC_TOOLBAR_TEXT_NONE:
+            SetToolbarTextMode(0);
             return 0;
         case IDC_FIND_SHOW:
             ShowFindBar();
@@ -2201,16 +2702,45 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             FocusedPane()->ApplyZoomRatio(1.0f / 1.25f);
             UpdateCommandUi();
             return 0;
+        // With zoom sync on, the three preset commands drive BOTH panes: the
+        // ratio routing would otherwise land the sibling at target*anchor
+        // (100% only on one side) or leave its fit mode untouched. Silent
+        // scope: the paired absolute writes must not echo through the ratio
+        // path mid-flight. Fits re-capture the ratio anchor by themselves
+        // (FitZoomChanged is handled even inside the silent scope); the
+        // manual 100% pair needs the explicit resync.
         case IDC_ZOOM_ACTUAL:
-            FocusedPane()->SetManualZoom(1.0f);
+            if (m_sync->ZoomSync()) {
+                m_sync->ApplySilently([this] {
+                    m_left->SetManualZoom(1.0f);
+                    m_right->SetManualZoom(1.0f);
+                });
+                m_sync->ResyncZoomAnchor();
+            } else {
+                FocusedPane()->SetManualZoom(1.0f);
+            }
             UpdateCommandUi();
             return 0;
         case IDC_FIT_WIDTH:
-            FocusedPane()->SetZoomMode(PaneWindow::ZoomMode::FitWidth);
+            if (m_sync->ZoomSync()) {
+                m_sync->ApplySilently([this] {
+                    m_left->SetZoomMode(PaneWindow::ZoomMode::FitWidth);
+                    m_right->SetZoomMode(PaneWindow::ZoomMode::FitWidth);
+                });
+            } else {
+                FocusedPane()->SetZoomMode(PaneWindow::ZoomMode::FitWidth);
+            }
             UpdateCommandUi();
             return 0;
         case IDC_FIT_PAGE:
-            FocusedPane()->SetZoomMode(PaneWindow::ZoomMode::FitPage);
+            if (m_sync->ZoomSync()) {
+                m_sync->ApplySilently([this] {
+                    m_left->SetZoomMode(PaneWindow::ZoomMode::FitPage);
+                    m_right->SetZoomMode(PaneWindow::ZoomMode::FitPage);
+                });
+            } else {
+                FocusedPane()->SetZoomMode(PaneWindow::ZoomMode::FitPage);
+            }
             UpdateCommandUi();
             return 0;
         case IDC_SCROLL_CONTINUOUS:
@@ -2290,7 +2820,10 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         // Right-click anywhere on the bar area (rebar background or a band
         // child): the IE-style toolbar context menu.
         const HWND from = reinterpret_cast<HWND>(wParam);
-        if (m_rebar && !m_fullscreen && (from == m_rebar || IsChild(m_rebar, from))) {
+        // Gate on actual bar visibility, not on the fullscreen flag: the
+        // "toolbar in full screen" option keeps the rebar live there, and its
+        // context menu (lock, text options) must stay reachable.
+        if (m_rebar && IsWindowVisible(m_rebar) && (from == m_rebar || IsChild(m_rebar, from))) {
             POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             if (pt.x == -1 && pt.y == -1) { // keyboard invocation: anchor to the bar
                 RECT rc;
@@ -2402,10 +2935,11 @@ void MainWindow::Layout() {
 
     // Full screen hides the bars without touching the persisted visibility
     // flags: the whole rebar (menu included) disappears, matching the old
-    // SetMenu(nullptr) behavior. "View > Toolbar" only hides the command
-    // toolbar and page box BANDS; the menu band always stays.
-    const bool rebarOn = m_rebar && !m_fullscreen;
-    const bool statusOn = m_status && m_statusVisible && !m_fullscreen;
+    // SetMenu(nullptr) behavior - unless the Options ask to keep the toolbar
+    // and/or the status bar on screen. "View > Toolbar" only hides the
+    // command toolbar and page box BANDS; the menu band always stays.
+    const bool rebarOn = m_rebar && (!m_fullscreen || m_fsShowToolbar);
+    const bool statusOn = m_status && m_statusVisible && (!m_fullscreen || m_fsShowStatus);
     if (m_rebar) {
         // Bands by id, not index: the user can reorder them when unlocked.
         const auto showBand = [this](UINT id, BOOL show) {
@@ -2419,6 +2953,21 @@ void MainWindow::Layout() {
     }
     if (m_status)
         ShowWindow(m_status, statusOn ? SW_SHOW : SW_HIDE);
+    // Floating full-screen escape hatch: only when the real full-screen
+    // button is NOT on screen (the kept toolbar must also be visible per
+    // View > Toolbar, or its band is hidden inside the shown rebar).
+    if (m_fullscreen && !(m_fsShowToolbar && m_toolbarVisible)) {
+        EnsureFsBar();
+        if (m_fsBar) {
+            SIZE sz{};
+            SendMessageW(m_fsBar, TB_GETMAXSIZE, 0, reinterpret_cast<LPARAM>(&sz));
+            const int margin = MulDiv(8, m_dpi, 96);
+            SetWindowPos(m_fsBar, HWND_TOP, static_cast<int>(rc.right) - sz.cx - margin, margin,
+                         sz.cx, sz.cy, SWP_SHOWWINDOW);
+        }
+    } else if (m_fsBar) {
+        ShowWindow(m_fsBar, SW_HIDE);
+    }
     int top = 0;
     int bottom = rc.bottom;
     if (rebarOn) {
@@ -2600,7 +3149,15 @@ void MainWindow::LayoutFindBar() {
     const int barW = MulDiv(340, m_dpi, 96);
     const int barH = MulDiv(34, m_dpi, 96);
     const int pad = MulDiv(6, m_dpi, 96);
-    const int paneRight = m_findTarget == m_left.get() ? m_splitterX : rc.right;
+    int paneRight = m_findTarget == m_left.get() ? m_splitterX : rc.right;
+    // In full screen the floating exit button owns the top-right corner, right
+    // where the right pane's find bar lands: shift the bar left so the one
+    // mouse affordance for leaving full screen stays reachable.
+    if (m_findTarget != m_left.get() && m_fsBar && IsWindowVisible(m_fsBar)) {
+        RECT fs;
+        GetWindowRect(m_fsBar, &fs);
+        paneRight -= (fs.right - fs.left) + MulDiv(8, m_dpi, 96);
+    }
     const int x = std::max(0, paneRight - barW - pad);
     SetWindowPos(m_findBar, HWND_TOP, x, m_contentTop + pad, barW, barH, SWP_NOACTIVATE);
 

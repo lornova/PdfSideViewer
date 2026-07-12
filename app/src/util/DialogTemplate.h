@@ -21,6 +21,10 @@ public:
     DialogTemplate(PCWSTR title, int cx, int cy);
     void AddControl(WORD classAtom, DWORD style, DWORD exStyle, int x, int y, int cx, int cy,
                     WORD id, PCWSTR text);
+    // Class-by-name variant for comctl32 classes (SysListView32, ...), which
+    // have no predefined DLGITEMTEMPLATE atom.
+    void AddControl(PCWSTR className, DWORD style, DWORD exStyle, int x, int y, int cx, int cy,
+                    WORD id, PCWSTR text);
     // Finalizes the item count and returns the template (valid until the
     // builder is modified or destroyed).
     const DLGTEMPLATE* Data();

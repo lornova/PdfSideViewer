@@ -76,7 +76,8 @@ bool SendOpenDocument(HWND target, bool rightPane, const std::wstring& path) {
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int nCmdShow) {
     try {
         INITCOMMONCONTROLSEX icc{sizeof(icc),
-                                 ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES | ICC_COOL_CLASSES};
+                                 ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES | ICC_COOL_CLASSES |
+                                 ICC_LISTVIEW_CLASSES};
         InitCommonControlsEx(&icc);
         MainWindow::RegisterWindowClass(hInstance);
         PaneWindow::RegisterWindowClass(hInstance);

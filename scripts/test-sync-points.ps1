@@ -1,6 +1,9 @@
-# E2E test for WinMerge-style sync points: generation from numbered bookmarks
-# (skip + monotonicity filter), waiting at segment boundaries, manual points,
-# clear-restores-plain-anchor, zero-match feedback.
+# E2E test for WinMerge-style sync points: rendered alignment gaps (default
+# ON, 1:1 traversal, flippable paged gaps, toggle round-trip), swap mirroring,
+# generation from numbered bookmarks (skip + monotonicity filter), waiting at
+# segment boundaries with gaps OFF, manual points, clear-restores-plain-anchor,
+# zero-match feedback. Phase order matters: phase 0 asserts the fresh-sandbox
+# defaults, phases 1..2 explicitly toggle the gaps off.
 #
 # CLAUDE.md testing rules: DPI-aware thread FIRST (the dev monitor is 175% and
 # PowerShell is DPI-unaware), PSV_SETTINGS_DIR sandbox (never touch the user's
@@ -46,13 +49,20 @@ $SB_GETTEXTLENGTHW = 0x040C
 $IDC_FOCUS_NEXT_PANE = 1003
 $IDC_TOGGLE_SCROLL_SYNC = 1004
 $IDC_TOGGLE_ZOOM_SYNC = 1005
+$IDC_SCROLL_CONTINUOUS = 1025
+$IDC_SCROLL_PAGED = 1026
 $IDC_GOTO_PAGE = 1028
+$IDC_SWAP_PANES = 1029
+$IDC_OPTIONS = 1049
 $IDC_ADD_SYNC_POINT = 1051
 $IDC_SYNC_FROM_BOOKMARKS = 1052
 $IDC_CLEAR_SYNC_POINTS = 1054
+$IDC_TOGGLE_ALIGNMENT_GAPS = 1055
 $IDOK = 1
 $SB_VERT = 1
 $SIF_ALL = 0x17
+$WM_VSCROLL = 0x0115
+$SB_PAGEDOWN = 3
 
 # --- expected English status-cell texts (asserted by LENGTH, see header) ---
 $mid = [string][char]0xB7 # the middle dot of StatusSyncPtsPre, ASCII-safe
@@ -72,7 +82,9 @@ $pdfA = Join-Path $root 'testdata\sync-a.pdf'
 $pdfA2 = Join-Path $root 'testdata\sync-a2.pdf'
 $pdfB = Join-Path $root 'testdata\sync-b.pdf'
 $pdfC = Join-Path $root 'testdata\sync-c.pdf'
-foreach ($f in $pdfA, $pdfA2, $pdfB, $pdfC) {
+$pdfD = Join-Path $root 'testdata\sync-d.pdf'
+$pdfE = Join-Path $root 'testdata\sync-e.pdf'
+foreach ($f in $pdfA, $pdfA2, $pdfB, $pdfC, $pdfD, $pdfE) {
     if (-not (Test-Path $f)) { throw "missing $f (run scripts\make-test-pdfs.ps1)" }
 }
 
@@ -105,6 +117,13 @@ function Poll([scriptblock]$probe, [int]$timeoutMs = 10000) {
     return [bool](& $probe)
 }
 
+function Get-VScroll([IntPtr]$pane) {
+    $si = New-Object Win32.Native+SCROLLINFO
+    $si.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($si)
+    $si.fMask = $SIF_ALL
+    [void][Win32.Native]::GetScrollInfo($pane, $SB_VERT, [ref]$si)
+    $si
+}
 function Get-StatusLen([IntPtr]$status) {
     [int]([Win32.Native]::SendMessageW($status, $SB_GETTEXTLENGTHW, [IntPtr]3,
                                        [IntPtr]::Zero).ToInt64() -band 0xFFFF)
@@ -214,20 +233,121 @@ function Stop-Viewer($v) {
     Assert ($v.Proc.ExitCode -eq 0) "exit code 0 (got $($v.Proc.ExitCode))"
 }
 # Fresh-sandbox defaults switch the sync locks ON; drive both OFF so every
-# phase starts from a known state. The four base texts have distinct lengths.
-function Reset-SyncLocks($v) {
-    if ((Get-StatusLen $v.Status) -in $lenScroll, $lenBoth) {
+# phase starts from a known state. The four base texts have distinct lengths;
+# with a live map the "· N pts" suffix shifts them all by the same amount
+# (pass the expected point count, single-digit).
+function Reset-SyncLocks($v, [int]$pts = 0) {
+    $sfx = if ($pts -gt 0) { " $mid $pts pts".Length } else { 0 }
+    if ((Get-StatusLen $v.Status) -in ($lenScroll + $sfx), ($lenBoth + $sfx)) {
         Send-Command $v $IDC_TOGGLE_SCROLL_SYNC
-        [void](Poll { (Get-StatusLen $v.Status) -in $lenOff, $lenZoom } 5000)
+        [void](Poll { (Get-StatusLen $v.Status) -in ($lenOff + $sfx), ($lenZoom + $sfx) } 5000)
     }
-    if ((Get-StatusLen $v.Status) -eq $lenZoom) {
+    if ((Get-StatusLen $v.Status) -eq ($lenZoom + $sfx)) {
         Send-Command $v $IDC_TOGGLE_ZOOM_SYNC
-        [void](Poll { (Get-StatusLen $v.Status) -eq $lenOff } 5000)
+        [void](Poll { (Get-StatusLen $v.Status) -eq ($lenOff + $sfx) } 5000)
     }
-    if ((Get-StatusLen $v.Status) -ne $lenOff) { throw 'could not normalize the sync locks' }
+    if ((Get-StatusLen $v.Status) -ne ($lenOff + $sfx)) {
+        throw 'could not normalize the sync locks'
+    }
 }
 
 try {
+    # ---------------------------------------------------------------- phase 0
+    # Alignment gaps (default ON, asserted on a fresh sandbox). Map for
+    # sync-a|sync-b is (0,0),(1,1),(4,2): the right pane gets 2 gap slots
+    # before its page 3 (1-based) mirroring left's A4 pages 3-4, so its slot
+    # table is [p1,p2,G,G,p3,p4,p5,p6] and its scroll range grows; the left
+    # layout is untouched. With gaps the follower scrolls THROUGH its gap
+    # (nPos advances) while the page box stays pinned - the discriminator
+    # against the gaps-off waiting behavior, where the follower stands still.
+    Write-Host 'phase 0: alignment gaps, default ON (sync-a | sync-b)'
+    $v = Start-Viewer $pdfA $pdfB
+    Reset-SyncLocks $v
+    $baseL = (Get-VScroll $v.Left).nMax
+    $baseR = (Get-VScroll $v.Right).nMax
+    Send-Command $v $IDC_SYNC_FROM_BOOKMARKS
+    Assert (Poll { (Get-StatusLen $v.Status) -eq $lenGenerated3 } 5000) `
+        'generated 3 points (gaps phase)'
+    Assert (Poll { (Get-VScroll $v.Right).nMax -gt $baseR } 5000) `
+        'right scroll range grew: gap slots rendered by default'
+    Assert ((Get-VScroll $v.Left).nMax -eq $baseL) `
+        'left scroll range unchanged: gaps only on the short side'
+    Invoke-GotoPage $v $v.Left 3
+    Assert-PaneAt $v $v.Right '2' 'left p3 puts right inside its gap run (counter pinned at 2)'
+    $rp1 = (Get-VScroll $v.Right).nPos
+    Invoke-GotoPage $v $v.Left 4
+    Assert-PaneAt $v $v.Right '2' 'left p4: right counter still pinned at 2'
+    Assert ((Get-VScroll $v.Right).nPos -gt $rp1) `
+        'right nPos advanced through the gap while the counter stayed put (1:1 traversal)'
+    Invoke-GotoPage $v $v.Left 5
+    Assert-PaneAt $v $v.Right '3' 'left p5 lands right on its section 2 (p3) past the gaps'
+
+    # Paged mode: gap slots are flippable empty pages.
+    Reset-SyncLocks $v 3
+    Send-Command $v $IDC_SCROLL_PAGED
+    Invoke-GotoPage $v $v.Right 2
+    Start-Sleep -Milliseconds 250
+    $np0 = (Get-VScroll $v.Right).nPos
+    $sawGapFlip = $false
+    $reached3 = $false
+    for ($i = 0; $i -lt 12 -and -not $reached3; $i++) {
+        [void][Win32.Native]::PostMessageW($v.Right, $WM_VSCROLL, [IntPtr]$SB_PAGEDOWN,
+                                           [IntPtr]::Zero)
+        Start-Sleep -Milliseconds 200
+        $box = Get-PageBoxText $v
+        $np = (Get-VScroll $v.Right).nPos
+        if ($box -eq '2' -and $np -gt $np0) { $sawGapFlip = $true } # parked on a gap slot
+        if ($box -eq '3') { $reached3 = $true }
+    }
+    Assert $reached3 'paged flips reach p3 across the gap run'
+    Assert $sawGapFlip 'an intermediate flip parked on a gap slot (blank page, counter pinned)'
+    Send-Command $v $IDC_SCROLL_CONTINUOUS
+
+    # Toggle round-trip: OFF restores the exact gapless range, ON re-grows it.
+    Send-Command $v $IDC_TOGGLE_ALIGNMENT_GAPS
+    Assert (Poll { (Get-VScroll $v.Right).nMax -eq $baseR } 5000) `
+        'gaps OFF: right range back to the exact gapless value'
+    Send-Command $v $IDC_TOGGLE_ALIGNMENT_GAPS
+    Assert (Poll { (Get-VScroll $v.Right).nMax -gt $baseR } 5000) `
+        'gaps ON again: range re-grows'
+
+    # --------------------------------------------------------------- phase 0b
+    # Swap mirroring: after F8 the map survives with left/right exchanged
+    # ((0,0),(1,1),(2,4)), so the gap run moves to the LEFT pane and new-left
+    # p3 (slot 4) pairs with new-right p5 (slot 4). Without mirroring the map
+    # would be gone (status length 12) and the goto would land elsewhere.
+    Write-Host 'phase 0b: swap mirrors the point map'
+    if ((Get-StatusLen $v.Status) -ne $lenScroll3Pts) {
+        Send-Command $v $IDC_TOGGLE_SCROLL_SYNC
+        [void](Poll { (Get-StatusLen $v.Status) -eq $lenScroll3Pts } 5000)
+    }
+    Send-Command $v $IDC_SWAP_PANES
+    $swapped = Poll {
+        try {
+            (Get-StatusLen $v.Status) -eq $lenScroll3Pts -and
+                (Get-VScroll $v.Left).nMax -gt 0 -and (Get-VScroll $v.Right).nMax -gt 0
+        } catch { $false }
+    } 20000
+    Assert $swapped 'map survived the swap (status still reports 3 pts)'
+    $mirrorOk = Poll {
+        try {
+            Invoke-GotoPage $v $v.Left 2
+            Focus-Pane $v $v.Right
+            if ((Get-PageBoxText $v) -ne '2') { return $false }
+            Invoke-GotoPage $v $v.Left 3
+            Focus-Pane $v $v.Right
+            (Get-PageBoxText $v) -eq '5'
+        } catch {
+            $stray = [Win32.Native]::FindWindowByTitle([IntPtr]::Zero, 'Go to Page')
+            if ($stray -ne [IntPtr]::Zero) {
+                [void][Win32.Native]::PostMessageW($stray, $WM_COMMAND, [IntPtr]2, [IntPtr]::Zero) # IDCANCEL
+            }
+            $false
+        }
+    } 20000
+    Assert $mirrorOk 'mirrored map drives new-left p3 -> new-right p5 (slot 4 <-> slot 4)'
+    Stop-Viewer $v
+
     # ---------------------------------------------------------------- phase 1
     # Generation: skip ([1.2] left-only), monotonicity ([3] points backward on
     # the right), waiting inside the right-side gap, both directions.
@@ -235,6 +355,10 @@ try {
     Write-Host 'phase 1: generation from numbered bookmarks (sync-a | sync-b)'
     $v = Start-Viewer $workA $pdfB
     Reset-SyncLocks $v
+    # Phases 1..2 assert the gaps-OFF waiting behavior. Phase 0b left the
+    # toggle ON (persisted), so one toggle turns it off; phase 0's round-trip
+    # already proved the toggle itself works.
+    Send-Command $v $IDC_TOGGLE_ALIGNMENT_GAPS
     Send-Command $v $IDC_SYNC_FROM_BOOKMARKS
     Assert (Poll { (Get-StatusLen $v.Status) -eq $lenGenerated3 } 5000) `
         'transient message reports 3 generated points (out-of-order candidate dropped)'
@@ -341,6 +465,95 @@ try {
         'zero-match message shown in the status cell'
     Assert (Poll { (Get-StatusLen $v.Status) -lt 18 } 8000) `
         'message expires and no pts suffix remains (no points were created)'
+
+    # ---------------------------------------------------------------- phase 4
+    # Options round-trip for the marker visibility checkboxes (2110 anchors,
+    # 2111 ticks): uncheck both, OK, close - settings.ini must persist 0s.
+    # The rendering itself is not observable through messages; this pins the
+    # dialog plumbing and persistence.
+    Write-Host 'phase 4: marker visibility options persist'
+    Send-Command $v $IDC_OPTIONS
+    if (-not (Poll { [Win32.Native]::FindWindowByTitle([IntPtr]::Zero, 'Options') -ne [IntPtr]::Zero } 5000)) {
+        throw 'options dialog did not open'
+    }
+    $opt = [Win32.Native]::FindWindowByTitle([IntPtr]::Zero, 'Options')
+    $BM_GETCHECK = 0x00F0
+    $BM_SETCHECK = 0x00F1
+    foreach ($id in 2110, 2111) {
+        if (-not (Poll { [Win32.Native]::GetDlgItem($opt, $id) -ne [IntPtr]::Zero } 3000)) {
+            throw "options checkbox $id not found"
+        }
+        $chk = [Win32.Native]::GetDlgItem($opt, $id)
+        # WM_INITDIALOG checks the boxes (defaults are on); waiting for that
+        # avoids the write-then-init race the goto dialog taught us.
+        if (-not (Poll { [Win32.Native]::SendMessageW($chk, $BM_GETCHECK, [IntPtr]::Zero,
+                                                      [IntPtr]::Zero).ToInt64() -eq 1 } 3000)) {
+            throw "options checkbox $id never initialized"
+        }
+        [void][Win32.Native]::SendMessageW($chk, $BM_SETCHECK, [IntPtr]0, [IntPtr]::Zero)
+    }
+    [void][Win32.Native]::PostMessageW($opt, $WM_COMMAND, [IntPtr]$IDOK, [IntPtr]::Zero)
+    if (-not (Poll { -not [Win32.Native]::IsWindow($opt) } 5000)) { throw 'options did not close' }
+    Stop-Viewer $v
+    $ini = Get-Content (Join-Path $scratch 'settings.ini') -Raw
+    Assert ($ini -match 'showAnchors=0') 'settings.ini persisted showAnchors=0'
+    Assert ($ini -match 'showTicks=0') 'settings.ini persisted showTicks=0'
+
+    # ---------------------------------------------------------------- phase 5
+    # Extended matching (sync-d | sync-e): deep keys (2.2.1) on distinct
+    # pages, title-only pairs (Sommario), letter components (Appendice A/B,
+    # A.1/A.2). All ten channels matching is pinned by the TWO-DIGIT count in
+    # the status cell (any missing channel drops to one digit = length 20);
+    # the Appendice B goto pins the letter point behaviorally (delta +2 of
+    # the last point (9,11); without it the previous segment's delta 0 would
+    # land the right pane on p10/p11 instead).
+    Write-Host 'phase 5: deep keys, title matches and letter components (sync-d | sync-e)'
+    $v = Start-Viewer $pdfD $pdfE
+    Reset-SyncLocks $v
+    Send-Command $v $IDC_SYNC_FROM_BOOKMARKS
+    $len10Pts = "Sync: scroll $mid 10 pts".Length
+    Assert (Poll { (Get-StatusLen $v.Status) -eq $len10Pts } 5000) `
+        'all 10 points generated (third level + titles + letters all matched)'
+    Invoke-GotoPage $v $v.Left 10  # 0-based 9 = "Appendice B", last point (9,11)
+    Assert-PaneAt $v $v.Right '12' 'letter point drives left Appendice B onto right p12'
+    Stop-Viewer $v
+
+    # ---------------------------------------------------------------- phase 6
+    # Manual sync points persist across sessions ([sync-points]): place two on
+    # a never-seen pair with no numbered-bookmark overlap (sync-a2 | sync-c),
+    # close, reopen, and the map must come back (locks restore as saved: off).
+    Write-Host 'phase 6: manual sync points persist across sessions'
+    $v = Start-Viewer $pdfA2 $pdfC
+    Reset-SyncLocks $v
+    Invoke-GotoPage $v $v.Left 2
+    Invoke-GotoPage $v $v.Right 1
+    Send-Command $v $IDC_ADD_SYNC_POINT   # (1,0) 0-based
+    Invoke-GotoPage $v $v.Left 5
+    Invoke-GotoPage $v $v.Right 2
+    Send-Command $v $IDC_ADD_SYNC_POINT   # (4,1) 0-based
+    $lenOff2Pts = "Sync: off $mid 2 pts".Length
+    Assert (Poll { (Get-StatusLen $v.Status) -eq $lenOff2Pts } 5000) `
+        'two manual points placed with sync off'
+    Stop-Viewer $v
+    $v = Start-Viewer $pdfA2 $pdfC
+    Assert (Poll { (Get-StatusLen $v.Status) -eq $lenOff2Pts } 8000) `
+        'reopening the pair restores its two manual points'
+    Send-Command $v $IDC_TOGGLE_SCROLL_SYNC
+    [void](Poll { (Get-StatusLen $v.Status) -eq $lenScroll2Pts } 5000)
+    Invoke-GotoPage $v $v.Left 5   # restored point (4,1): delta -3
+    Assert-PaneAt $v $v.Right '2' 'the restored manual map drives the right pane'
+    Stop-Viewer $v
+
+    # --------------------------------------------------------------- phase 6b
+    # Generated points re-derive at startup: phase 5 saved sync-d | sync-e
+    # with the auto flag (and scroll sync on), so reopening the pair must
+    # rebuild the 10-point map from the fresh outlines by itself.
+    Write-Host 'phase 6b: generated points re-derive at startup (saved auto flag)'
+    $v = Start-Viewer $pdfD $pdfE
+    Assert (Poll { (Get-StatusLen $v.Status) -eq $len10Pts } 8000) `
+        'the remembered pair re-generates its 10 points on open'
+    Invoke-GotoPage $v $v.Left 10
+    Assert-PaneAt $v $v.Right '12' 'the re-derived map drives Appendice B onto right p12'
     Stop-Viewer $v
 } finally {
     Get-Process PdfSideViewer -ErrorAction SilentlyContinue | ForEach-Object {

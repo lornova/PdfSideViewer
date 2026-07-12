@@ -153,6 +153,42 @@ New-TestPdf -Path (Join-Path $OutDir 'sync-a2.pdf') -Pages @(
     @{Title='1.2 Seconda'; Page=2},
     @{Title='3 Appendice'; Page=5}
 )
+# Extended-matching pair (test-sync-points.ps1 phase 5): third-level keys on
+# DISTINCT pages, title-only matches (Sommario), letter components (Appendice
+# A/B, A.1/A.2). Expected map: 10 points, the last one (9,11) 0-based; the
+# unmatched titles differ on purpose.
+$syncDOutline = @(
+    @{Title='Sommario'; Page=0},
+    @{Title='1 Introduzione'; Page=1},
+    @{Title='2 Corpo'; Page=2},
+    @{Title='2.2.1 Dettaglio'; Page=3},
+    @{Title='3 Analisi'; Page=4},
+    @{Title='4 Sintesi'; Page=5},
+    @{Title='Appendice A'; Page=6},
+    @{Title='A.1 Notazione'; Page=7},
+    @{Title='A.2 Simboli'; Page=8},
+    @{Title='Appendice B'; Page=9},
+    @{Title='Solo qui'; Page=10}
+)
+$syncEOutline = @(
+    @{Title='Sommario'; Page=0},
+    @{Title='1 Introduzione'; Page=1},
+    @{Title='2 Corpo'; Page=2},
+    @{Title='2.2.1 Dettaglio'; Page=3},
+    @{Title='3 Analisi'; Page=4},
+    @{Title='4 Sintesi'; Page=5},
+    @{Title='Appendice A'; Page=6},
+    @{Title='A.1 Notazione'; Page=7},
+    @{Title='A.2 Simboli'; Page=8},
+    @{Title='Appendice B'; Page=11},
+    @{Title='Solo la'; Page=9}
+)
+New-TestPdf -Path (Join-Path $OutDir 'sync-d.pdf') -Outline $syncDOutline -Pages @(
+    1..12 | ForEach-Object { @{W=595; H=842; Label="SD - Pagina $_"} }
+)
+New-TestPdf -Path (Join-Path $OutDir 'sync-e.pdf') -Outline $syncEOutline -Pages @(
+    1..12 | ForEach-Object { @{W=612; H=792; Label="SE - Pagina $_"} }
+)
 # No numbered bookmarks at all: the zero-match partner.
 New-TestPdf -Path (Join-Path $OutDir 'sync-c.pdf') -Pages @(
     @{W=595; H=842; Label='SC - Pagina 1'},

@@ -2,7 +2,7 @@
 
 #include <cstdint>
 
-HIMAGELIST CreateGlyphImageList(std::span<const wchar_t> glyphs, int glyphPx, int cellPx,
+HIMAGELIST CreateGlyphImageList(std::span<const GlyphSpec> glyphs, int glyphPx, int cellPx,
                                 COLORREF color) {
     const int count = static_cast<int>(glyphs.size());
     if (count == 0 || glyphPx <= 0 || cellPx <= 0)
@@ -37,10 +37,24 @@ HIMAGELIST CreateGlyphImageList(std::span<const wchar_t> glyphs, int glyphPx, in
     const HGDIOBJ oldFont = SelectObject(dc, font);
     SetBkMode(dc, TRANSPARENT);
     SetTextColor(dc, RGB(255, 255, 255));
+    // GM_ADVANCED for the mirror passes: TrueType output follows the world
+    // transform there (including the flip), which GM_COMPATIBLE ignores.
+    SetGraphicsMode(dc, GM_ADVANCED);
     for (int i = 0; i < count; ++i) {
         RECT cell{i * cellPx, 0, (i + 1) * cellPx, cellPx};
-        DrawTextW(dc, &glyphs[static_cast<size_t>(i)], 1, &cell,
+        DrawTextW(dc, &glyphs[static_cast<size_t>(i)].ch, 1, &cell,
                   DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+        if (glyphs[static_cast<size_t>(i)].mirrorOverlay) {
+            // Mirror around the cell's vertical center line (x' = 2c - x):
+            // the cell rect maps onto itself, so the same DrawText overlays
+            // the flipped copy exactly. White-on-black, so overlapping
+            // strokes just saturate before the coverage conversion below.
+            XFORM flip{-1.0f, 0.0f, 0.0f, 1.0f, static_cast<FLOAT>((2 * i + 1) * cellPx), 0.0f};
+            SetWorldTransform(dc, &flip);
+            DrawTextW(dc, &glyphs[static_cast<size_t>(i)].ch, 1, &cell,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOCLIP);
+            ModifyWorldTransform(dc, nullptr, MWT_IDENTITY);
+        }
     }
     GdiFlush(); // GDI batches: flush before reading the DIB bits
 

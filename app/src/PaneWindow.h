@@ -71,10 +71,11 @@ public:
     enum class ScrollMode { Continuous = 0, Paged = 1 };
     void SetScrollMode(ScrollMode mode);
     ScrollMode GetScrollMode() const { return m_scrollMode; }
-    // Ctrl+4 in a pane toggles the global mode; the pane knows no command
-    // ids, so the frame injects the action (same pattern as m_openSibling).
-    void SetToggleScrollModeHandler(std::function<void()> handler) {
-        m_onToggleScrollMode = std::move(handler);
+    // Ctrl+4/Ctrl+5 in a pane select the global mode (continuous / paged);
+    // the pane knows no command ids, so the frame injects the action (same
+    // pattern as m_openSibling).
+    void SetScrollModeRequestHandler(std::function<void(ScrollMode)> handler) {
+        m_onScrollModeRequest = std::move(handler);
     }
 
     // ------------------------------------------------------------- sync API --
@@ -101,8 +102,38 @@ public:
     int PageCount() const { return m_layout.PageCount(); }
     double SyncPosition() const;
     void ScrollToSyncPosition(double pos);
+    // Slot units (slotIndex + fraction at the viewport center). With
+    // alignment gaps applied in both panes the layouts are slot-aligned, so
+    // scroll sync becomes IDENTITY on these coordinates.
+    double VirtualSyncPosition() const;
+    void ScrollToVirtualSyncPosition(double pos);
     void ApplyZoomRatio(float ratio);
     void SetManualZoom(float zoom);
+
+    // Alignment gaps (WinMerge-style empty slots) and sync-point markers,
+    // both pushed by the frame whenever the sync-point map changes. Gaps
+    // relayout with the position preserved in real-page units; markers only
+    // repaint (anchor glyphs + scrollbar tick strip). The version stamps the
+    // frame's gap epoch: virtual (slot-unit) sync is only valid between two
+    // panes holding the SAME nonzero version - a (re)opened pane resets to 0
+    // (SetPages cleared its gaps), which closes the reload window where one
+    // pane is already gapless while the map still exists.
+    void SetAlignmentGaps(std::vector<PageLayout::AlignmentGap> gaps, uint64_t version);
+    uint64_t AlignmentGapsVersion() const { return m_gapsVersion; }
+    struct SyncMarker {
+        int page = 0;
+        bool manual = false; // manual points draw opaque, generated ones faded
+        std::wstring label;  // numbering key ("1.2"); empty for manual points
+    };
+    void SetSyncMarkers(std::vector<SyncMarker> markers); // sorted by page
+    // Options-dialog visibility switches for the two marker renderings.
+    void SetMarkerVisibility(bool anchors, bool ticks) {
+        m_showAnchorMarks = anchors;
+        m_showTickStrip = ticks;
+        HideAnchorTip();
+        Invalidate();
+    }
+    D2D1_SIZE_F PageSizePt(int page) const { return m_layout.PageSizePt(page); }
 
     // ---------------------------------------------------------- text search --
     using SearchStatusHandler =
@@ -129,7 +160,11 @@ public:
     // persist the parked restore view instead.
     float PersistZoom() const { return m_hasRestoreView ? m_restoreZoom : m_zoom; }
     float PersistScrollX() const { return m_hasRestoreView ? m_restoreScrollX : m_scrollX; }
-    float PersistScrollY() const { return m_hasRestoreView ? m_restoreScrollY : m_scrollY; }
+    // Normalized to the NO-GAP coordinate space: every restore lands in a
+    // gapless layout (SetPages clears the alignment gaps), so saved offsets
+    // must be gap-free too. X needs no treatment: gap widths are capped at
+    // the real pages' width, so TotalWidth is gap-invariant.
+    float PersistScrollY() const;
     ZoomMode PersistZoomMode() const {
         return m_hasRestoreView ? m_restoreZoomMode : m_zoomMode;
     }
@@ -235,6 +270,14 @@ private:
     void CopySelection();
     void DrawOverlays(ID2D1SolidColorBrush* brush, int page, const D2D1_RECT_F& dest,
                       float scale);
+    void DrawAnchorMarker(ID2D1SolidColorBrush* brush, const SyncMarker& marker,
+                          const D2D1_RECT_F& dest);
+    // Shared by the draw and the hover hit test (dest = the page's viewport
+    // rect): beside the top-left corner, or inside it when the gutter is thin.
+    D2D1_RECT_F AnchorMarkerRect(const D2D1_RECT_F& dest) const;
+    void EnsureAnchorTip();
+    void UpdateAnchorTip(POINT client); // hover tooltip: the point's numbering
+    void HideAnchorTip();
     void NotifySearchStatus();
     void ScrollToMatch(const Document::SearchMatch& match);
 
@@ -242,6 +285,7 @@ private:
     float DesiredScale() const { return m_zoom * static_cast<float>(m_dpi) / 72.0f; }
     float DipToPx(float dip) const { return dip * static_cast<float>(m_dpi) / 96.0f; }
     SIZE ViewportPx() const;
+    float SyncCenterY() const; // sync sampling height, horizontal-bar-invariant
     D2D1_POINT_2F ContentOrigin() const;
     void RelayoutDocument();
     void UpdateFitZoom(); // recompute m_zoom for FitWidth/FitPage
@@ -254,12 +298,13 @@ private:
         float hi;
         bool fits;
     };
-    PagedBand PagedBandFor(int page) const;
+    PagedBand PagedBandFor(int slot) const;
     bool PagedActive() const {
         return m_scrollMode == ScrollMode::Paged && m_state == State::Open && !m_layout.Empty();
     }
     bool AtBandEdge(const PagedBand& band, int dir) const; // dir: +1 down/next, -1 up/prev
     void AdoptPage(int page); // programmatic jumps make their target the current page
+    void AdoptSlot(int slot); // paged flip cursor; a slot may be an alignment gap
     void PagedFlip(int dir);
     void PagedStepY(float dy);
     void PagedWheelY(int delta, float pxPerDetent);
@@ -321,7 +366,11 @@ private:
     ComPtr<ID2D1DeviceContext> m_d2dContext;
     ComPtr<ID2D1Bitmap1> m_targetBitmap;
     ComPtr<IDWriteTextFormat> m_textFormat;
+    ComPtr<IDWriteTextFormat> m_markerFormat; // anchor glyph ("Segoe UI Symbol")
     UINT m_textFormatDpi = 0;
+    // The dash style belongs to the D2D factory, which Discard() resets too:
+    // it follows the device generation, not the DWrite lifetime.
+    ComPtr<ID2D1StrokeStyle> m_dashStroke;
 
     State m_state = State::Empty;
     Document m_doc;
@@ -341,11 +390,19 @@ private:
     float m_scrollX = 0; // content px
     float m_scrollY = 0;
     ScrollMode m_scrollMode = ScrollMode::Continuous;
-    int m_currentPage = 0;  // paged mode: the one page drawn and clamped to
+    int m_currentSlot = 0;  // paged mode: the one SLOT drawn and clamped to (the
+                            // flip cursor walks alignment gaps too; render keys,
+                            // counter and SyncPosition derive the real page)
     float m_wheelAccum = 0; // paged mode: signed wheel credit toward one detent
+    std::vector<SyncMarker> m_syncMarkers; // sorted by page; drives ticks + anchors
+    bool m_showAnchorMarks = true; // Options: draw the anchor glyphs
+    bool m_showTickStrip = true;   // Options: draw the scrollbar tick strip
+    uint64_t m_gapsVersion = 0; // see SetAlignmentGaps; 0 = no valid gap epoch
     ZoomMode m_defaultZoomMode = ZoomMode::FitPage; // for fresh documents
     int m_wheelLinesOverride = 0;                   // 0 = system wheel lines
     HWND m_scrollTip = nullptr; // lazy tracking tooltip for scrollbar drags
+    HWND m_anchorTip = nullptr; // lazy tracking tooltip for anchor-mark hovers
+    int m_anchorTipPage = -1;   // page whose anchor the tip is showing; -1 = hidden
     std::map<int, CachedBitmap> m_previews; // whole page, capped size; tile fallback
     std::map<TileKey, CachedBitmap> m_tiles; // exact-scale tiles when res > 0
     uint64_t m_frame = 0; // bumped per DrawDocument; drives tile eviction
@@ -354,7 +411,7 @@ private:
 
     ViewChangedHandler m_onViewChanged;
     std::function<void(std::wstring)> m_openSibling; // second file of a multi-drop
-    std::function<void()> m_onToggleScrollMode;      // Ctrl+4: frame-owned global toggle
+    std::function<void(ScrollMode)> m_onScrollModeRequest; // Ctrl+4/5: frame-owned global mode
     std::function<void()> m_onOpenRequest;           // double-click on an empty pane
 
     // UI-side text/link models for visible (and selection-spanning) pages.

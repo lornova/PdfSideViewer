@@ -44,6 +44,25 @@ void DialogTemplate::AddControl(WORD classAtom, DWORD style, DWORD exStyle, int 
     ++m_count;
 }
 
+void DialogTemplate::AddControl(PCWSTR className, DWORD style, DWORD exStyle, int x, int y,
+                                int cx, int cy, WORD id, PCWSTR text) {
+    AlignDword();
+    DLGITEMTEMPLATE item{};
+    item.style = style | WS_CHILD | WS_VISIBLE;
+    item.dwExtendedStyle = exStyle;
+    item.x = static_cast<short>(x);
+    item.y = static_cast<short>(y);
+    item.cx = static_cast<short>(cx);
+    item.cy = static_cast<short>(cy);
+    item.id = id;
+    const auto* raw = reinterpret_cast<const uint8_t*>(&item);
+    m_bytes.insert(m_bytes.end(), raw, raw + sizeof(item));
+    AppendString(className); // class by name
+    AppendString(text);
+    AppendWord(0); // no creation data
+    ++m_count;
+}
+
 const DLGTEMPLATE* DialogTemplate::Data() {
     auto* header = reinterpret_cast<DLGTEMPLATE*>(m_bytes.data());
     header->cdit = m_count;

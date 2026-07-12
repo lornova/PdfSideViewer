@@ -7,6 +7,7 @@ constexpr PCWSTR kSyncSection = L"sync";
 constexpr PCWSTR kDefaultsSection = L"defaults";
 constexpr PCWSTR kMruFilesSection = L"mru-files";
 constexpr PCWSTR kMruPairsSection = L"mru-pairs";
+constexpr PCWSTR kSyncPointsSection = L"sync-points";
 constexpr PCWSTR kSynctexSection = L"synctex";
 
 // The multi-key INI write is not atomic as a group; two instances closing
@@ -145,12 +146,18 @@ AppSettings AppSettings::Load() {
         s.language = L"en";
     s.scrollSync = ReadInt(file, kSyncSection, L"scroll", 1) != 0;
     s.zoomSync = ReadInt(file, kSyncSection, L"zoom", 1) != 0;
+    s.showGaps = ReadInt(file, kSyncSection, L"showGaps", 1) != 0;
+    s.showAnchors = ReadInt(file, kSyncSection, L"showAnchors", 1) != 0;
+    s.showTicks = ReadInt(file, kSyncSection, L"showTicks", 1) != 0;
     s.scrollMode = std::clamp(ReadInt(file, kWindowSection, L"scrollMode", 0), 0, 1);
     s.restoreSession = ReadInt(file, kWindowSection, L"restoreSession", 1) != 0;
     s.wheelLines = std::clamp(ReadInt(file, kWindowSection, L"wheelLines", 0), 0, 100);
     s.outlineWidth = std::clamp(ReadInt(file, kWindowSection, L"outlineWidth", 260), 120, 600);
     s.rebarLocked = ReadInt(file, kWindowSection, L"rebarLocked", 1) != 0;
     s.rebarBands = ReadString(file, kWindowSection, L"rebarBands");
+    s.toolbarText = std::clamp(ReadInt(file, kWindowSection, L"toolbarText", 1), 0, 2);
+    s.fsToolbar = ReadInt(file, kWindowSection, L"fsToolbar", 0) != 0;
+    s.fsStatus = ReadInt(file, kWindowSection, L"fsStatusbar", 0) != 0;
     s.defScrollMode = std::clamp(ReadInt(file, kDefaultsSection, L"scrollMode", 0), 0, 1);
     s.defZoomMode = std::clamp(ReadInt(file, kDefaultsSection, L"zoomMode", 2), 0, 2);
     s.defScrollSync = ReadInt(file, kDefaultsSection, L"scrollSync", 1) != 0;
@@ -175,6 +182,19 @@ AppSettings AppSettings::Load() {
         if (l.empty() || r.empty())
             break;
         s.mruPairs.push_back({std::move(l), std::move(r)});
+    }
+    for (size_t i = 0; i < kMruMaxEntries; ++i) {
+        const std::wstring n = std::to_wstring(i);
+        std::wstring l = ReadString(file, kSyncPointsSection, (L"left" + n).c_str());
+        std::wstring r = ReadString(file, kSyncPointsSection, (L"right" + n).c_str());
+        if (l.empty() || r.empty())
+            break;
+        SavedSyncPoints entry;
+        entry.left = std::move(l);
+        entry.right = std::move(r);
+        entry.manual = ReadString(file, kSyncPointsSection, (L"manual" + n).c_str());
+        entry.hadAuto = ReadInt(file, kSyncPointsSection, (L"auto" + n).c_str(), 0) != 0;
+        s.syncPoints.push_back(std::move(entry));
     }
     s.left = LoadPane(file, L"left");
     s.right = LoadPane(file, L"right");
@@ -206,12 +226,18 @@ void AppSettings::Save() const {
     WriteInt(file, kWindowSection, L"outlineWidth", outlineWidth);
     WriteInt(file, kWindowSection, L"rebarLocked", rebarLocked ? 1 : 0);
     WriteString(file, kWindowSection, L"rebarBands", rebarBands);
+    WriteInt(file, kWindowSection, L"toolbarText", toolbarText);
+    WriteInt(file, kWindowSection, L"fsToolbar", fsToolbar ? 1 : 0);
+    WriteInt(file, kWindowSection, L"fsStatusbar", fsStatus ? 1 : 0);
     WriteInt(file, kDefaultsSection, L"scrollMode", defScrollMode);
     WriteInt(file, kDefaultsSection, L"zoomMode", defZoomMode);
     WriteInt(file, kDefaultsSection, L"scrollSync", defScrollSync ? 1 : 0);
     WriteInt(file, kDefaultsSection, L"zoomSync", defZoomSync ? 1 : 0);
     WriteInt(file, kSyncSection, L"scroll", scrollSync ? 1 : 0);
     WriteInt(file, kSyncSection, L"zoom", zoomSync ? 1 : 0);
+    WriteInt(file, kSyncSection, L"showGaps", showGaps ? 1 : 0);
+    WriteInt(file, kSyncSection, L"showAnchors", showAnchors ? 1 : 0);
+    WriteInt(file, kSyncSection, L"showTicks", showTicks ? 1 : 0);
     WriteString(file, kSynctexSection, L"inverse", synctexInverse);
     // Slots past the current size are deleted (nullptr value removes the key)
     // so a shrunken list leaves no stale tail behind.
@@ -231,6 +257,29 @@ void AppSettings::Save() const {
         } else {
             WritePrivateProfileStringW(kMruPairsSection, leftKey.c_str(), nullptr, file.c_str());
             WritePrivateProfileStringW(kMruPairsSection, rightKey.c_str(), nullptr,
+                                       file.c_str());
+        }
+    }
+    for (size_t i = 0; i < kMruMaxEntries; ++i) {
+        const std::wstring n = std::to_wstring(i);
+        const std::wstring leftKey = L"left" + n;
+        const std::wstring rightKey = L"right" + n;
+        const std::wstring manualKey = L"manual" + n;
+        const std::wstring autoKey = L"auto" + n;
+        if (i < syncPoints.size()) {
+            const SavedSyncPoints& e = syncPoints[i];
+            WriteString(file, kSyncPointsSection, leftKey.c_str(), e.left);
+            WriteString(file, kSyncPointsSection, rightKey.c_str(), e.right);
+            WriteString(file, kSyncPointsSection, manualKey.c_str(), e.manual);
+            WriteInt(file, kSyncPointsSection, autoKey.c_str(), e.hadAuto ? 1 : 0);
+        } else {
+            WritePrivateProfileStringW(kSyncPointsSection, leftKey.c_str(), nullptr,
+                                       file.c_str());
+            WritePrivateProfileStringW(kSyncPointsSection, rightKey.c_str(), nullptr,
+                                       file.c_str());
+            WritePrivateProfileStringW(kSyncPointsSection, manualKey.c_str(), nullptr,
+                                       file.c_str());
+            WritePrivateProfileStringW(kSyncPointsSection, autoKey.c_str(), nullptr,
                                        file.c_str());
         }
     }

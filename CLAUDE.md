@@ -93,11 +93,17 @@ unboundedly.
 
 Sync (view/SyncController.\*): positions are exchanged in page units (pageIndex + fraction at
 viewport center), never pixels; the pairing is a delta anchor captured at lock time, optionally
-generalized by a list of WinMerge-style sync points (WHOLE-page pairs, piecewise-constant
-integer delta, follower clamped just short of its next point so it waits at section ends;
-strictly increasing in both coordinates; empty map = bit-identical plain-anchor behavior; Alt
-and re-lock recapture ONLY while the map is empty; map cleared on every DocumentOpened, auto
-points re-derived by MainWindow after a same-path reload). Auto-generation matches hierarchical
+generalized by a list of WinMerge-style sync points (WHOLE-page pairs, strictly increasing in
+both coordinates; empty map = bit-identical plain-anchor behavior; Alt and re-lock recapture
+ONLY while the map is empty; map cleared on every DocumentOpened, auto points re-derived by
+MainWindow after a same-path reload, mirrored across Swap Panes via a parked map). With
+alignment gaps ON (default, [sync] showGaps) the panes' layouts gain WinMerge-style empty gap
+slots and sync is IDENTITY on virtual SLOT coordinates (the follower scrolls through its
+gaps); gaps OFF = piecewise-constant integer delta with the follower waiting at section ends.
+PageLayout is slot-based (slot = real page or gap; fit inputs and every render/goto/counter
+consumer stay real-page; persisted scroll offsets are normalized to the no-gap space). Every
+map mutation fires SyncController's map-changed callback; MainWindow rebuilds gaps + markers
+for both panes inside ApplySilently (reentrancy). Auto-generation matches hierarchical
 numeric bookmark keys via util/OutlineNumbering. This is the product's reason to exist (PDF
 Architect fails exactly here): never degrade sync to pixel offsets, and test sync changes with
 different page formats and different zoom levels per pane.
@@ -156,7 +162,8 @@ SyncController, the outline, the status bar and the menu/toolbar checked state
   (engine/Document.cpp) stay English: workers cache them in result structs.
 - `enum CommandId` in MainWindow.h is the single registry of WM_COMMAND/accelerator ids
   (menu, toolbar and accelerators all reuse the same ids; 1017..1019, 1023..1024 and
-  1025..1026 must stay contiguous for CheckMenuRadioItem; 1030+/1040+ are the MRU ranges,
+  1025..1026 and 1056..1058 must stay contiguous for CheckMenuRadioItem; 1030+/1040+ are the
+  MRU ranges,
   kMruMaxEntries slots each, dispatched as ranges in WM_COMMAND). Control ids live in a
   separate >= 2000 space (2001 page box, 2100+ Options dialog, 2201 goto dialog, 2300+ menu
   band, 2400+ sync points dialog) so they can never collide with command dispatch.

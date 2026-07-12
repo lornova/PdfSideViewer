@@ -166,7 +166,24 @@ a band child), band 1 the command toolbar (Segoe MDL2 glyph imagelist via `util/
 index through `RB_IDTOINDEX`: with the rebar UNLOCKED (IE-style "Lock the Toolbars" in the
 View menu and on the bar's right-click context menu) the user drags the grippers to reorder,
 resize and wrap bands onto extra rows; order/width/breaks persist as `[window] rebarBands`
-("id,cx,break;" per band in visual order) and the lock as `rebarLocked`. The menu band clips
+("id,cx,break;" per band in visual order) and the lock as `rebarLocked`. The bar context menu
+also carries IE's three toolbar TEXT OPTIONS verbatim ("Show text labels" below the icons,
+"Selective text on right", "No text labels"; persisted as `[window] toolbarText` 1/2/0):
+below = a plain toolbar with per-button strings, selective = `TBSTYLE_LIST` +
+`TBSTYLE_EX_MIXEDBUTTONS` with `BTNS_SHOWTEXT` only on the primary actions (open left/right,
+from bookmarks, swap) - exactly IE's mechanics. `TBSTYLE_LIST` cannot be flipped on a live
+toolbar, so a mode (or language) change recreates the toolbar and re-childs the band in place
+(`RebuildToolbarInBand`, by `RBBIM_ID`); the icon-only 24px button pin applies only in mode 0
+(labels size their own buttons via `BTNS_AUTOSIZE` + `TB_SETMAXTEXTROWS`). Defaults: locked,
+"Show text labels", and the toolbar band starts on its OWN row (`RBBS_BREAK` at the default
+insert; the break survives lock toggles via SetRebarLocked's per-band snapshot and is
+overridden by a saved `rebarBands` layout). The full-screen icon is COMPOSED: MDL2 ships no
+single 4-corner-arrows glyph, so `GlyphSpec::mirrorOverlay` draws E740 plus its horizontal
+mirror (GM_ADVANCED world transform; the cell rect maps onto itself). Full screen normally
+hides all chrome, but two Options ([window] fsToolbar / fsStatusbar) keep the rebar and/or
+the status bar on screen; when the real full-screen button is not visible there, a floating
+one-button mini toolbar (child of the frame, top-right, NOT flat: the frame clips children
+and paints nothing beneath them) provides the exit. The menu band clips
 into its own chevron popup listing the hidden top-level menus. Ownership split: MainWindow owns the `HMENU` (built by
 `BuildMenuBar`, NEVER attached to the window) and every `WM_COMMAND`; MenuBand owns
 presentation and the modal tracking loop (`TrackPopupMenuEx` WITHOUT `TPM_RETURNCMD`, so the
@@ -233,14 +250,19 @@ path switch. The watcher thread touches only Win32 file APIs and `PostMessage` �
 never Direct2D.
 
 **PageLayout** (continuous vertical mode): virtual canvas where page *i* sits at
-`y = Σ (pageHeight[j]·zoom) + gaps`, width = max page width·zoom + padding. A prefix-sum array of
-page bottoms lets a binary search find the first visible page in O(log n); hit testing subtracts
+`y = Σ (pageHeight[j]·zoom) + gaps` (inter-page margins; distinct from the sync feature's
+*alignment gaps* below), width = max page width·zoom + padding. The geometry arrays are per
+SLOT, where a slot is a real page or a sync-point *alignment gap* (an empty page-sized hole);
+real-page identity survives through a slot map (`SlotToReal`/`RealToSlot`, -1 = gap), fit
+inputs (`MaxPageSizePt`, `SumPageHeightsPt`, `PageCount`) see real pages only, and with an
+empty gap list the layout is bit-identical to a slot-less one. A prefix-sum array of slot
+bottoms lets a binary search find the first visible slot in O(log n); hit testing subtracts
 the page's on-screen origin and applies the engine's inverse page transform (handles rotation and
-PDF's bottom-up coordinates). Relayout re-runs when scrollbar appearance shrinks the viewport
-(loop until stable, a real subtlety copied from SumatraPDF). Fit-width/fit-page are *virtual*
-zooms recomputed on every relayout.
+PDF's bottom-up coordinates), returning misses inside gaps. Relayout re-runs when scrollbar
+appearance shrinks the viewport (loop until stable, a real subtlety copied from SumatraPDF).
+Fit-width/fit-page are *virtual* zooms recomputed on every relayout.
 
-**Paged scroll mode** (View → Continuous Scrolling / Page-by-Page, Ctrl+4; global for both
+**Paged scroll mode** (View → Continuous Scrolling / Page-by-Page, Ctrl+4 / Ctrl+5; global for both
 panes, persisted as `[window] scrollMode`): the continuous `PageLayout` stays untouched — the
 mode is a per-page clamp plus quantized navigation, never a rebuilt one-page layout (that would
 break `FirstVisible`, prefetch adjacency, `TotalHeight` scrollbars, fit estimation and the
@@ -315,7 +337,12 @@ from where the closest prior art (PDF Architect) fails:
 Design:
 
 - **Position model (satisfies R2)**: a pane's position is expressed in *page units*,
-  `pos = pageIndex + fractionWithinPage`, sampled at the **viewport center**. Every page counts as
+  `pos = pageIndex + fractionWithinPage`, sampled at the **window center** (`SyncCenterY`):
+  half the pane WINDOW's height, not the client's. The two panes' windows share top and
+  height, but their clients can differ by one horizontal scrollbar (only the overflowing pane
+  gets it), and client-center sampling misaligned identical pages ON SCREEN by half the bar
+  whenever the outline sidebar pushed exactly one pane past the overflow threshold (a real
+  0.6 bug). Without a horizontal bar the two centers coincide. Every page counts as
   exactly 1.0 regardless of its physical size, so an A4 document stays page-aligned with a Letter
   or A5 one, and panes at different zoom levels stay aligned too. When page heights differ, the
   two panes scroll at different pixel speeds by construction; that is what *keeps* them in sync.
@@ -343,10 +370,11 @@ Design:
   piecewise-constant INTEGER delta. Alignment is per page: one page of one document is one page
   of the other, like WinMerge's line map, never a fractional scroll offset (the within-page
   fraction transfers unchanged, an interpolated map would rubber-band the scroll speed instead).
-  Between two points the follower is clamped just short of its next point (a sub-page epsilon
-  mirroring `SyncPosition`'s paged-mode cap), so it WAITS at the end of its own section while
-  the leader crosses pages that have no counterpart and resumes seamlessly when the leader
-  reaches the point; leading from the short side jumps the surplus pages in one block instead.
+  With alignment gaps OFF, between two points the follower is clamped just short of its next
+  point (a sub-page epsilon mirroring `SyncPosition`'s paged-mode cap), so it WAITS at the end
+  of its own section while the leader crosses pages that have no counterpart and resumes
+  seamlessly when the leader reaches the point; leading from the short side jumps the surplus
+  pages in one block instead.
   The two directions are not exact inverses at segment boundaries: the reentrancy guard stops
   the echo, and every scroll re-drives the follower from the leader's authoritative position.
   Invariants: points strictly increase in BOTH coordinates; a newly added manual point wins
@@ -355,12 +383,19 @@ Design:
   anchor, bit-identical to the modes above. Commands: Add Sync Point Here (Shift+F7, captures
   the panes' current pages), Sync Points... (list/remove dialog), Clear Sync Points
   (Ctrl+Shift+F7).
-- **Bookmark generation**: "Sync Points from Bookmarks" parses a hierarchical numeric key from
-  each outline title (`util/OutlineNumbering`: decimal multi-level prefix like "1.2.3", with an
-  optional verbal intro word "Capitolo/Cap/Chapter/Ch/Sezione/Sez/Section/Sec/Parte/Part/§";
-  ASCII digits only, first occurrence per key and per side wins) and emits one point per key
-  present in BOTH outlines; only the bookmark's target page matters (alignment is whole-page).
-  Candidates that violate double monotonicity (out-of-order bookmarks) are greedily dropped.
+- **Bookmark generation**: "Sync Points from Bookmarks" parses a hierarchical key from each
+  outline title (`util/OutlineNumbering`: multi-level prefix like "1.2.3", with an optional
+  verbal intro word "Capitolo/Cap/Chapter/Ch/Sezione/Sez/Section/Sec/Parte/Part/Appendice/
+  Appendix/Annex/Allegato/§"; ASCII digits only; SINGLE-letter components encode negative,
+  -1 = A, so "Appendice A" and "A.1" pair without colliding with numeric keys, while a lone
+  letter without an intro word is rejected as a plain word). Titles that parse to no key at
+  all pair on the TITLE channel instead: trimmed case-insensitive whole-title equality
+  ("Sommario", "Indice analitico"); mixed-language pairs simply never title-match. First
+  occurrence per key/title and per side wins, and one point is emitted per key present in
+  BOTH outlines; only the bookmark's target page matters (alignment is whole-page).
+  Candidates that violate double monotonicity (out-of-order bookmarks, and deep subsections
+  starting on their parent section's PAGE - two points on one page would conflict, the first
+  wins) are greedily dropped.
   Generation replaces previously generated points, keeps manual ones (manual wins on conflict),
   turns scroll sync on and realigns the follower once. After an auto-reload of the SAME path,
   MainWindow re-derives generated points from the fresh outline (the LaTeX rebuild loop must
@@ -370,9 +405,67 @@ Design:
   cleared by the first `DocumentOpened` of a both-panes reload, and a failed intermediate
   reload (broken half-written compile) fires `DocumentOpened` with no document - the parked cue
   rides both out and is cancelled only by a path change (open/close/swap) or an explicit clear.
-- Future: per-pair persistence of sync points in settings.ini; scrollbar tick marks at point
-  positions; WinMerge-style rendered gaps (phantom pages in the layout); mirroring the points
-  on Swap Panes.
+- **Alignment gaps** (WinMerge-style rendered holes; Sync ▸ Show Alignment Gaps, checked by
+  default, persisted as `[sync] showGaps`): where one document has pages with no counterpart
+  inside a segment, the OTHER pane's layout gets empty gap slots just before its own point
+  page, each silhouetted like the missing counterpart page (its size in PDF points, rendered
+  at the local zoom, width capped at the real pages' width so `TotalWidth` stays
+  gap-invariant); the pre-first-point segment gets gaps too (different-length preambles align
+  from the top), the tail after the last point diverges freely. Each segment contributes
+  max(left, right) slots to both sides, so every point's two pages land on the same slot
+  index - and with gaps enabled scroll sync becomes IDENTITY on virtual slot coordinates
+  (`VirtualSyncPosition`/`ScrollToVirtualSyncPosition`): the follower scrolls THROUGH its gaps
+  1:1 instead of waiting. Virtual sync is gated on a GAP EPOCH (a version MainWindow stamps on
+  both panes with every gap push; a (re)opened pane resets to 0): the reload restore dance
+  fires `Scrolled` after `SetPages` cleared the reloading pane's gaps but before
+  `DocumentOpened` clears the map, and without the matching-epoch check that scroll would
+  drive mismatched slot layouts; the real-page `MapTarget` fallback is layout-shape-invariant. Paged mode flips gap slots like blank pages (`m_currentSlot` is the
+  flip cursor; render keys, the page counter and real `SyncPosition` derive the real page, and
+  on a gap slot the counter pins to the previous real page). Persisted scroll offsets are
+  normalized to the NO-GAP coordinate space (`PersistScrollY` subtracts `GapPixelsAbove`):
+  every restore lands in a gapless layout (`SetPages` clears the gaps) and the later gap
+  rebuild preserves the position in real-page units. The map-change reaction is a
+  `SyncController` callback (`SetMapChangedHandler`) fired on EVERY map mutation including the
+  implicit `DocumentOpened` clear; MainWindow recomputes both panes' gaps and marker lists,
+  wrapping the pane relayouts in `ApplySilently` (the controller's reentrancy guard) so the
+  gap-collapse scroll echoes never drive the sibling.
+- **Sync-point markers**: an anchor glyph (U+2693, DirectWrite "Segoe UI Symbol", brush-tinted)
+  beside each sync-point page's top-left corner (inside the corner over an alpha backing when
+  the gutter is narrow), plus a tick strip along the right client edge (the native scrollbar
+  cannot be custom-painted) with one tick per point at its page's proportional document
+  position. The ticks use the focus-ring accent (manual opaque, generated 0.45 alpha); the
+  anchor glyph goes darker in light mode (0x00529B, generated 0.6 alpha) because the thin
+  glyph needs more weight than a 2px ring, while dark mode keeps the light accent (darker
+  would sink into the background). Markers show whenever a map exists, gaps toggle
+  notwithstanding; each rendering has its own Options checkbox ([sync] showAnchors /
+  showTicks, default on). Hovering an anchor shows a tracking tooltip with the point's
+  numbering key (or "manual"): strict double monotonicity guarantees at most one point per
+  page per side, so the tip is always a single entry. The Sync Points dialog uses a
+  report-mode ListView with column headers (#, Numbering, Pages, Origin; DialogTemplate
+  gained a class-by-name AddControl overload because comctl32 classes have no
+  DLGITEMTEMPLATE atom).
+- **Swap mirroring**: F8 preserves the map with left/right exchanged per point (the
+  coordinates co-increase, so the order survives). The mirrored map is parked in MainWindow
+  BEFORE the reopen storm (each swap side fires `DocumentOpened`, clearing the live map) and
+  reinstalled via `SyncController::RestorePoints` when BOTH panes settled on the two expected
+  swapped paths; any `DocumentOpened` with a different path (failed open, close, interleaved
+  open, a second swap) discards the park. `RestorePoints` touches neither the anchors, the
+  sync flags nor the parked regen; mirrored generated points re-arm reload regeneration
+  naturally via `HasAutoPoints`.
+- **Per-pair persistence** (`[sync-points]`, most recent first, kMruMaxEntries cap): only the
+  MANUAL points are stored, as pure numbers ("l:r;l:r;..." 0-based page pairs - no titles in
+  the file, no escaping, no INI buffer concerns); a `hadAuto` flag records that the pair also
+  carried a generated map. The entry is upserted at every USER map mutation (add, remove,
+  clear, generate, the reload regen, the swap-mirror install; an emptied map FORGETS the
+  pair) - never from the system's DocumentOpened clear, whose transient empty state must not
+  wipe the memory. Restore fires when a pane's path CHANGES and both panes are ready, only if
+  the live map is empty (the swap's reinstalled mirror and freshly placed points always win):
+  manual points are re-validated (range + double monotonicity - the pagination may have
+  changed, the file may be hand-edited) and reinstalled via `RestorePoints`, then `hadAuto`
+  re-generates from the FRESH outlines (manual wins on conflict), which is also why storing
+  the generated points themselves would be wrong. A same-path reload deliberately does NOT
+  restore: in-session manual points decay on reload by design, but the saved entry keeps them
+  for the next launch (the file is stable by then).
 
 **Search** (per pane, find bar targets the focused pane):
 

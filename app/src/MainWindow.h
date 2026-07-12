@@ -41,7 +41,7 @@ enum CommandId : WORD {
     IDC_LANG_ITALIAN = 1024,
     // Contiguous: CheckMenuRadioItem spans the scroll-mode radio group.
     IDC_SCROLL_CONTINUOUS = 1025,
-    IDC_SCROLL_PAGED = 1026, // Ctrl+4 (pane OnKeyDown, like Ctrl+2/3; NOT an accelerator)
+    IDC_SCROLL_PAGED = 1026, // Ctrl+5 (pane OnKeyDown, like Ctrl+2/3; NOT an accelerator)
     IDC_CLOSE_DOC = 1027,    // Ctrl+W, closes the focused pane's document
     IDC_GOTO_PAGE = 1028,    // Ctrl+G
     IDC_SWAP_PANES = 1029,   // F8
@@ -55,6 +55,12 @@ enum CommandId : WORD {
     IDC_SYNC_FROM_BOOKMARKS = 1052,
     IDC_SYNC_POINTS = 1053,         // the view/remove dialog
     IDC_CLEAR_SYNC_POINTS = 1054,   // Ctrl+Shift+F7
+    IDC_TOGGLE_ALIGNMENT_GAPS = 1055,
+    // Contiguous: CheckMenuRadioItem spans the toolbar-text radio group
+    // (Internet Explorer's three text options).
+    IDC_TOOLBAR_TEXT_BELOW = 1056,
+    IDC_TOOLBAR_TEXT_RIGHT = 1057,
+    IDC_TOOLBAR_TEXT_NONE = 1058,
     // Control ids live in a separate >= 2000 space so they can never collide
     // with command dispatch: 2001 page box, 2100+ Options dialog, 2201 goto
     // dialog, 2300+ the menu-band toolbar and its buttons (MenuBand.h), 2400+
@@ -142,6 +148,9 @@ private:
     void ShowOptionsDialog();
     static INT_PTR CALLBACK OptionsDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam);
     void GenerateSyncPointsFromBookmarks(bool interactive);
+    void ApplyAlignmentGaps();     // the one reaction to every sync-map change
+    void RememberSyncPoints();     // upsert the current pair into m_savedPoints
+    void TryRestoreSavedPoints();  // reinstall a remembered map when a pair opens
     void ShowSyncPointsDialog();
     static INT_PTR CALLBACK SyncPointsDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam);
     BOOL HandleOpenDocumentCopyData(const COPYDATASTRUCT& cds);
@@ -152,6 +161,9 @@ private:
     void OpenMruPair(size_t index);
     void CreateToolbar(HINSTANCE hinst);
     void RebuildToolbarIcons();
+    void RebuildToolbarInBand();       // recreate the toolbar inside its rebar band
+    void SetToolbarTextMode(int mode); // 0 none, 1 below, 2 selective right (IE)
+    void EnsureFsBar();                // floating full-screen mini toolbar (lazy)
     void UpdateCommandUi();
     void UpdateStatusBar();
     void ShowAboutBox();
@@ -186,6 +198,9 @@ private:
     HMENU m_mruPairsMenu = nullptr;
     std::vector<std::wstring> m_mruFiles; // most recent first
     std::vector<MruPair> m_mruPairs;      // most recent first
+    // Per-pair sync-point memory ([sync-points]): manual points serialized,
+    // generated ones re-derived from the bookmarks via the hadAuto flag.
+    std::vector<SavedSyncPoints> m_savedPoints;
     HWND m_rebar = nullptr; // hosts the menu band, the command toolbar, the page box
     MenuBand m_menuBand;
     HWND m_toolbar = nullptr;
@@ -200,6 +215,17 @@ private:
     bool m_toolbarVisible = true;
     bool m_statusVisible = true;
     bool m_rebarLocked = true;        // IE-style toolbar lock (grippers + dragging)
+    int m_toolbarText = 1;            // IE text options: 0 none, 1 below, 2 selective right
+    bool m_fsShowToolbar = false;     // full screen keeps the full toolbar ([window] fsToolbar)
+    bool m_fsShowStatus = false;      // full screen keeps the status bar ([window] fsStatusbar)
+    // Floating one-button escape hatch shown in full screen when the full
+    // toolbar is hidden: top-right, just the full-screen toggle.
+    HWND m_fsBar = nullptr;
+    HWND m_syncPtsDlg = nullptr;      // live sync-points dialog, if open: map changes
+                                      // post it a refresh (the modal loop dispatches
+                                      // WM_PSV_*, so reloads mutate the map mid-dialog)
+    HIMAGELIST m_fsBarIcons = nullptr;
+    UINT m_fsBarDpi = 0;
     std::wstring m_rebarBandsSaved;   // band layout loaded from the session, applied
                                       // by BuildRebar after the default insert
     bool m_layingOut = false;         // Layout's own rebar MoveWindow fires
@@ -224,6 +250,25 @@ private:
     // cue to re-derive the bookmark sync points from the fresh outline.
     std::wstring m_lastDocLeft;
     std::wstring m_lastDocRight;
+    bool m_showAlignmentGaps = true; // "Show Alignment Gaps" toggle ([sync] showGaps)
+    bool m_showAnchors = true;       // Options: anchor glyphs ([sync] showAnchors)
+    bool m_showTicks = true;         // Options: scrollbar tick strip ([sync] showTicks)
+    uint64_t m_gapsEpoch = 0;        // bumped per ApplyAlignmentGaps; stamps both panes
+    // Sync map parked across a pane swap: mirrored (left/right exchanged per
+    // point; the coordinates co-increase, so the order survives), captured
+    // BEFORE the reopen storm (each swap side fires DocumentOpened, clearing
+    // the live map), reinstalled when BOTH panes settled on the two expected
+    // swapped paths. Consumed on install; discarded on any mismatch (failed
+    // open, close, interleaved open of another file, a second swap).
+    struct ParkedSwapMap {
+        bool pending = false;
+        bool leftSettled = false;
+        bool rightSettled = false;
+        std::wstring expectLeft;
+        std::wstring expectRight;
+        std::vector<SyncPoint> points;
+    };
+    ParkedSwapMap m_swapMap;
 
     // SyncTeX: inverse-search launch template and the forward request parked
     // until its document finishes opening (cold start, on-demand open, or a

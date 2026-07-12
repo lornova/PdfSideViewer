@@ -33,7 +33,7 @@
     X(MenuFitWidth, L"Fit &Width\tCtrl+2", L"Adatta &larghezza\tCtrl+2")                           \
     X(MenuFitPage, L"Fit &Page\tCtrl+3", L"Adatta &pagina\tCtrl+3")                                \
     X(MenuScrollContinuous, L"&Continuous Scrolling\tCtrl+4", L"Scorrimento c&ontinuo\tCtrl+4")    \
-    X(MenuScrollPaged, L"Page-&by-Page\tCtrl+4", L"Pagina per pagi&na\tCtrl+4")                    \
+    X(MenuScrollPaged, L"Page-&by-Page\tCtrl+5", L"Pagina per pagi&na\tCtrl+5")                    \
     X(MenuGotoPage, L"&Go to Page...\tCtrl+G", L"&Vai alla pagina...\tCtrl+G")                     \
     X(MenuLanguage, L"&Language", L"Ling&ua")                                                      \
     X(MenuLangEnglish, L"English", L"English")                                                     \
@@ -48,6 +48,7 @@
     X(MenuSyncPoints, L"Sync &Points...", L"&Punti di sync...")                                    \
     X(MenuClearSyncPoints, L"&Clear Sync Points\tCtrl+Shift+F7",                                   \
       L"&Rimuovi punti di sync\tCtrl+Shift+F7")                                                    \
+    X(MenuAlignmentGaps, L"Show Alignment &Gaps", L"&Mostra spazi di allineamento")                \
     X(MenuSwapPanes, L"S&wap Panes\tF8", L"Scam&bia pannelli\tF8")                                 \
     X(MenuHelp, L"&Help", L"&?")                                                                   \
     X(MenuAbout, L"&About PdfSideViewer...", L"&Informazioni su PdfSideViewer...")                 \
@@ -59,11 +60,42 @@
     X(TipFitWidth, L"Fit width (Ctrl+2)", L"Adatta larghezza (Ctrl+2)")                            \
     X(TipFitPage, L"Fit page (Ctrl+3)", L"Adatta pagina (Ctrl+3)")                                 \
     X(TipScrollContinuous, L"Continuous scrolling (Ctrl+4)", L"Scorrimento continuo (Ctrl+4)")     \
-    X(TipScrollPaged, L"Page-by-page (Ctrl+4)", L"Pagina per pagina (Ctrl+4)")                     \
+    X(TipScrollPaged, L"Page-by-page (Ctrl+5)", L"Pagina per pagina (Ctrl+5)")                     \
     X(TipActualSize, L"Actual size (Ctrl+0)", L"Dimensioni effettive (Ctrl+0)")                    \
     X(TipFind, L"Find (Ctrl+F)", L"Trova (Ctrl+F)")                                                \
     X(TipOutline, L"Outline (F9)", L"Segnalibri (F9)")                                             \
     X(TipFullScreen, L"Full screen (F11)", L"Schermo intero (F11)")                                \
+    X(TipAddSyncPoint, L"Add sync point here (Shift+F7)",                                          \
+      L"Aggiungi punto di sync qui (Shift+F7)")                                                    \
+    X(TipSyncFromBookmarks, L"Sync points from bookmarks", L"Punti di sync dai segnalibri")        \
+    X(TipSyncPoints, L"Sync points...", L"Punti di sync...")                                       \
+    X(TipClearSyncPoints, L"Clear sync points (Ctrl+Shift+F7)",                                    \
+      L"Rimuovi punti di sync (Ctrl+Shift+F7)")                                                    \
+    X(TipAlignmentGaps, L"Show alignment gaps", L"Mostra spazi di allineamento")                   \
+    X(TipSwapPanes, L"Swap panes (F8)", L"Scambia pannelli (F8)")                                  \
+    /* toolbar text options (Internet Explorer's exact wording) + short       */                   \
+    /* per-button labels for the "below"/"selective on right" modes           */                   \
+    X(MenuToolbarTextBelow, L"Sho&w text labels", L"&Mostra etichette di testo")                   \
+    X(MenuToolbarTextRight, L"Selecti&ve text on right", L"Testo selettivo a &destra")             \
+    X(MenuToolbarTextNone, L"&No text labels", L"&Nessuna etichetta di testo")                     \
+    X(LblOpenLeft, L"Left", L"Sinistra")                                                           \
+    X(LblOpenRight, L"Right", L"Destra")                                                           \
+    X(LblScrollSync, L"Scroll sync", L"Sync scorr.")                                               \
+    X(LblZoomSync, L"Zoom sync", L"Sync zoom")                                                     \
+    X(LblActualSize, L"100%", L"100%")                                                             \
+    X(LblFitWidth, L"Width", L"Larghezza")                                                         \
+    X(LblFitPage, L"Page", L"Pagina")                                                              \
+    X(LblScrollContinuous, L"Continuous", L"Continuo")                                             \
+    X(LblScrollPaged, L"Paged", L"A pagine")                                                       \
+    X(LblFind, L"Find", L"Trova")                                                                  \
+    X(LblOutline, L"Outline", L"Segnalibri")                                                       \
+    X(LblFullScreen, L"Full screen", L"Schermo int.")                                              \
+    X(LblAddSyncPoint, L"Add point", L"Agg. punto")                                                \
+    X(LblSyncFromBookmarks, L"Bookmarks", L"Da segnalibri")                                        \
+    X(LblSyncPoints, L"Points", L"Punti")                                                          \
+    X(LblClearSyncPoints, L"Clear", L"Rimuovi")                                                    \
+    X(LblAlignmentGaps, L"Gaps", L"Spazi")                                                         \
+    X(LblSwapPanes, L"Swap", L"Scambia")                                                           \
     /* synctex feedback (status bar, never popups) */                                              \
     X(SyncTexNoData, L"SyncTeX: no .synctex file for this document",                               \
       L"SyncTeX: nessun file .synctex per questo documento")                                       \
@@ -125,6 +157,13 @@
     X(OptShellIntegration,                                                                         \
       L"Show \"Open left/right in PdfSideViewer\" in the Explorer menu for PDF files",             \
       L"Mostra \"Apri a sinistra/destra in PdfSideViewer\" nel menu di Esplora file per i PDF")    \
+    X(OptFsToolbar, L"Show the toolbar in full screen",                                            \
+      L"Mostra la barra degli strumenti a schermo intero")                                         \
+    X(OptFsStatus, L"Show the status bar in full screen",                                          \
+      L"Mostra la barra di stato a schermo intero")                                                \
+    X(OptShowAnchors, L"Show sync-point anchor marks", L"Mostra le ancore dei punti di sync")      \
+    X(OptShowTicks, L"Show sync-point ticks along the scrollbar",                                  \
+      L"Mostra i tick dei punti di sync lungo la barra")                                           \
     X(OptWheelLines, L"Wheel scroll lines (0 = system):",                                          \
       L"Righe per scatto della rotellina (0 = sistema):")                                          \
     X(OptClearRecent, L"Clear recent files and pairs", L"Svuota gli elenchi recenti")              \
@@ -138,6 +177,10 @@
     X(DlgCancel, L"Cancel", L"Annulla")                                                            \
     /* sync points dialog */                                                                       \
     X(SyncPtsDlgTitle, L"Sync Points", L"Punti di sincronizzazione")                               \
+    X(SyncPtsColIndex, L"#", L"#")                                                                 \
+    X(SyncPtsColNumbering, L"Numbering", L"Numerazione")                                           \
+    X(SyncPtsColPages, L"Pages", L"Pagine")                                                        \
+    X(SyncPtsColOrigin, L"Origin", L"Origine")                                                     \
     X(SyncPtsDlgRemove, L"&Remove", L"&Rimuovi")                                                   \
     X(SyncPtsDlgClear, L"Clear &All", L"Rimuovi &tutti")                                           \
     X(DlgClose, L"Close", L"Chiudi")                                                               \
