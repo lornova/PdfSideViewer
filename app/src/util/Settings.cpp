@@ -158,6 +158,8 @@ AppSettings AppSettings::Load() {
     s.toolbarText = std::clamp(ReadInt(file, kWindowSection, L"toolbarText", 1), 0, 2);
     s.fsToolbar = ReadInt(file, kWindowSection, L"fsToolbar", 0) != 0;
     s.fsStatus = ReadInt(file, kWindowSection, L"fsStatusbar", 0) != 0;
+    s.showHeader = ReadInt(file, kWindowSection, L"header", 1) != 0;
+    s.headerShowPath = ReadInt(file, kWindowSection, L"headerPath", 0) != 0;
     s.defScrollMode = std::clamp(ReadInt(file, kDefaultsSection, L"scrollMode", 0), 0, 1);
     s.defZoomMode = std::clamp(ReadInt(file, kDefaultsSection, L"zoomMode", 2), 0, 2);
     s.defScrollSync = ReadInt(file, kDefaultsSection, L"scrollSync", 1) != 0;
@@ -229,6 +231,8 @@ void AppSettings::Save() const {
     WriteInt(file, kWindowSection, L"toolbarText", toolbarText);
     WriteInt(file, kWindowSection, L"fsToolbar", fsToolbar ? 1 : 0);
     WriteInt(file, kWindowSection, L"fsStatusbar", fsStatus ? 1 : 0);
+    WriteInt(file, kWindowSection, L"header", showHeader ? 1 : 0);
+    WriteInt(file, kWindowSection, L"headerPath", headerShowPath ? 1 : 0);
     WriteInt(file, kDefaultsSection, L"scrollMode", defScrollMode);
     WriteInt(file, kDefaultsSection, L"zoomMode", defZoomMode);
     WriteInt(file, kDefaultsSection, L"scrollSync", defScrollSync ? 1 : 0);

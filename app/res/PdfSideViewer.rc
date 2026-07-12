@@ -28,12 +28,12 @@ BEGIN
         BLOCK "040904B0"
         BEGIN
             VALUE "CompanyName", "Lorenzo Novara"
-            VALUE "FileDescription", "PdfSideViewer - two PDFs side by side with synchronized scrolling"
+            VALUE "FileDescription", "PDF Side Viewer - two PDFs side by side with synchronized scrolling"
             VALUE "FileVersion", PSV_VERSION_STR
             VALUE "InternalName", "PdfSideViewer"
             VALUE "LegalCopyright", "(c) 2026 Lorenzo Novara. GPLv3. Uses MuPDF (AGPLv3, Artifex Software)."
             VALUE "OriginalFilename", "PdfSideViewer.exe"
-            VALUE "ProductName", "PdfSideViewer"
+            VALUE "ProductName", "PDF Side Viewer"
             VALUE "ProductVersion", PSV_VERSION_STR
         END
     END

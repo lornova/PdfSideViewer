@@ -51,7 +51,7 @@
     X(MenuAlignmentGaps, L"Show Alignment &Gaps", L"&Mostra spazi di allineamento")                \
     X(MenuSwapPanes, L"S&wap Panes\tF8", L"Scam&bia pannelli\tF8")                                 \
     X(MenuHelp, L"&Help", L"&?")                                                                   \
-    X(MenuAbout, L"&About PdfSideViewer...", L"&Informazioni su PdfSideViewer...")                 \
+    X(MenuAbout, L"&About PDF Side Viewer...", L"&Informazioni su PDF Side Viewer...")             \
     /* toolbar tooltips */                                                                         \
     X(TipOpenLeft, L"Open left (Ctrl+O)", L"Apri a sinistra (Ctrl+O)")                             \
     X(TipOpenRight, L"Open right (Ctrl+Shift+O)", L"Apri a destra (Ctrl+Shift+O)")                 \
@@ -155,8 +155,8 @@
     X(OptSynctexInverse, L"SyncTeX inverse-search command (%f = file, %l = line):",                \
       L"Comando ricerca inversa SyncTeX (%f = file, %l = riga):")                                  \
     X(OptShellIntegration,                                                                         \
-      L"Show \"Open left/right in PdfSideViewer\" in the Explorer menu for PDF files",             \
-      L"Mostra \"Apri a sinistra/destra in PdfSideViewer\" nel menu di Esplora file per i PDF")    \
+      L"Show \"Open left/right in PDF Side Viewer\" in the Explorer menu for PDF files",           \
+      L"Mostra \"Apri a sinistra/destra in PDF Side Viewer\" nel menu di Esplora file per i PDF")  \
     X(OptFsToolbar, L"Show the toolbar in full screen",                                            \
       L"Mostra la barra degli strumenti a schermo intero")                                         \
     X(OptFsStatus, L"Show the status bar in full screen",                                          \
@@ -164,12 +164,16 @@
     X(OptShowAnchors, L"Show sync-point anchor marks", L"Mostra le ancore dei punti di sync")      \
     X(OptShowTicks, L"Show sync-point ticks along the scrollbar",                                  \
       L"Mostra i tick dei punti di sync lungo la barra")                                           \
+    X(OptShowHeader, L"Show a header above each pane",                                             \
+      L"Mostra un'intestazione sopra ogni pannello")                                               \
+    X(OptHeaderShowPath, L"Show the full path instead of the file name",                           \
+      L"Mostra il percorso completo invece del nome file")                                         \
     X(OptWheelLines, L"Wheel scroll lines (0 = system):",                                          \
       L"Righe per scatto della rotellina (0 = sistema):")                                          \
     X(OptClearRecent, L"Clear recent files and pairs", L"Svuota gli elenchi recenti")              \
     /* explorer context-menu verbs (written to the registry at registration) */                    \
-    X(VerbOpenLeft, L"Open left in PdfSideViewer", L"Apri a sinistra in PdfSideViewer")            \
-    X(VerbOpenRight, L"Open right in PdfSideViewer", L"Apri a destra in PdfSideViewer")            \
+    X(VerbOpenLeft, L"Open left in PDF Side Viewer", L"Apri a sinistra in PDF Side Viewer")        \
+    X(VerbOpenRight, L"Open right in PDF Side Viewer", L"Apri a destra in PDF Side Viewer")        \
     /* go-to-page dialog + shared dialog buttons */                                                \
     X(GotoTitle, L"Go to Page", L"Vai alla pagina")                                                \
     X(GotoPrompt, L"Page number or label:", L"Numero di pagina o etichetta:")                      \
@@ -187,7 +191,7 @@
     X(SyncPtOriginAuto, L"auto", L"auto")                                                          \
     X(SyncPtOriginManual, L"manual", L"manuale")                                                   \
     /* about box */                                                                                \
-    X(AboutTitle, L"About PdfSideViewer", L"Informazioni su PdfSideViewer")                        \
+    X(AboutTitle, L"About PDF Side Viewer", L"Informazioni su PDF Side Viewer")                    \
     X(AboutBody,                                                                                   \
       L"Two PDFs side by side with synchronized scrolling.\n\n"                                    \
       L"(c) 2026 Lorenzo Novara - GPLv3\nPDF rendering: MuPDF (AGPLv3) by Artifex Software",       \

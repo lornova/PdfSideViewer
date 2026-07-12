@@ -50,6 +50,10 @@ executable that starts instantly.
   centered), full screen (F11 / Alt+Enter), a width-adjustable outline sidebar (drag the
   divider; double-click fits it to the widest bookmark, removing the horizontal scroll),
   recent files and recent left+right pairs, English/Italian UI.
+- **Pane headers**: an optional strip above each pane shows the open PDF's file name (or full
+  path) and doubles as the active-pane cue - the focused pane's header carries an accent underline
+  along the bottom edge, the other stays plain. Toggle the header and the name/path choice in the
+  Options dialog; with the header off, the active pane is marked by a border instead.
 - **Movable toolbars**, Internet Explorer style: untick "Lock the Toolbars" (View menu, or
   right-click the bar) and grippers appear on the menu, toolbar and page-box bands: drag to
   reorder or resize them, or wrap them onto extra rows. The right-click menu also carries
@@ -61,11 +65,12 @@ executable that starts instantly.
   lock state and the text option are remembered.
 - **Options dialog**: reopen the last session or start empty, defaults for new documents
   (scroll mode, zoom, sync locks), sync-point anchor marks and scrollbar ticks on/off,
+  the pane header (off, or showing the file name or the full path),
   keeping the toolbar and/or the status bar visible in full screen, wheel-scroll lines
   override, the SyncTeX inverse-search command, and the Explorer context-menu integration.
   When full screen hides the toolbar, a small floating button in the top-right corner exits
   full screen.
-- **Explorer context menu** (optional, off by default): "Open left/right in PdfSideViewer" on
+- **Explorer context menu** (optional, off by default): "Open left/right in PDF Side Viewer" on
   .pdf files, registered per-user under `SystemFileAssociations` so it can NEVER become the
   default PDF handler. "Open right" reuses the running window. Moving the exe requires
   re-registering (re-tick the Options checkbox, or run `-register-shell`/`-unregister-shell`

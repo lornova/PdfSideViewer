@@ -4,6 +4,7 @@
 
 #include <commctrl.h> // scrollbar-drag tracking tooltip
 #include <shellapi.h> // drag & drop
+#include <shlwapi.h>  // PathCompactPathExW (header path middle-ellipsis)
 
 namespace {
 
@@ -13,6 +14,16 @@ constexpr float kScaleEpsilon = 0.001f;
 std::wstring FileNameOf(const std::wstring& path) {
     const size_t pos = path.find_last_of(L"\\/");
     return pos == std::wstring::npos ? path : path.substr(pos + 1);
+}
+
+// Middle-ellipsis path that preserves the drive and file name (DirectWrite can
+// only trim at the tail). cch is a character budget derived from the strip width.
+std::wstring CompactPathChars(const std::wstring& path, UINT cch) {
+    wchar_t buffer[MAX_PATH];
+    if (cch == 0 || cch >= ARRAYSIZE(buffer) ||
+        !PathCompactPathExW(buffer, path.c_str(), cch, 0))
+        return path;
+    return buffer;
 }
 
 bool SameScale(float a, float b) {
@@ -315,7 +326,7 @@ LRESULT CALLBACK PaneWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
         return 0;
     } catch (const std::exception& e) {
         // Non-graphics failure: do not tear down the shared device for it.
-        MessageBoxA(hwnd, e.what(), "PdfSideViewer - fatal error", MB_ICONERROR);
+        MessageBoxA(hwnd, e.what(), "PDF Side Viewer - fatal error", MB_ICONERROR);
         PostQuitMessage(1);
         return 0;
     }
@@ -552,10 +563,11 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         if (m_selecting) {
             const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
             const SIZE vp = ViewportPx();
-            if (pt.y < 0)
-                ScrollBy(0, static_cast<float>(pt.y)); // drag auto-scroll
-            else if (pt.y > vp.cy)
-                ScrollBy(0, static_cast<float>(pt.y - vp.cy));
+            const float top = HeaderPx(); // content lives in [top, top + vp.cy]
+            if (static_cast<float>(pt.y) < top)
+                ScrollBy(0, static_cast<float>(pt.y) - top); // drag auto-scroll
+            else if (static_cast<float>(pt.y) > top + static_cast<float>(vp.cy))
+                ScrollBy(0, static_cast<float>(pt.y) - top - static_cast<float>(vp.cy));
             if (const auto caret = CaretAt(pt, true)) {
                 if (*caret != m_selFocus) {
                     m_selFocus = *caret;
@@ -620,15 +632,11 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
 
     case WM_SETFOCUS:
-        m_focused = true;
-        Invalidate();
+        // The active-pane cue is driven by MainWindow (SetActive) off this event,
+        // so it survives window deactivation: there is deliberately NO
+        // WM_KILLFOCUS handler clearing it.
         if (m_onViewChanged)
             m_onViewChanged(*this, ViewEvent::FocusGained, 1.0f);
-        return 0;
-
-    case WM_KILLFOCUS:
-        m_focused = false;
-        Invalidate();
         return 0;
 
     default:
@@ -687,7 +695,7 @@ void PaneWindow::EnsureSwapChain() {
 }
 
 void PaneWindow::EnsureTextFormat() {
-    if (m_textFormat && m_markerFormat && m_textFormatDpi == m_dpi)
+    if (m_textFormat && m_markerFormat && m_headerFormat && m_textFormatDpi == m_dpi)
         return;
     ComPtr<IDWriteTextFormat> format;
     // Sizes are in device pixels (the context runs in D2D1_UNIT_MODE_PIXELS).
@@ -710,6 +718,23 @@ void PaneWindow::EnsureTextFormat() {
     marker->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
     marker->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
     m_markerFormat = marker;
+    // Pane header strip: small, left-aligned, single line, vertically centered,
+    // with a tail ellipsis (the path helper does the middle-ellipsis; this
+    // catches any residue).
+    ComPtr<IDWriteTextFormat> header;
+    ThrowIfFailed(m_dx.DWriteFactory()->CreateTextFormat(
+                      L"Segoe UI", nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL,
+                      DWRITE_FONT_STRETCH_NORMAL, DipToPx(12.5f), L"en-us", &header),
+                  "IDWriteFactory::CreateTextFormat (header)");
+    header->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+    header->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+    header->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+    ComPtr<IDWriteInlineObject> ellipsis;
+    if (SUCCEEDED(m_dx.DWriteFactory()->CreateEllipsisTrimmingSign(header.Get(), &ellipsis))) {
+        DWRITE_TRIMMING trimming{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
+        header->SetTrimming(&trimming, ellipsis.Get());
+    }
+    m_headerFormat = header;
     m_textFormatDpi = m_dpi;
 }
 
@@ -777,7 +802,7 @@ void PaneWindow::ScheduleRecovery() {
         // Persistent failure: back off instead of spinning WM_PAINT at 100% CPU.
         SetTimer(m_hwnd, kRecoveryTimer, 250u * m_recoveryAttempts, nullptr);
     } else {
-        MessageBoxW(m_hwnd, Str(StrId::DeviceLostError), L"PdfSideViewer", MB_ICONERROR);
+        MessageBoxW(m_hwnd, Str(StrId::DeviceLostError), L"PDF Side Viewer", MB_ICONERROR);
         PostQuitMessage(1);
     }
 }
@@ -870,19 +895,21 @@ void PaneWindow::DrawContent() {
         // scrollbar cannot be painted): whole-document semantics, viewport
         // space, under the focus ring.
         const SIZE vp = ViewportPx();
+        const float top = HeaderPx(); // strip spans the document viewport, below the header
         const float stripW = DipToPx(6.0f);
         const float x0 = static_cast<float>(vp.cx) - stripW;
         brush->SetColor(m_dark ? D2D1::ColorF(0xFFFFFF, 0.06f) : D2D1::ColorF(0x000000, 0.06f));
         m_d2dContext->FillRectangle(
-            D2D1::RectF(x0, 0, static_cast<float>(vp.cx), static_cast<float>(vp.cy)),
+            D2D1::RectF(x0, top, static_cast<float>(vp.cx), top + static_cast<float>(vp.cy)),
             brush.Get());
         const float tickH = std::max(2.0f, DipToPx(3.0f));
         for (const SyncMarker& m : m_syncMarkers) {
             if (m.page < 0 || m.page >= m_layout.PageCount())
                 continue;
-            const float y = std::floor(m_layout.PageRect(m.page).top / m_layout.TotalHeight() *
-                                           static_cast<float>(vp.cy) +
-                                       0.5f);
+            const float y = top + std::floor(m_layout.PageRect(m.page).top /
+                                                 m_layout.TotalHeight() *
+                                                 static_cast<float>(vp.cy) +
+                                             0.5f);
             brush->SetColor(m_dark ? D2D1::ColorF(0x4CC2FF, m.manual ? 1.0f : 0.45f)
                                    : D2D1::ColorF(0x0067C0, m.manual ? 1.0f : 0.45f));
             m_d2dContext->FillRectangle(
@@ -890,7 +917,9 @@ void PaneWindow::DrawContent() {
         }
     }
 
-    if (m_focused) {
+    // Focus ring: the active-pane cue ONLY when the header is hidden; with a
+    // header shown, the accent-filled strip is the cue instead.
+    if (m_active && !HeaderShown()) {
         // NOT GetSize(): that returns DIPs even in D2D1_UNIT_MODE_PIXELS,
         // which shrinks the rect by the DPI factor on scaled monitors.
         const SIZE vp = ViewportPx();
@@ -901,6 +930,11 @@ void PaneWindow::DrawContent() {
                         static_cast<float>(vp.cy) - w / 2),
             brush.Get(), w);
     }
+
+    // Drawn LAST: an opaque band over [0, HeaderPx) that hides any document
+    // bleed scrolled above the viewport top.
+    if (HeaderShown())
+        DrawPaneHeader(brush.Get());
 }
 
 void PaneWindow::DrawPlaceholder(ID2D1SolidColorBrush* brush) {
@@ -924,9 +958,42 @@ void PaneWindow::DrawPlaceholder(ID2D1SolidColorBrush* brush) {
     }
     brush->SetColor(m_dark ? D2D1::ColorF(0x9D9D9D) : D2D1::ColorF(0x605E5C));
     const float pad = DipToPx(12.0f);
-    const D2D1_RECT_F rect = D2D1::RectF(pad, pad, size.width - pad, size.height - pad);
+    const float top = HeaderPx(); // Opening/Error keep a path, so the strip shows
+    const D2D1_RECT_F rect =
+        D2D1::RectF(pad, top + pad, size.width - pad, top + size.height - pad);
     m_d2dContext->DrawText(text.c_str(), static_cast<UINT32>(text.size()), m_textFormat.Get(),
                            rect, brush);
+}
+
+void PaneWindow::DrawPaneHeader(ID2D1SolidColorBrush* brush) {
+    if (!m_headerFormat)
+        return;
+    const SIZE vp = ViewportPx();
+    const float w = static_cast<float>(vp.cx);
+    const float h = HeaderPx();
+    // Neutral strip always; the active-pane cue is a thin accent underline along
+    // the bottom edge (browser-tab style). A full accent fill read as too heavy
+    // with two panes.
+    brush->SetColor(m_dark ? D2D1::ColorF(0x2D2D2D) : D2D1::ColorF(0xEAEAEA));
+    m_d2dContext->FillRectangle(D2D1::RectF(0, 0, w, h), brush);
+
+    const float pad = DipToPx(8.0f);
+    // Char budget from the strip width (~6.5 DIP average advance at 12.5px);
+    // DirectWrite's tail ellipsis mops up the residue.
+    const UINT cch = static_cast<UINT>(std::max(0.0f, (w - 2.0f * pad) / DipToPx(6.5f)));
+    const std::wstring text =
+        m_headerShowPath ? CompactPathChars(m_docPath, cch) : FileNameOf(m_docPath);
+    // The active pane's name reads at full strength; the inactive one is muted.
+    brush->SetColor(m_active ? (m_dark ? D2D1::ColorF(0xE8E8E8) : D2D1::ColorF(0x1F1F1F))
+                             : (m_dark ? D2D1::ColorF(0x9D9D9D) : D2D1::ColorF(0x8A8A8A)));
+    m_d2dContext->DrawText(text.c_str(), static_cast<UINT32>(text.size()), m_headerFormat.Get(),
+                           D2D1::RectF(pad, 0, w - pad, h), brush);
+
+    if (m_active) {
+        const float barH = DipToPx(2.0f);
+        brush->SetColor(m_dark ? D2D1::ColorF(0x4CC2FF) : D2D1::ColorF(0x0067C0));
+        m_d2dContext->FillRectangle(D2D1::RectF(0, h - barH, w, h), brush);
+    }
 }
 
 int PaneWindow::TileResFor(float pageWpx, float pageHpx) {
@@ -1189,7 +1256,7 @@ void PaneWindow::OnDocOpened(std::unique_ptr<Document::OpenResult> result) {
             // fresh layout is gapless (SetPages cleared the gaps), so slot
             // and page coincide here.
             if (PagedActive())
-                AdoptSlot(m_layout.FirstVisibleSlot(m_scrollY + SyncCenterY()));
+                AdoptSlot(m_layout.FirstVisibleSlot(m_scrollY + SyncCenterInContent()));
             ClampScroll();
             const double pos = SyncPosition();
             RelayoutDocument();
@@ -1260,7 +1327,10 @@ void PaneWindow::OnPageRendered(std::unique_ptr<Document::RenderResult> result) 
 SIZE PaneWindow::ViewportPx() const {
     RECT rc{};
     GetClientRect(m_hwnd, &rc);
-    return {rc.right, rc.bottom};
+    // The header strip reserves a constant whole-pixel band at the top; the
+    // document viewport is what remains. HeaderPx() is 0 when the header is
+    // hidden, so this is the plain client rect in that case.
+    return {rc.right, std::max<LONG>(0, rc.bottom - static_cast<LONG>(HeaderPx()))};
 }
 
 D2D1_POINT_2F PaneWindow::ContentOrigin() const {
@@ -1277,8 +1347,10 @@ D2D1_POINT_2F PaneWindow::ContentOrigin() const {
                                 ? (static_cast<float>(vp.cy) - m_layout.TotalHeight()) / 2.0f
                                 : -m_scrollY);
     // Snap to whole pixels: fractional scroll/centering would put the 1:1
-    // page blits on half-pixel boundaries and blur them.
-    return D2D1::Point2F(std::floor(ox + 0.5f), std::floor(oy + 0.5f));
+    // page blits on half-pixel boundaries and blur them. The header band (0 when
+    // hidden) shifts the content down; every hit test routes through here too,
+    // so selection/link/zoom/anchor stay aligned automatically.
+    return D2D1::Point2F(std::floor(ox + 0.5f), std::floor(oy + HeaderPx() + 0.5f));
 }
 
 void PaneWindow::UpdateFitZoom() {
@@ -1296,7 +1368,10 @@ void PaneWindow::UpdateFitZoom() {
     RECT wr{};
     GetWindowRect(m_hwnd, &wr);
     const float fullW = static_cast<float>(wr.right - wr.left);
-    const float fullH = static_cast<float>(wr.bottom - wr.top);
+    // The header strip eats a CONSTANT band of window height (DIP-scaled, never
+    // client-derived): subtracting it keeps FitPage sized to the real document
+    // view without reopening the bar-visibility recursion.
+    const float fullH = static_cast<float>(wr.bottom - wr.top) - HeaderPx();
     const float sbW = static_cast<float>(GetSystemMetricsForDpi(SM_CXVSCROLL, m_dpi));
     const float margins = 2.0f * DipToPx(12.0f);
     const float gap = DipToPx(8.0f);
@@ -1585,7 +1660,7 @@ void PaneWindow::ScrollToSyncPosition(double pos) {
     const float fraction = static_cast<float>(std::clamp(pos - page, 0.0, 1.0));
     const D2D1_RECT_F rect = m_layout.PageRect(page);
     const float contentY = rect.top + fraction * (rect.bottom - rect.top);
-    ScrollTo(m_scrollX, contentY - SyncCenterY());
+    ScrollTo(m_scrollX, contentY - SyncCenterInContent());
 }
 
 double PaneWindow::VirtualSyncPosition() const {
@@ -1620,7 +1695,7 @@ void PaneWindow::ScrollToVirtualSyncPosition(double pos) {
     const float fraction = static_cast<float>(std::clamp(pos - slot, 0.0, 1.0));
     const D2D1_RECT_F rect = m_layout.SlotRect(slot);
     const float contentY = rect.top + fraction * (rect.bottom - rect.top);
-    ScrollTo(m_scrollX, contentY - SyncCenterY());
+    ScrollTo(m_scrollX, contentY - SyncCenterInContent());
 }
 
 float PaneWindow::SyncCenterY() const {
@@ -1930,7 +2005,7 @@ void PaneWindow::OnScrollMessage(UINT msg, WPARAM wParam) {
             // Document-wide thumb: dragging adopts the slot under the sampling
             // center (SyncPosition's rule: the slot containing trackPos would
             // bias one slot early on the way down), then clamps into its band.
-            AdoptSlot(m_layout.FirstVisibleSlot(track + SyncCenterY()));
+            AdoptSlot(m_layout.FirstVisibleSlot(track + SyncCenterInContent()));
             ScrollTo(m_scrollX, track);
             return;
         }

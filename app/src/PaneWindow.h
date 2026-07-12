@@ -133,6 +133,26 @@ public:
         HideAnchorTip();
         Invalidate();
     }
+    // Options: per-pane header strip (file name/path) that doubles as the
+    // active-pane cue. Unlike SetMarkerVisibility a relayout is required: the
+    // header reserves viewport height, which changes fit/clamp/scrollbars.
+    void SetHeaderOptions(bool show, bool showPath) {
+        m_showHeader = show;
+        m_headerShowPath = showPath;
+        HideAnchorTip();
+        RelayoutDocument();
+        Invalidate();
+    }
+    // The active-pane cue (header underline, or the focus ring when the header
+    // is off) tracks the ACTIVE pane, not the Win32 focus, so it persists while
+    // the whole window is deactivated - the outline still refers to this pane.
+    // MainWindow drives it from its m_activePane on every FocusGained.
+    void SetActive(bool active) {
+        if (m_active == active)
+            return;
+        m_active = active;
+        Invalidate();
+    }
     D2D1_SIZE_F PageSizePt(int page) const { return m_layout.PageSizePt(page); }
 
     // ---------------------------------------------------------- text search --
@@ -242,6 +262,7 @@ private:
     void DrawContent();
     void DrawPlaceholder(ID2D1SolidColorBrush* brush);
     void DrawDocument(ID2D1SolidColorBrush* brush);
+    void DrawPaneHeader(ID2D1SolidColorBrush* brush); // file name/path strip + active cue
     void EnsureTextFormat();
 
     // Document events (posted by the worker)
@@ -286,6 +307,23 @@ private:
     float DipToPx(float dip) const { return dip * static_cast<float>(m_dpi) / 96.0f; }
     SIZE ViewportPx() const;
     float SyncCenterY() const; // sync sampling height, horizontal-bar-invariant
+    // Header strip: shown only with the option on AND a document path present
+    // (an empty pane keeps the focus ring instead). HeaderPx is a CONSTANT
+    // DIP-scaled reserve - never derive it from the client rect, or the
+    // bar-independent UpdateFitZoom reopens the WM_SIZE recursion it avoids.
+    bool HeaderShown() const { return m_showHeader && !m_docPath.empty(); }
+    // Rounded to a whole pixel so ViewportPx's reserve (truncates) and
+    // ContentOrigin's shift (rounds) agree exactly; at non-4-multiple scale
+    // factors an unrounded value would misalign the band and the content by 1px.
+    float HeaderPx() const {
+        return HeaderShown()
+                   ? static_cast<float>(static_cast<int>(DipToPx(kHeaderHeightDip) + 0.5f))
+                   : 0.0f;
+    }
+    // Sync sampling center in CONTENT space: the header pushes the content down
+    // by HeaderPx, so the sites that pair SyncCenterY with raw scroll offsets
+    // (not routed through ContentOrigin) subtract it here.
+    float SyncCenterInContent() const { return SyncCenterY() - HeaderPx(); }
     D2D1_POINT_2F ContentOrigin() const;
     void RelayoutDocument();
     void UpdateFitZoom(); // recompute m_zoom for FitWidth/FitPage
@@ -350,6 +388,9 @@ private:
     // Pages whose pixel size exceeds ~1.5x this (geometric mean) are split
     // into a 2^res x 2^res tile grid; previews are capped to this size too.
     static constexpr float kMaxTilePx = 2048.0f;
+    // Pane header strip height (DIP). A CONSTANT reserve so UpdateFitZoom stays
+    // bar-independent; the strip doubles as the active-pane cue when shown.
+    static constexpr float kHeaderHeightDip = 24.0f;
 
     DxResources& m_dx;
     HWND m_hwnd = nullptr;
@@ -357,7 +398,7 @@ private:
     unsigned m_dxGeneration = 0; // DxResources::Generation() our resources were built on
     UINT m_recoveryAttempts = 0; // consecutive graphics failures, reset on successful present
     bool m_dark = false;
-    bool m_focused = false;
+    bool m_active = false; // the current (last-active) pane; driven by MainWindow, persists
     std::wstring m_hint;
     std::wstring m_docPath;
     std::wstring m_errorText;
@@ -367,6 +408,7 @@ private:
     ComPtr<ID2D1Bitmap1> m_targetBitmap;
     ComPtr<IDWriteTextFormat> m_textFormat;
     ComPtr<IDWriteTextFormat> m_markerFormat; // anchor glyph ("Segoe UI Symbol")
+    ComPtr<IDWriteTextFormat> m_headerFormat; // pane header strip (small, leading, ellipsis)
     UINT m_textFormatDpi = 0;
     // The dash style belongs to the D2D factory, which Discard() resets too:
     // it follows the device generation, not the DWrite lifetime.
@@ -397,6 +439,8 @@ private:
     std::vector<SyncMarker> m_syncMarkers; // sorted by page; drives ticks + anchors
     bool m_showAnchorMarks = true; // Options: draw the anchor glyphs
     bool m_showTickStrip = true;   // Options: draw the scrollbar tick strip
+    bool m_showHeader = true;      // Options: draw the per-pane header strip
+    bool m_headerShowPath = false; // Options: header shows the full path, not the name
     uint64_t m_gapsVersion = 0; // see SetAlignmentGaps; 0 = no valid gap epoch
     ZoomMode m_defaultZoomMode = ZoomMode::FitPage; // for fresh documents
     int m_wheelLinesOverride = 0;                   // 0 = system wheel lines

@@ -589,6 +589,19 @@ PdfSideViewer/
 - `ID2D1RenderTarget::GetSize()` returns DIPs even when the context runs in
   `D2D1_UNIT_MODE_PIXELS`; drawing chrome from it shrinks everything by the DPI factor on scaled
   monitors. Use the client rect (`ViewportPx`) or `GetPixelSize()`.
+- The optional per-pane header strip is a CONSTANT DIP-scaled band reserved at the top of the
+  pane, folded into `ViewportPx` (reduced height) and `ContentOrigin` (a downward shift): scroll,
+  clamp, hit test and paint all account for it through those two choke points, and it collapses to
+  a bit-identical no-header layout when off (`HeaderPx()==0`). `UpdateFitZoom` subtracts the SAME
+  constant from the WINDOW height, never a client-derived metric, or it reopens the bar-visibility
+  `WM_SIZE` recursion. When shown, the strip replaces the focus ring as the active-pane cue
+  (accent underline). Both the underline and the fallback focus ring track the ACTIVE pane
+  (`m_activePane`, pushed to the panes via `SetActive`), NOT the Win32 focus, so the current-pane
+  marker survives window deactivation (there is deliberately no `WM_KILLFOCUS` handler clearing it);
+  the outline sidebar refers to that pane, so losing the marker when the window blurs loses that
+  association. The sync-sampling center (`SyncCenterY`) subtracts the band at the four sites that
+  pair it with raw scroll offsets rather than routing through `ContentOrigin`, or the sync
+  round-trip drifts by the band height.
 - Render results that can fail must ALWAYS reach the pane (ok flag), and every latch the pane
   keeps (`pendingId`, `failedScale`) must be reset on device loss; any silent drop or surviving
   latch turns into a permanently blank page at that zoom.

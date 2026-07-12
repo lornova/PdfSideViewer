@@ -253,6 +253,8 @@ private:
     bool m_showAlignmentGaps = true; // "Show Alignment Gaps" toggle ([sync] showGaps)
     bool m_showAnchors = true;       // Options: anchor glyphs ([sync] showAnchors)
     bool m_showTicks = true;         // Options: scrollbar tick strip ([sync] showTicks)
+    bool m_showHeader = true;        // Options: per-pane header strip ([window] header)
+    bool m_headerShowPath = false;   // Options: header shows the path ([window] headerPath)
     uint64_t m_gapsEpoch = 0;        // bumped per ApplyAlignmentGaps; stamps both panes
     // Sync map parked across a pane swap: mirrored (left/right exchanged per
     // point; the coordinates co-increase, so the order survives), captured

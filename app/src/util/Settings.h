@@ -59,6 +59,8 @@ struct AppSettings {
     int toolbarText = 1;
     bool fsToolbar = false; // full screen: keep the full toolbar visible
     bool fsStatus = false;  // full screen: keep the status bar visible
+    bool showHeader = true;      // per-pane header strip with the PDF file name/path
+    bool headerShowPath = false; // header shows the full path instead of the file name
     // Rebar band layout in visual order, "id,cx,break;..." per band (empty =
     // default). Parsed leniently: anything malformed keeps the default row.
     std::wstring rebarBands;

@@ -2,7 +2,7 @@
 # ON, 1:1 traversal, flippable paged gaps, toggle round-trip), swap mirroring,
 # generation from numbered bookmarks (skip + monotonicity filter), waiting at
 # segment boundaries with gaps OFF, manual points, clear-restores-plain-anchor,
-# zero-match feedback. Phase order matters: phase 0 asserts the fresh-sandbox
+# zero-match feedback, pane header options. Phase order matters: phase 0 asserts the fresh-sandbox
 # defaults, phases 1..2 explicitly toggle the gaps off.
 #
 # CLAUDE.md testing rules: DPI-aware thread FIRST (the dev monitor is 175% and
@@ -49,6 +49,7 @@ $SB_GETTEXTLENGTHW = 0x040C
 $IDC_FOCUS_NEXT_PANE = 1003
 $IDC_TOGGLE_SCROLL_SYNC = 1004
 $IDC_TOGGLE_ZOOM_SYNC = 1005
+$IDC_ZOOM_ACTUAL = 1017
 $IDC_SCROLL_CONTINUOUS = 1025
 $IDC_SCROLL_PAGED = 1026
 $IDC_GOTO_PAGE = 1028
@@ -555,6 +556,72 @@ try {
     Invoke-GotoPage $v $v.Left 10
     Assert-PaneAt $v $v.Right '12' 'the re-derived map drives Appendice B onto right p12'
     Stop-Viewer $v
+
+    # ---------------------------------------------------------------- phase 7
+    # Pane header options (2114 show, 2115 path). The strip reserves a constant
+    # band at the top of the pane, so with the header ON the vertical scroll PAGE
+    # (the document viewport height) is smaller than with it OFF. Actual-size zoom
+    # pins TotalHeight (Manual: height-independent), so only the viewport moves.
+    # Then the two checkboxes round-trip to settings.ini both ways. The strip's
+    # text and underline are Direct2D, not observable through messages.
+    Write-Host 'phase 7: pane header options + viewport reserve (sync-a | sync-c)'
+    $BM_GETCHECK = 0x00F0
+    $BM_SETCHECK = 0x00F1
+    # sync-c has no numbered bookmarks and this pair was never auto-saved, so no
+    # points regenerate on open: the sync state and the left layout stay plain,
+    # which keeps the nPage measurement clean. The sync locks are irrelevant here.
+    $v = Start-Viewer $pdfA $pdfC
+    Focus-Pane $v $v.Left
+    Send-Command $v $IDC_ZOOM_ACTUAL   # 100% Manual: TotalHeight fixed, only nPage moves
+    Start-Sleep -Milliseconds 400
+    $pageHeaderOn = (Get-VScroll $v.Left).nPage   # header ON by default
+    Send-Command $v $IDC_OPTIONS
+    if (-not (Poll { [Win32.Native]::FindWindowByTitle([IntPtr]::Zero, 'Options') -ne [IntPtr]::Zero } 5000)) {
+        throw 'options dialog did not open (phase 7)'
+    }
+    $opt = [Win32.Native]::FindWindowByTitle([IntPtr]::Zero, 'Options')
+    if (-not (Poll { [Win32.Native]::GetDlgItem($opt, 2114) -ne [IntPtr]::Zero } 3000)) {
+        throw 'header checkbox 2114 not found'
+    }
+    $hdr = [Win32.Native]::GetDlgItem($opt, 2114)
+    # WM_INITDIALOG checks it (default on); wait for that before toggling (the
+    # write-then-init race the goto dialog taught us).
+    if (-not (Poll { [Win32.Native]::SendMessageW($hdr, $BM_GETCHECK, [IntPtr]::Zero, [IntPtr]::Zero).ToInt64() -eq 1 } 3000)) {
+        throw 'header checkbox never initialized checked'
+    }
+    [void][Win32.Native]::SendMessageW($hdr, $BM_SETCHECK, [IntPtr]0, [IntPtr]::Zero)
+    [void][Win32.Native]::PostMessageW($opt, $WM_COMMAND, [IntPtr]$IDOK, [IntPtr]::Zero)
+    if (-not (Poll { -not [Win32.Native]::IsWindow($opt) } 5000)) { throw 'options did not close (phase 7)' }
+    Assert (Poll { (Get-VScroll $v.Left).nPage -gt $pageHeaderOn } 5000) `
+        "header OFF grows the document viewport (nPage was $pageHeaderOn with the strip)"
+    Stop-Viewer $v
+    $ini7 = Get-Content (Join-Path $scratch 'settings.ini') -Raw
+    Assert ($ini7 -match 'header=0') 'settings.ini persisted header=0'
+
+    # Reopen (header now off) and turn header + path ON: the reverse round-trip.
+    $v = Start-Viewer $pdfA $pdfC
+    Send-Command $v $IDC_OPTIONS
+    if (-not (Poll { [Win32.Native]::FindWindowByTitle([IntPtr]::Zero, 'Options') -ne [IntPtr]::Zero } 5000)) {
+        throw 'options dialog did not reopen (phase 7)'
+    }
+    $opt = [Win32.Native]::FindWindowByTitle([IntPtr]::Zero, 'Options')
+    if (-not (Poll { [Win32.Native]::GetDlgItem($opt, 2114) -ne [IntPtr]::Zero } 3000)) {
+        throw 'header checkbox 2114 missing on reopen'
+    }
+    $hdr = [Win32.Native]::GetDlgItem($opt, 2114)
+    if (-not (Poll { [Win32.Native]::SendMessageW($hdr, $BM_GETCHECK, [IntPtr]::Zero, [IntPtr]::Zero).ToInt64() -eq 0 } 3000)) {
+        throw 'header checkbox should reopen unchecked (header=0 persisted)'
+    }
+    $pth = [Win32.Native]::GetDlgItem($opt, 2115)
+    Assert ($pth -ne [IntPtr]::Zero) 'header-path checkbox 2115 exists'
+    [void][Win32.Native]::SendMessageW($hdr, $BM_SETCHECK, [IntPtr]1, [IntPtr]::Zero)
+    [void][Win32.Native]::SendMessageW($pth, $BM_SETCHECK, [IntPtr]1, [IntPtr]::Zero)
+    [void][Win32.Native]::PostMessageW($opt, $WM_COMMAND, [IntPtr]$IDOK, [IntPtr]::Zero)
+    if (-not (Poll { -not [Win32.Native]::IsWindow($opt) } 5000)) { throw 'options did not close on reopen (phase 7)' }
+    Stop-Viewer $v
+    $ini7b = Get-Content (Join-Path $scratch 'settings.ini') -Raw
+    Assert ($ini7b -match 'header=1') 'settings.ini persisted header=1 (reverse round-trip)'
+    Assert ($ini7b -match 'headerPath=1') 'settings.ini persisted headerPath=1'
 } finally {
     Get-Process PdfSideViewer -ErrorAction SilentlyContinue | ForEach-Object {
         [void]$_.CloseMainWindow()

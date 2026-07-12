@@ -153,6 +153,8 @@ constexpr WORD kOptAnchorsId = 2110;
 constexpr WORD kOptTicksId = 2111;
 constexpr WORD kOptFsToolbarId = 2112;
 constexpr WORD kOptFsStatusId = 2113;
+constexpr WORD kOptHeaderId = 2114;
+constexpr WORD kOptHeaderPathId = 2115;
 constexpr WORD kSyncPtsListId = 2401;
 constexpr WORD kSyncPtsRemoveId = 2402;
 constexpr WORD kSyncPtsClearId = 2403;
@@ -284,12 +286,20 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_sync->SetMapChangedHandler([this] { ApplyAlignmentGaps(); });
     m_left->SetMarkerVisibility(m_showAnchors, m_showTicks);
     m_right->SetMarkerVisibility(m_showAnchors, m_showTicks);
+    m_showHeader = session.showHeader;
+    m_headerShowPath = session.headerShowPath;
+    m_left->SetHeaderOptions(m_showHeader, m_headerShowPath);
+    m_right->SetHeaderOptions(m_showHeader, m_headerShowPath);
+    // m_activePane defaults to the left pane; mark it so the cue and the outline
+    // association are visible before the first focus (and while the window is
+    // inactive at startup).
+    m_left->SetActive(true);
 
     // The HMENU is NEVER attached to the window: it is the popup source for
     // the rebar-hosted menu band, and the band lives in the client area (the
     // rebar height comes out of Layout, not the non-client menu band).
     m_menu = BuildMenuBar();
-    CreateWindowExW(0, kClassName, L"PdfSideViewer", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
+    CreateWindowExW(0, kClassName, L"PDF Side Viewer", WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
                     CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, nullptr, nullptr,
                     hinst, this);
     if (!m_hwnd)
@@ -308,6 +318,10 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     const auto onViewChanged = [this](PaneWindow& p, PaneWindow::ViewEvent e, float r) {
         if (e == PaneWindow::ViewEvent::FocusGained) {
             m_activePane = &p; // the page box targets the last-focused pane
+            // The active-pane cue persists through window deactivation, so it is
+            // driven here from m_activePane, not from the panes' Win32 focus.
+            m_left->SetActive(m_left.get() == &p);
+            m_right->SetActive(m_right.get() == &p);
             if (m_outlineVisible && m_outlinePane != &p)
                 UpdateOutlineSidebar(&p);
             else
@@ -535,6 +549,8 @@ void MainWindow::SaveSession() const {
     s.showGaps = m_showAlignmentGaps;
     s.showAnchors = m_showAnchors;
     s.showTicks = m_showTicks;
+    s.showHeader = m_showHeader;
+    s.headerShowPath = m_headerShowPath;
     s.scrollMode = m_scrollMode == PaneWindow::ScrollMode::Paged ? 1 : 0;
     s.restoreSession = m_restoreSession;
     s.wheelLines = m_wheelLines;
@@ -714,7 +730,7 @@ void MainWindow::OpenMruFile(size_t index) {
         m_mruFiles.erase(m_mruFiles.begin() + static_cast<ptrdiff_t>(index));
         RebuildMruMenus();
         const std::wstring msg = Str(StrId::MruMissingFile) + path;
-        MessageBoxW(m_hwnd, msg.c_str(), L"PdfSideViewer", MB_OK | MB_ICONWARNING);
+        MessageBoxW(m_hwnd, msg.c_str(), L"PDF Side Viewer", MB_OK | MB_ICONWARNING);
         return;
     }
     FocusedPane()->OpenDocument(path);
@@ -731,7 +747,7 @@ void MainWindow::OpenMruPair(size_t index) {
         RebuildMruMenus();
         const std::wstring msg =
             Str(StrId::MruMissingFile) + (leftMissing ? pair.left : pair.right);
-        MessageBoxW(m_hwnd, msg.c_str(), L"PdfSideViewer", MB_OK | MB_ICONWARNING);
+        MessageBoxW(m_hwnd, msg.c_str(), L"PDF Side Viewer", MB_OK | MB_ICONWARNING);
         return;
     }
     m_left->OpenDocument(pair.left);
@@ -1402,7 +1418,7 @@ INT_PTR CALLBACK MainWindow::GotoDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPAR
 }
 
 void MainWindow::ShowOptionsDialog() {
-    DialogTemplate dlg(Str(StrId::OptTitle), 260, 264);
+    DialogTemplate dlg(Str(StrId::OptTitle), 260, 288);
     dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 7, 246, 10,
                    kOptRestoreId, Str(StrId::OptRestoreSession));
     dlg.AddControl(DialogTemplate::kButton, BS_GROUPBOX, 0, 7, 22, 246, 74, 0xFFFF,
@@ -1433,15 +1449,19 @@ void MainWindow::ShowOptionsDialog() {
                    kOptFsToolbarId, Str(StrId::OptFsToolbar));
     dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 188, 246, 10,
                    kOptFsStatusId, Str(StrId::OptFsStatus));
-    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 7, 208, 188, 10, 0xFFFF,
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 200, 246, 10,
+                   kOptHeaderId, Str(StrId::OptShowHeader));
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 15, 212, 238, 10,
+                   kOptHeaderPathId, Str(StrId::OptHeaderShowPath));
+    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 7, 232, 188, 10, 0xFFFF,
                    Str(StrId::OptWheelLines));
     dlg.AddControl(DialogTemplate::kEdit, ES_NUMBER | ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
-                   0, 200, 206, 48, 13, kOptWheelId, L"");
-    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 7, 243, 120, 14,
+                   0, 200, 230, 48, 13, kOptWheelId, L"");
+    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 7, 267, 120, 14,
                    kOptClearMruId, Str(StrId::OptClearRecent));
-    dlg.AddControl(DialogTemplate::kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 149, 243, 50, 14,
+    dlg.AddControl(DialogTemplate::kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 149, 267, 50, 14,
                    IDOK, Str(StrId::DlgOk));
-    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 203, 243, 50, 14,
+    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 203, 267, 50, 14,
                    IDCANCEL, Str(StrId::DlgCancel));
     OptionsDialogState state{this, false};
     const HINSTANCE hinst =
@@ -1488,10 +1508,19 @@ INT_PTR CALLBACK MainWindow::OptionsDlgProc(HWND dlg, UINT msg, WPARAM wParam, L
                        self->m_fsShowToolbar ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(dlg, kOptFsStatusId, self->m_fsShowStatus ? BST_CHECKED : BST_UNCHECKED);
         SetDlgItemInt(dlg, kOptWheelId, static_cast<UINT>(self->m_wheelLines), FALSE);
+        CheckDlgButton(dlg, kOptHeaderId, self->m_showHeader ? BST_CHECKED : BST_UNCHECKED);
+        CheckDlgButton(dlg, kOptHeaderPathId,
+                       self->m_headerShowPath ? BST_CHECKED : BST_UNCHECKED);
+        EnableWindow(GetDlgItem(dlg, kOptHeaderPathId), self->m_showHeader);
         return TRUE;
     }
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
+        case kOptHeaderId:
+            // The path toggle is subordinate: it only applies when the header is on.
+            EnableWindow(GetDlgItem(dlg, kOptHeaderPathId),
+                         IsDlgButtonChecked(dlg, kOptHeaderId) == BST_CHECKED);
+            return TRUE;
         case kOptClearMruId:
             if (state) {
                 state->clearRecent = true;
@@ -1531,6 +1560,10 @@ INT_PTR CALLBACK MainWindow::OptionsDlgProc(HWND dlg, UINT msg, WPARAM wParam, L
             self->m_showTicks = IsDlgButtonChecked(dlg, kOptTicksId) == BST_CHECKED;
             self->m_left->SetMarkerVisibility(self->m_showAnchors, self->m_showTicks);
             self->m_right->SetMarkerVisibility(self->m_showAnchors, self->m_showTicks);
+            self->m_showHeader = IsDlgButtonChecked(dlg, kOptHeaderId) == BST_CHECKED;
+            self->m_headerShowPath = IsDlgButtonChecked(dlg, kOptHeaderPathId) == BST_CHECKED;
+            self->m_left->SetHeaderOptions(self->m_showHeader, self->m_headerShowPath);
+            self->m_right->SetHeaderOptions(self->m_showHeader, self->m_headerShowPath);
             self->m_fsShowToolbar = IsDlgButtonChecked(dlg, kOptFsToolbarId) == BST_CHECKED;
             self->m_fsShowStatus = IsDlgButtonChecked(dlg, kOptFsStatusId) == BST_CHECKED;
             if (self->m_fullscreen)
@@ -1897,7 +1930,7 @@ void MainWindow::UpdateStatusBar() {
 }
 
 void MainWindow::ShowAboutBox() {
-    std::wstring text = L"PdfSideViewer " PSV_VERSION_WSTR L"\n\n";
+    std::wstring text = L"PDF Side Viewer " PSV_VERSION_WSTR L"\n\n";
     text += Str(StrId::AboutBody);
     MessageBoxW(m_hwnd, text.c_str(), Str(StrId::AboutTitle), MB_OK | MB_ICONINFORMATION);
 }
@@ -2346,7 +2379,7 @@ void MainWindow::ToggleFullScreen() {
 }
 
 void MainWindow::UpdateTitle() {
-    std::wstring title = L"PdfSideViewer";
+    std::wstring title = L"PDF Side Viewer";
     if (m_sync->ScrollSync())
         title += Str(StrId::TitleScrollSyncTag);
     if (m_sync->ZoomSync())

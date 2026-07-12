@@ -192,7 +192,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             DestroyAcceleratorTable(haccel);
         return static_cast<int>(msg.wParam);
     } catch (const std::exception& e) {
-        MessageBoxA(nullptr, e.what(), "PdfSideViewer - fatal error", MB_ICONERROR);
+        MessageBoxA(nullptr, e.what(), "PDF Side Viewer - fatal error", MB_ICONERROR);
         return 1;
     }
 }
