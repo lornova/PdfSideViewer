@@ -15,6 +15,7 @@ public:
     static constexpr WORD kButton = 0x0080;
     static constexpr WORD kEdit = 0x0081;
     static constexpr WORD kStatic = 0x0082;
+    static constexpr WORD kListBox = 0x0083;
     static constexpr WORD kComboBox = 0x0085;
 
     DialogTemplate(PCWSTR title, int cx, int cy);

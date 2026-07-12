@@ -42,6 +42,12 @@
     X(MenuSync, L"S&ync", L"&Sincronizzazione")                                                    \
     X(MenuScrollSync, L"&Scroll Sync\tF7", L"Sync &scorrimento\tF7")                               \
     X(MenuZoomSync, L"&Zoom Sync\tCtrl+F7", L"Sync &zoom\tCtrl+F7")                                \
+    X(MenuAddSyncPoint, L"&Add Sync Point Here\tShift+F7",                                         \
+      L"&Aggiungi punto di sync qui\tShift+F7")                                                    \
+    X(MenuSyncFromBookmarks, L"Sync Points from &Bookmarks", L"Punti di sync dai se&gnalibri")     \
+    X(MenuSyncPoints, L"Sync &Points...", L"&Punti di sync...")                                    \
+    X(MenuClearSyncPoints, L"&Clear Sync Points\tCtrl+Shift+F7",                                   \
+      L"&Rimuovi punti di sync\tCtrl+Shift+F7")                                                    \
     X(MenuSwapPanes, L"S&wap Panes\tF8", L"Scam&bia pannelli\tF8")                                 \
     X(MenuHelp, L"&Help", L"&?")                                                                   \
     X(MenuAbout, L"&About PdfSideViewer...", L"&Informazioni su PdfSideViewer...")                 \
@@ -76,6 +82,12 @@
     X(StatusSyncScroll, L"Sync: scroll", L"Sync: scorrimento")                                     \
     X(StatusSyncZoom, L"Sync: zoom", L"Sync: zoom")                                                \
     X(StatusSyncOff, L"Sync: off", L"Sync: disattivata")                                           \
+    /* sync points (status cell suffix is composed in code: pre + count + post) */                 \
+    X(StatusSyncPtsPre, L" · ", L" · ")                                                            \
+    X(StatusSyncPtsPost, L" pts", L" punti")                                                       \
+    X(SyncPtsGenerated, L"Sync points from bookmarks: ", L"Punti di sync dai segnalibri: ")        \
+    X(SyncPtsNoMatch, L"Sync points: no matching numbered bookmarks",                              \
+      L"Punti di sync: nessun segnalibro numerato in comune")                                      \
     /* window title */                                                                             \
     X(TitleScrollSyncTag, L"  [scroll sync]", L"  [sync scorrimento]")                             \
     X(TitleZoomSyncTag, L"  [zoom sync]", L"  [sync zoom]")                                        \
@@ -124,6 +136,13 @@
     X(GotoPrompt, L"Page number or label:", L"Numero di pagina o etichetta:")                      \
     X(DlgOk, L"OK", L"OK")                                                                         \
     X(DlgCancel, L"Cancel", L"Annulla")                                                            \
+    /* sync points dialog */                                                                       \
+    X(SyncPtsDlgTitle, L"Sync Points", L"Punti di sincronizzazione")                               \
+    X(SyncPtsDlgRemove, L"&Remove", L"&Rimuovi")                                                   \
+    X(SyncPtsDlgClear, L"Clear &All", L"Rimuovi &tutti")                                           \
+    X(DlgClose, L"Close", L"Chiudi")                                                               \
+    X(SyncPtOriginAuto, L"auto", L"auto")                                                          \
+    X(SyncPtOriginManual, L"manual", L"manuale")                                                   \
     /* about box */                                                                                \
     X(AboutTitle, L"About PdfSideViewer", L"Informazioni su PdfSideViewer")                        \
     X(AboutBody,                                                                                   \

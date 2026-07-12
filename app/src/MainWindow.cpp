@@ -3,6 +3,7 @@
 #include "resource.h"
 #include "util/DialogTemplate.h"
 #include "util/GlyphIcons.h"
+#include "util/OutlineNumbering.h"
 #include "util/Settings.h"
 #include "util/ShellIntegration.h"
 #include "util/Strings.h"
@@ -140,6 +141,9 @@ constexpr WORD kOptSynctexId = 2106;
 constexpr WORD kOptShellId = 2107;
 constexpr WORD kOptClearMruId = 2108;
 constexpr WORD kOptWheelId = 2109;
+constexpr WORD kSyncPtsListId = 2401;
+constexpr WORD kSyncPtsRemoveId = 2402;
+constexpr WORD kSyncPtsClearId = 2403;
 struct OptionsDialogState {
     MainWindow* self = nullptr;
     bool clearRecent = false; // armed by the button, applied on OK (cancel-safe)
@@ -279,10 +283,31 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
             else
                 m_outlinePane = &p;
         } else {
-            m_sync->OnViewChanged(p, e, r);
+            m_sync->OnViewChanged(p, e, r); // DocumentOpened clears the map, parks the regen
             if (e == PaneWindow::ViewEvent::DocumentOpened && m_outlineVisible &&
                 m_outlinePane == &p)
                 UpdateOutlineSidebar(&p);
+            if (e == PaneWindow::ViewEvent::DocumentOpened) {
+                // Auto-reload = the pane re-opened (or failed to re-open: the
+                // path survives an error open) the SAME file. Generated points
+                // are derived data: once both panes are ready again, re-derive
+                // them from the fresh outlines - the LaTeX rebuild loop must
+                // not lose the bookmark map on every compile, even when both
+                // panes reload from one build or a broken intermediate compile
+                // fails the first attempt (the parked cue rides those out). A
+                // path change (open, close, swap) cancels the parked regen:
+                // the map's context is gone. Manual points stay gone on
+                // reload: they reference pages the rebuild may have moved.
+                std::wstring& lastDoc = (&p == m_right.get()) ? m_lastDocRight : m_lastDocLeft;
+                const std::wstring& cur = p.DocumentPath();
+                if (cur.empty() || lstrcmpiW(cur.c_str(), lastDoc.c_str()) != 0)
+                    m_sync->CancelAutoRegen();
+                lastDoc = cur;
+                if (m_sync->AutoRegenPending() && m_left->HasDocument() &&
+                    m_right->HasDocument() && !m_left->Outline().empty() &&
+                    !m_right->Outline().empty())
+                    GenerateSyncPointsFromBookmarks(false);
+            }
             // Every successful open funnels through here (dialog, MRU, drag &
             // drop, command line, session restore), so this is the one MRU
             // recording point. Error opens keep HasDocument() false.
@@ -538,6 +563,11 @@ HMENU MainWindow::BuildMenuBar() {
     HMENU sync = CreatePopupMenu();
     append(sync, IDC_TOGGLE_SCROLL_SYNC, StrId::MenuScrollSync);
     append(sync, IDC_TOGGLE_ZOOM_SYNC, StrId::MenuZoomSync);
+    AppendMenuW(sync, MF_SEPARATOR, 0, nullptr);
+    append(sync, IDC_ADD_SYNC_POINT, StrId::MenuAddSyncPoint);
+    append(sync, IDC_SYNC_FROM_BOOKMARKS, StrId::MenuSyncFromBookmarks);
+    append(sync, IDC_SYNC_POINTS, StrId::MenuSyncPoints);
+    append(sync, IDC_CLEAR_SYNC_POINTS, StrId::MenuClearSyncPoints);
     AppendMenuW(sync, MF_SEPARATOR, 0, nullptr);
     append(sync, IDC_SWAP_PANES, StrId::MenuSwapPanes);
 
@@ -1368,6 +1398,109 @@ void MainWindow::RebuildToolbarIcons() {
     SendMessageW(m_toolbar, TB_AUTOSIZE, 0, 0);
 }
 
+namespace {
+void PopulateSyncPointsList(HWND list, const std::vector<SyncPoint>& points) {
+    SendMessageW(list, LB_RESETCONTENT, 0, 0);
+    for (size_t i = 0; i < points.size(); ++i) {
+        const SyncPoint& p = points[i];
+        const std::wstring row =
+            std::to_wstring(i + 1) + L".\t" + p.label + L"\tp" + std::to_wstring(p.left + 1) +
+            L" \x2194 p" + std::to_wstring(p.right + 1) + L"\t" +
+            Str(p.manual ? StrId::SyncPtOriginManual : StrId::SyncPtOriginAuto);
+        SendMessageW(list, LB_ADDSTRING, 0, reinterpret_cast<LPARAM>(row.c_str()));
+    }
+}
+} // namespace
+
+void MainWindow::ShowSyncPointsDialog() {
+    DialogTemplate dlg(Str(StrId::SyncPtsDlgTitle), 300, 182);
+    dlg.AddControl(DialogTemplate::kListBox,
+                   LBS_NOTIFY | LBS_USETABSTOPS | WS_VSCROLL | WS_BORDER | WS_TABSTOP, 0, 7, 7,
+                   286, 146, kSyncPtsListId, L"");
+    // Remove starts disabled: it follows the listbox selection.
+    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP | WS_DISABLED, 0, 7, 161,
+                   60, 14, kSyncPtsRemoveId, Str(StrId::SyncPtsDlgRemove));
+    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 71, 161, 60, 14,
+                   kSyncPtsClearId, Str(StrId::SyncPtsDlgClear));
+    // Close = IDCANCEL (Esc and the X work): every action applies
+    // immediately, there is nothing to confirm.
+    dlg.AddControl(DialogTemplate::kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 243, 161, 50, 14,
+                   IDCANCEL, Str(StrId::DlgClose));
+    const HINSTANCE hinst =
+        reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(m_hwnd, GWLP_HINSTANCE));
+    DialogBoxIndirectParamW(hinst, dlg.Data(), m_hwnd, SyncPointsDlgProc,
+                            reinterpret_cast<LPARAM>(this));
+    // The map may have been emptied from inside the dialog.
+    UpdateCommandUi();
+    UpdateStatusBar();
+}
+
+INT_PTR CALLBACK MainWindow::SyncPointsDlgProc(HWND dlg, UINT msg, WPARAM wParam,
+                                               LPARAM lParam) {
+    auto* self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(dlg, DWLP_USER));
+    switch (msg) {
+    case WM_INITDIALOG: {
+        SetWindowLongPtrW(dlg, DWLP_USER, lParam);
+        self = reinterpret_cast<MainWindow*>(lParam);
+        const HWND list = GetDlgItem(dlg, kSyncPtsListId);
+        const int tabs[] = {18, 60, 160}; // ordinal | label | pages | origin
+        SendMessageW(list, LB_SETTABSTOPS, ARRAYSIZE(tabs), reinterpret_cast<LPARAM>(tabs));
+        PopulateSyncPointsList(list, self->m_sync->Points());
+        return TRUE;
+    }
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case kSyncPtsListId:
+            if (HIWORD(wParam) == LBN_SELCHANGE) {
+                const LRESULT sel = SendDlgItemMessageW(dlg, kSyncPtsListId, LB_GETCURSEL, 0, 0);
+                EnableWindow(GetDlgItem(dlg, kSyncPtsRemoveId), sel != LB_ERR);
+            }
+            return TRUE;
+        case kSyncPtsRemoveId: {
+            const LRESULT sel = SendDlgItemMessageW(dlg, kSyncPtsListId, LB_GETCURSEL, 0, 0);
+            if (self && sel != LB_ERR) {
+                self->m_sync->RemovePoint(static_cast<size_t>(sel));
+                const HWND list = GetDlgItem(dlg, kSyncPtsListId);
+                const size_t n = self->m_sync->Points().size();
+                PopulateSyncPointsList(list, self->m_sync->Points());
+                if (n > 0) {
+                    SendMessageW(list, LB_SETCURSEL,
+                                 std::min(static_cast<size_t>(sel), n - 1), 0);
+                } else {
+                    // Disabling the focused button strands keyboard focus.
+                    SetFocus(GetDlgItem(dlg, IDCANCEL));
+                    EnableWindow(GetDlgItem(dlg, kSyncPtsRemoveId), FALSE);
+                    EnableWindow(GetDlgItem(dlg, kSyncPtsClearId), FALSE);
+                }
+                self->UpdateCommandUi();
+                self->UpdateStatusBar();
+            }
+            return TRUE;
+        }
+        case kSyncPtsClearId:
+            if (self) {
+                self->m_sync->ClearPoints();
+                PopulateSyncPointsList(GetDlgItem(dlg, kSyncPtsListId), self->m_sync->Points());
+                SetFocus(GetDlgItem(dlg, IDCANCEL)); // Clear had focus and gets disabled
+                EnableWindow(GetDlgItem(dlg, kSyncPtsRemoveId), FALSE);
+                EnableWindow(GetDlgItem(dlg, kSyncPtsClearId), FALSE);
+                self->UpdateCommandUi();
+                self->UpdateStatusBar();
+            }
+            return TRUE;
+        case IDCANCEL:
+            EndDialog(dlg, 0);
+            return TRUE;
+        default:
+            break;
+        }
+        break;
+    default:
+        break;
+    }
+    return FALSE;
+}
+
 void MainWindow::UpdateCommandUi() {
     if (!m_sync)
         return;
@@ -1402,6 +1535,15 @@ void MainWindow::UpdateCommandUi() {
         CheckMenuRadioItem(m_menu, IDC_LANG_ENGLISH, IDC_LANG_ITALIAN,
                            UiLanguage() == Lang::Italian ? IDC_LANG_ITALIAN : IDC_LANG_ENGLISH,
                            MF_BYCOMMAND);
+        const auto enable = [this](UINT id, bool on) {
+            EnableMenuItem(m_menu, id, MF_BYCOMMAND | (on ? MF_ENABLED : MF_GRAYED));
+        };
+        const bool bothDocs = m_left->HasDocument() && m_right->HasDocument();
+        enable(IDC_ADD_SYNC_POINT, bothDocs);
+        enable(IDC_SYNC_FROM_BOOKMARKS,
+               bothDocs && !m_left->Outline().empty() && !m_right->Outline().empty());
+        enable(IDC_SYNC_POINTS, m_sync->HasPoints());
+        enable(IDC_CLEAR_SYNC_POINTS, m_sync->HasPoints());
     }
     if (m_toolbar) {
         const auto press = [this](WORD id, bool on) {
@@ -1440,13 +1582,19 @@ void MainWindow::UpdateStatusBar() {
         sync = StrId::StatusSyncScroll;
     else if (m_sync->ZoomSync())
         sync = StrId::StatusSyncZoom;
+    std::wstring syncText = Str(sync);
+    // The point count shows even with sync toggled off: a parked map must be
+    // visible, or clearing vs. merely unlocking would look identical.
+    if (m_sync->HasPoints())
+        syncText += Str(StrId::StatusSyncPtsPre) + std::to_wstring(m_sync->Points().size()) +
+                    Str(StrId::StatusSyncPtsPost);
 
     // Layout: [L page][L zoom][filler][sync centered][R page][R zoom][filler].
     const std::wstring texts[7] = {
         pageText(*m_left, StrId::StatusLeftPrefix, StrId::StatusLeftNoDoc),
         zoomText(*m_left),
         std::wstring(),
-        Str(sync),
+        std::move(syncText),
         pageText(*m_right, StrId::StatusRightPrefix, StrId::StatusRightNoDoc),
         zoomText(*m_right),
         std::wstring(),
@@ -1533,13 +1681,60 @@ void MainWindow::SwitchLanguage(Lang lang) {
 }
 
 void MainWindow::ShowStatusMessage(StrId id) {
+    ShowStatusMessage(std::wstring(Str(id)));
+}
+
+void MainWindow::ShowStatusMessage(std::wstring text) {
     if (!m_status)
         return;
     // Borrow the sync part (index 3) for a transient message; the timer
     // restores it.
-    m_statusText[3] = Str(id);
+    m_statusText[3] = std::move(text);
     SendMessageW(m_status, SB_SETTEXTW, 3, reinterpret_cast<LPARAM>(m_statusText[3].c_str()));
     SetTimer(m_hwnd, kStatusMsgTimer, 4000, nullptr);
+}
+
+void MainWindow::GenerateSyncPointsFromBookmarks(bool interactive) {
+    if (!m_left->HasDocument() || !m_right->HasDocument())
+        return; // accelerator/reload-proofing; the menu item is greyed
+    std::vector<SyncPoint> candidates;
+    for (const auto& [li, ri] : MatchOutlineNumberings(m_left->Outline(), m_right->Outline())) {
+        const Document::OutlineItem& l = m_left->Outline()[static_cast<size_t>(li)];
+        const Document::OutlineItem& r = m_right->Outline()[static_cast<size_t>(ri)];
+        if (l.targetPage < 0 || r.targetPage < 0)
+            continue;
+        std::wstring label;
+        if (const auto key = ParseOutlineNumbering(l.title))
+            label = FormatOutlineNumbering(*key);
+        candidates.push_back(SyncPoint{l.targetPage, r.targetPage, false, std::move(label)});
+    }
+    if (candidates.empty()) {
+        if (interactive)
+            ShowStatusMessage(StrId::SyncPtsNoMatch);
+        return;
+    }
+    const size_t n = m_sync->SetGeneratedPoints(std::move(candidates));
+    // interactive = the menu command: generating a map means wanting it
+    // applied, so it also turns scroll sync on and realigns at once. The
+    // post-reload regeneration must do neither: a LaTeX rebuild must not
+    // flip the lock nor yank the view the reload just preserved. Nothing
+    // inserted (all candidates blocked by manual points) moves nothing.
+    if (interactive && n > 0) {
+        if (!m_sync->ScrollSync()) {
+            m_sync->SetScrollSync(true);
+            UpdateTitle(); // "[scroll sync]" tag, like the F7 handler
+        }
+        m_sync->RealignFollower(*FocusedPane());
+    }
+    UpdateCommandUi();
+    UpdateStatusBar();
+    // Last: the realign/update traffic above rewrites the sync cell, which
+    // would wipe the transient count the moment it was shown. The post-reload
+    // path stays silent: it runs inside the view-changed handler whose
+    // trailing UpdateStatusBar would eat the message anyway, and the
+    // re-derived count is already visible in the sync cell.
+    if (interactive)
+        ShowStatusMessage(Str(StrId::SyncPtsGenerated) + std::to_wstring(n));
 }
 
 void MainWindow::LaunchInverseSearch(const SyncTexIndex::InverseHit& hit) {
@@ -1938,6 +2133,26 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             UpdateCommandUi();
             UpdateStatusBar();
             return 0;
+        // The sync-point handlers re-check their preconditions: accelerators
+        // fire regardless of the menu items' greyed state.
+        case IDC_ADD_SYNC_POINT:
+            if (m_sync->AddPointHere()) {
+                UpdateCommandUi();
+                UpdateStatusBar();
+            }
+            return 0;
+        case IDC_SYNC_FROM_BOOKMARKS:
+            GenerateSyncPointsFromBookmarks(true);
+            return 0;
+        case IDC_SYNC_POINTS:
+            if (m_sync->HasPoints())
+                ShowSyncPointsDialog();
+            return 0;
+        case IDC_CLEAR_SYNC_POINTS:
+            m_sync->ClearPoints();
+            UpdateCommandUi();
+            UpdateStatusBar();
+            return 0;
         case IDC_FIND_SHOW:
             ShowFindBar();
             return 0;
@@ -2227,7 +2442,7 @@ void MainWindow::Layout() {
         // last one also hosts the size grip).
         const int pageW = MulDiv(170, m_dpi, 96);
         const int zoomW = MulDiv(60, m_dpi, 96);
-        const int syncW = MulDiv(150, m_dpi, 96);
+        const int syncW = MulDiv(190, m_dpi, 96); // fits "Sync: scroll+zoom · 12 pts"
         int parts[7];
         parts[0] = pageW;
         parts[1] = parts[0] + zoomW;

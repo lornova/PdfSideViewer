@@ -329,15 +329,50 @@ Design:
 - **Relative-fraction mode** (optional): `fraction = scrollY / (canvasHeight − viewportHeight)`
   mirrored to the other pane; useful for grossly different documents, known to drift locally.
 - **Temporary unlock**: holding a modifier (Alt; Shift is taken by horizontal wheel scroll)
-  scrolls only the focused pane while the anchor tracks each adjustment, so the alignment crafted
-  under Alt is exactly what subsequent synced scrolls preserve. Re-enabling sync always
-  recaptures.
+  scrolls only the focused pane. While the sync-point map is EMPTY the anchor tracks each
+  adjustment, so the alignment crafted under Alt is exactly what subsequent synced scrolls
+  preserve, and re-enabling sync recaptures. With a non-empty map the map is authoritative:
+  Alt is a transient peek whose deviation is reabsorbed by the next locked scroll (the
+  permanent fix is Alt-adjust followed by "Add Sync Point Here"), and re-enabling sync
+  recaptures nothing.
 - **Reentrancy guard**: an `isSyncing` flag suppresses feedback loops when programmatically
   scrolling the sibling.
 - **Zoom sync**: independent toggle; applies the same zoom command (ratio-preserving) to both.
-- Future (v1.x): WinMerge-style manual sync points ("align this page with that page") as a
-  piecewise-linear position map; the anchor model is the degenerate single-segment case, so the
-  data model already fits.
+- **Sync points** (WinMerge-style, implemented): an ordered list of WHOLE-page pairs
+  (`SyncPoint{left, right}` in `SyncController`) turns the single anchor into a
+  piecewise-constant INTEGER delta. Alignment is per page: one page of one document is one page
+  of the other, like WinMerge's line map, never a fractional scroll offset (the within-page
+  fraction transfers unchanged, an interpolated map would rubber-band the scroll speed instead).
+  Between two points the follower is clamped just short of its next point (a sub-page epsilon
+  mirroring `SyncPosition`'s paged-mode cap), so it WAITS at the end of its own section while
+  the leader crosses pages that have no counterpart and resumes seamlessly when the leader
+  reaches the point; leading from the short side jumps the surplus pages in one block instead.
+  The two directions are not exact inverses at segment boundaries: the reentrancy guard stops
+  the echo, and every scroll re-drives the follower from the leader's authoritative position.
+  Invariants: points strictly increase in BOTH coordinates; a newly added manual point wins
+  (conflicting points are removed); the map is cleared on every (re)open; emptying the map
+  recaptures the plain anchor at the current positions; the EMPTY map degenerates to the plain
+  anchor, bit-identical to the modes above. Commands: Add Sync Point Here (Shift+F7, captures
+  the panes' current pages), Sync Points... (list/remove dialog), Clear Sync Points
+  (Ctrl+Shift+F7).
+- **Bookmark generation**: "Sync Points from Bookmarks" parses a hierarchical numeric key from
+  each outline title (`util/OutlineNumbering`: decimal multi-level prefix like "1.2.3", with an
+  optional verbal intro word "Capitolo/Cap/Chapter/Ch/Sezione/Sez/Section/Sec/Parte/Part/§";
+  ASCII digits only, first occurrence per key and per side wins) and emits one point per key
+  present in BOTH outlines; only the bookmark's target page matters (alignment is whole-page).
+  Candidates that violate double monotonicity (out-of-order bookmarks) are greedily dropped.
+  Generation replaces previously generated points, keeps manual ones (manual wins on conflict),
+  turns scroll sync on and realigns the follower once. After an auto-reload of the SAME path,
+  MainWindow re-derives generated points from the fresh outline (the LaTeX rebuild loop must
+  not lose the map on every compile); manual points are dropped there: they reference pages the
+  rebuild may have moved arbitrarily. The regen cue is PARKED in the controller
+  (`AutoRegenPending`), not derived from the map at the moment of the event: the map is already
+  cleared by the first `DocumentOpened` of a both-panes reload, and a failed intermediate
+  reload (broken half-written compile) fires `DocumentOpened` with no document - the parked cue
+  rides both out and is cancelled only by a path change (open/close/swap) or an explicit clear.
+- Future: per-pair persistence of sync points in settings.ini; scrollbar tick marks at point
+  positions; WinMerge-style rendered gaps (phantom pages in the layout); mirroring the points
+  on Swap Panes.
 
 **Search** (per pane, find bar targets the focused pane):
 

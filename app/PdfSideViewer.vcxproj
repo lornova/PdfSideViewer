@@ -91,6 +91,7 @@
     <ClCompile Include="src\util\DialogTemplate.cpp" />
     <ClCompile Include="src\util\FileWatcher.cpp" />
     <ClCompile Include="src\util\GlyphIcons.cpp" />
+    <ClCompile Include="src\util\OutlineNumbering.cpp" />
     <ClCompile Include="src\util\Settings.cpp" />
     <ClCompile Include="src\util\ShellIntegration.cpp" />
     <ClCompile Include="src\util\Strings.cpp" />
@@ -110,6 +111,7 @@
     <ClInclude Include="src\util\DialogTemplate.h" />
     <ClInclude Include="src\util\FileWatcher.h" />
     <ClInclude Include="src\util\GlyphIcons.h" />
+    <ClInclude Include="src\util\OutlineNumbering.h" />
     <ClInclude Include="src\util\Settings.h" />
     <ClInclude Include="src\util\ShellIntegration.h" />
     <ClInclude Include="src\util\Strings.h" />

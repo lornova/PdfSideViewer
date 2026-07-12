@@ -19,6 +19,13 @@ executable that starts instantly.
 - **Synchronized scrolling** (F7) with a delta anchor: align any page of one document with any
   page of the other and the offset is preserved; hold **Alt** to adjust one pane while keeping
   the lock. Optional **zoom sync** (Ctrl+F7).
+- **Sync points** (WinMerge-style, Sync menu): pin whole-page pairs ("page 5 left = page 4
+  right"). Between points the panes scroll page-for-page; where one document has extra pages
+  the other waits at the end of its section and picks up again at the next point. Add a point
+  at the current alignment (Shift+F7), review and remove them in a dialog, clear them all
+  (Ctrl+Shift+F7), or **generate them from numbered bookmarks** ("1.2", "Chapter 3",
+  "Sezione 2.1"): numberings present in both documents become sync points, the rest is
+  skipped. Generated points survive auto-reload (re-derived from the fresh outline).
 - Full-document **text search** (Ctrl+F) with live highlighting and F3 navigation.
 - **Text selection** with the mouse (double-click = word), Ctrl+C copies Unicode text.
 - Clickable **links** (internal destinations and web URLs) and an **outline sidebar** (F9).
@@ -62,7 +69,8 @@ executable that starts instantly.
 | Ctrl+W | Close the focused pane's document |
 | Tab | Switch pane |
 | F7 / Ctrl+F7 | Toggle scroll sync / zoom sync |
-| Alt + scroll | Adjust one pane while synced (re-anchors) |
+| Shift+F7 / Ctrl+Shift+F7 | Add a sync point at the current alignment / clear sync points |
+| Alt + scroll | Adjust one pane while synced (re-anchors; with sync points the tweak is transient) |
 | Ctrl+F, F3, Shift+F3 | Find, next match, previous match |
 | Ctrl+C | Copy selected text |
 | F9 | Outline (bookmarks) sidebar |

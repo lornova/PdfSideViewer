@@ -64,6 +64,10 @@ handle turns the delete into delete-pending and the file stays visible for a mom
 instance at a time — and CHECK first: a foreign (user) instance receives FindWindow-posted
 commands; abort the test run if `Get-Process PdfSideViewer` is non-empty. The exe must always
 exit with code 0 after CloseMainWindow. Restore the user's clipboard if a test touches it.
+`scripts\test-sync-points.ps1` is the in-repo reference suite (sync points): it also encodes
+the PowerShell P/Invoke pitfalls — $null coerced to "" for string parameters (declare NULL-able
+FindWindow arguments as IntPtr) and the startup/dialog races (poll for children after
+FindWindow, wait for the goto dialog's prefill before writing to it).
 
 ## Architecture
 
@@ -88,9 +92,15 @@ deriving fit from the client width feeds back into scrollbar visibility and recu
 unboundedly.
 
 Sync (view/SyncController.\*): positions are exchanged in page units (pageIndex + fraction at
-viewport center), never pixels; the pairing is a delta anchor captured at lock time. This is the
-product's reason to exist (PDF Architect fails exactly here): never degrade sync to pixel
-offsets, and test sync changes with different page formats and different zoom levels per pane.
+viewport center), never pixels; the pairing is a delta anchor captured at lock time, optionally
+generalized by a list of WinMerge-style sync points (WHOLE-page pairs, piecewise-constant
+integer delta, follower clamped just short of its next point so it waits at section ends;
+strictly increasing in both coordinates; empty map = bit-identical plain-anchor behavior; Alt
+and re-lock recapture ONLY while the map is empty; map cleared on every DocumentOpened, auto
+points re-derived by MainWindow after a same-path reload). Auto-generation matches hierarchical
+numeric bookmark keys via util/OutlineNumbering. This is the product's reason to exist (PDF
+Architect fails exactly here): never degrade sync to pixel offsets, and test sync changes with
+different page formats and different zoom levels per pane.
 
 MainWindow owns the frame, menu bar (incl. MRU submenus: recent files + recent left/right
 pairs, recorded centrally on DocumentOpened, persisted in [mru-files]/[mru-pairs]), toolbar
@@ -149,7 +159,7 @@ SyncController, the outline, the status bar and the menu/toolbar checked state
   1025..1026 must stay contiguous for CheckMenuRadioItem; 1030+/1040+ are the MRU ranges,
   kMruMaxEntries slots each, dispatched as ranges in WM_COMMAND). Control ids live in a
   separate >= 2000 space (2001 page box, 2100+ Options dialog, 2201 goto dialog, 2300+ menu
-  band) so they can never collide with command dispatch.
+  band, 2400+ sync points dialog) so they can never collide with command dispatch.
 - Session settings are versionless: add keys with safe defaults, never repurpose existing
   ones. `[defaults]` holds the new-document defaults (scroll mode, zoom mode, sync locks)
   applied when session restore is off and to every fresh OpenDocument.

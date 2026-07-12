@@ -50,10 +50,15 @@ enum CommandId : WORD {
     IDC_MRU_FILE_FIRST = 1030,
     IDC_MRU_PAIR_FIRST = 1040,
     IDC_OPTIONS = 1049,
-    IDC_LOCK_TOOLBARS = 1050, // IE-style rebar lock (menu + rebar context menu)
+    IDC_LOCK_TOOLBARS = 1050,       // IE-style rebar lock (menu + rebar context menu)
+    IDC_ADD_SYNC_POINT = 1051,      // Shift+F7
+    IDC_SYNC_FROM_BOOKMARKS = 1052,
+    IDC_SYNC_POINTS = 1053,         // the view/remove dialog
+    IDC_CLEAR_SYNC_POINTS = 1054,   // Ctrl+Shift+F7
     // Control ids live in a separate >= 2000 space so they can never collide
     // with command dispatch: 2001 page box, 2100+ Options dialog, 2201 goto
-    // dialog, 2300+ the menu-band toolbar and its buttons (MenuBand.h).
+    // dialog, 2300+ the menu-band toolbar and its buttons (MenuBand.h), 2400+
+    // the sync-points dialog.
 };
 
 // SyncTeX forward search request, exchanged between processes via
@@ -136,6 +141,9 @@ private:
     static INT_PTR CALLBACK GotoDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam);
     void ShowOptionsDialog();
     static INT_PTR CALLBACK OptionsDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam);
+    void GenerateSyncPointsFromBookmarks(bool interactive);
+    void ShowSyncPointsDialog();
+    static INT_PTR CALLBACK SyncPointsDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam);
     BOOL HandleOpenDocumentCopyData(const COPYDATASTRUCT& cds);
     void RebuildMruMenus();
     void RecordMruFile(const std::wstring& path);
@@ -154,6 +162,7 @@ private:
     void RouteForwardSearch(ForwardSearchRequest req);
     void LaunchInverseSearch(const SyncTexIndex::InverseHit& hit);
     void ShowStatusMessage(StrId id);
+    void ShowStatusMessage(std::wstring text);
     void ApplySession(const AppSettings& session);
     void SaveSession() const;
     void CreateFindBar();
@@ -210,6 +219,11 @@ private:
     int m_contentTop = 0;
     int m_contentBottom = 0;
     std::wstring m_statusText[7]; // last SB_SETTEXT per part: skip no-op repaints
+
+    // Last DocumentOpened path per pane: an unchanged path = auto-reload, the
+    // cue to re-derive the bookmark sync points from the fresh outline.
+    std::wstring m_lastDocLeft;
+    std::wstring m_lastDocRight;
 
     // SyncTeX: inverse-search launch template and the forward request parked
     // until its document finishes opening (cold start, on-demand open, or a
