@@ -199,8 +199,9 @@ divider; double-click best-fits the width to the widest expanded item so the tre
 horizontal scrollbar), panes and splitter. Modal dialogs (Go to Page, Options) are
 built as in-memory `DLGTEMPLATE`s (`util/DialogTemplate.*`) for `DialogBoxIndirectParamW` — no
 .rc resources, free modality/Tab/Esc. Every user-visible string goes through `util/Strings.*`
-(an X-list keyed by `StrId` with English and Italian tables; English is the default, the
-choice persists in settings and a live switch rebuilds the `HMENU` and retitles the band).
+(an X-list keyed by `StrId` with English, Italian, German, French and Hungarian tables;
+English is the default, the choice persists in settings as a two-letter code and a live
+switch rebuilds the `HMENU` and retitles the band).
 Full screen (F11 / Alt+Enter, Esc exits) strips `WS_OVERLAPPEDWINDOW` and hides the WHOLE
 rebar plus the status bar without touching their persisted visibility flags ("View > Toolbar"
 only hides bands 1-2; the menu band always stays). Explorer integration (optional, Options or
@@ -385,12 +386,30 @@ Design:
   (Ctrl+Shift+F7).
 - **Bookmark generation**: "Sync Points from Bookmarks" parses a hierarchical key from each
   outline title (`util/OutlineNumbering`: multi-level prefix like "1.2.3", with an optional
-  verbal intro word "Capitolo/Cap/Chapter/Ch/Sezione/Sez/Section/Sec/Parte/Part/Appendice/
-  Appendix/Annex/Allegato/§"; ASCII digits only; SINGLE-letter components encode negative,
+  verbal intro word across five languages - IT/EN "Capitolo/Cap/Chapter/Ch/Sezione/Sez/
+  Section/Sec/Parte/Part/Appendice/Appendix/Annex/Allegato", DE "Kapitel/Kap/Abschnitt/
+  Abschn/Teil/Anhang/Anh/Anlage", FR "Chapitre/Chap/Sect/Partie/Annexe" (Section/Sec/
+  Appendice shared with IT/EN), HU "Fejezet/Fej/Szakasz/Rész/Függelék/Melléklet", plus
+  "§"; the intro-word tokenizer is Unicode-aware AND locale-independent (GetStringTypeW +
+  invariant-locale lowercasing, never the user-language Char* APIs, so matching cannot
+  change with the host Windows language) and accented Hungarian words survive; ASCII
+  digits only; SINGLE-letter components encode negative,
   -1 = A, so "Appendice A" and "A.1" pair without colliding with numeric keys, while a lone
-  letter without an intro word is rejected as a plain word). Titles that parse to no key at
+  letter without an intro word is rejected as a plain word EXCEPT under an appendix heading:
+  the matcher passes `allowLoneLetter` for sub-items whose parent canonicalizes to the
+  "appendix" class, so LaTeX-style appendix labels "A Foo"/"B Bar"/"C Baz" pair across
+  translations by their language-neutral letter). Titles that parse to no key at
   all pair on the TITLE channel instead: trimmed case-insensitive whole-title equality
-  ("Sommario", "Indice analitico"); mixed-language pairs simply never title-match. First
+  at the SAME outline depth ("Sommario", "Indice analitico"; numeric keys carry their
+  own hierarchy, canonical titles do not - without the depth guard a top-level
+  "Introduzione" could anchor to a chapter's nested unnumbered "Introduction", and
+  real translations share the outline structure, so requiring equal depth costs
+  nothing), plus a cross-language canonicalization of common
+  front/back-matter section names across Italian, English, German, French and Hungarian
+  (`CanonicalTitleKey`), so "Indice"/"Contents"/"Inhaltsverzeichnis"/"Table des matières"/
+  "Tartalomjegyzék" collapse to one class. Italian "Indice" (front summary) and English/German "Index" (back
+  analytical index) are false friends kept in DIFFERENT classes on purpose; unrecognized
+  titles fall back to their own text, so same-language exact pairs are unaffected. First
   occurrence per key/title and per side wins, and one point is emitted per key present in
   BOTH outlines; only the bookmark's target page matters (alignment is whole-page).
   Candidates that violate double monotonicity (out-of-order bookmarks, and deep subsections

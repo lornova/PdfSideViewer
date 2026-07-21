@@ -3,13 +3,26 @@ param([string]$OutDir = "D:\Progetti\PdfSideViewer\testdata")
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
+# PDF text-string form of a bookmark title: ASCII stays a literal (...),
+# anything else becomes a UTF-16BE hex string with BOM (<FEFF...>) - the only
+# PDF encoding that covers all accented titles, and it exercises the viewer's
+# UTF-16 outline decoding on the way.
+function Format-PdfText([string]$s) {
+    if ($s -notmatch '[^\x20-\x7E]') { return "($s)" }
+    $hex = -join ([System.Text.Encoding]::BigEndianUnicode.GetBytes($s) |
+                  ForEach-Object { $_.ToString('X2') })
+    return "<FEFF$hex>"
+}
+
 function New-TestPdf {
     param([string]$Path, [array]$Pages, [switch]$WithLinks, [switch]$WithPageLabels,
           [array]$Outline)
     # Pages: @{W=..; H=..; Label=..}
-    # Outline: @{Title=..; Page=<0-based>} - a FLAT bookmark chain with /Fit
-    # destinations (page-top targets, deterministic for the sync-point tests).
-    # Not combinable with -WithLinks, which hardcodes its own outline.
+    # Outline: @{Title=..; Page=<0-based>[; Depth=<0-based>]} - a preorder
+    # bookmark list with /Fit destinations (page-top targets, deterministic
+    # for the sync-point tests); Depth (default 0) nests the item under the
+    # nearest preceding shallower one. Not combinable with -WithLinks, which
+    # hardcodes its own outline.
 
     $n = $Pages.Count
     $objs = @()
@@ -63,13 +76,48 @@ function New-TestPdf {
     if ($Outline -and -not $WithLinks) {
         $o = $fontObj + 1
         $cnt = $Outline.Count
-        $objs += "$o 0 obj`n<< /Type /Outlines /First $($o + 1) 0 R /Last $($o + $cnt) 0 R /Count $cnt >>`nendobj`n"
+        # Tree wiring from the preorder Depth fields: parent = the nearest
+        # preceding shallower item, siblings = same depth under the same
+        # parent. All-zero depths reproduce the original flat chain.
+        $depth = @(); foreach ($item in $Outline) {
+            $depth += if ($null -ne $item.Depth) { [int]$item.Depth } else { 0 }
+        }
+        $parent = @(-1) * $cnt
+        $prevSib = @(-1) * $cnt
+        $nextSib = @(-1) * $cnt
+        $lastAt = @{}
+        for ($k = 0; $k -lt $cnt; $k++) {
+            $d = $depth[$k]
+            foreach ($dd in @($lastAt.Keys | Where-Object { $_ -gt $d })) { $lastAt.Remove($dd) }
+            $parent[$k] = if ($d -gt 0 -and $lastAt.ContainsKey($d - 1)) { $lastAt[$d - 1] }
+                          else { -1 }
+            if ($lastAt.ContainsKey($d) -and $parent[$lastAt[$d]] -eq $parent[$k]) {
+                $prevSib[$k] = $lastAt[$d]
+                $nextSib[$lastAt[$d]] = $k
+            }
+            $lastAt[$d] = $k
+        }
+        $top = @(); $childrenOf = @{}
+        for ($k = 0; $k -lt $cnt; $k++) {
+            if ($parent[$k] -lt 0) { $top += $k }
+            else {
+                if (-not $childrenOf.ContainsKey($parent[$k])) { $childrenOf[$parent[$k]] = @() }
+                $childrenOf[$parent[$k]] += $k
+            }
+        }
+        $objs += "$o 0 obj`n<< /Type /Outlines /First $($o + 1 + $top[0]) 0 R /Last $($o + 1 + $top[-1]) 0 R /Count $($top.Count) >>`nendobj`n"
         for ($k = 0; $k -lt $cnt; $k++) {
             $item = $Outline[$k]
             $pageObj = 3 + 2 * $item.Page
-            $prev = if ($k -gt 0) { " /Prev $($o + $k) 0 R" } else { '' }
-            $next = if ($k -lt $cnt - 1) { " /Next $($o + $k + 2) 0 R" } else { '' }
-            $objs += "$($o + 1 + $k) 0 obj`n<< /Title ($($item.Title)) /Parent $o 0 R$prev$next /Dest [$pageObj 0 R /Fit] >>`nendobj`n"
+            $par = if ($parent[$k] -ge 0) { $o + 1 + $parent[$k] } else { $o }
+            $refs = " /Parent $par 0 R"
+            if ($prevSib[$k] -ge 0) { $refs += " /Prev $($o + 1 + $prevSib[$k]) 0 R" }
+            if ($nextSib[$k] -ge 0) { $refs += " /Next $($o + 1 + $nextSib[$k]) 0 R" }
+            if ($childrenOf.ContainsKey($k)) {
+                $c = $childrenOf[$k]
+                $refs += " /First $($o + 1 + $c[0]) 0 R /Last $($o + 1 + $c[-1]) 0 R /Count $($c.Count)"
+            }
+            $objs += "$($o + 1 + $k) 0 obj`n<< /Title $(Format-PdfText $item.Title)$refs /Dest [$pageObj 0 R /Fit] >>`nendobj`n"
         }
     }
     if ($WithPageLabels) {
@@ -154,9 +202,19 @@ New-TestPdf -Path (Join-Path $OutDir 'sync-a2.pdf') -Pages @(
     @{Title='3 Appendice'; Page=5}
 )
 # Extended-matching pair (test-sync-points.ps1 phase 5): third-level keys on
-# DISTINCT pages, title-only matches (Sommario), letter components (Appendice
-# A/B, A.1/A.2). Expected map: 10 points, the last one (9,11) 0-based; the
-# unmatched titles differ on purpose.
+# DISTINCT pages, title-only matches, letter components (Appendice A/B,
+# A.1/A.2). Expected map: 10 points, the last one (9,11) 0-based; the
+# unmatched titles differ on purpose. Depth trap: d's TOP-LEVEL 'Note' and
+# e's 'Notes' NESTED under 'Materiale extra' share the "notes" canonical
+# class and the candidate (10,13) would be monotonic after (9,11) - only the
+# matcher's equal-depth rule keeps it out of the map (10 points, not 11).
+# Two of e's titles are ACCENTED Hungarian (UTF-16BE outline strings, built
+# ASCII-safe below): 'Sommario'<->'Tartalomjegyzek'(+accent) pairs via the
+# "toc" canonical class and 'Appendice B'<->'Fuggelek B'(+accents) via the
+# accented intro word, pinning the locale-independent tokenizer/lowercasing
+# on non-ASCII input.
+$huToc = "Tartalomjegyz$([char]0xE9)k"       # Tartalomjegyzék
+$huAppB = "F$([char]0xFC)ggel$([char]0xE9)k B" # Függelék B
 $syncDOutline = @(
     @{Title='Sommario'; Page=0},
     @{Title='1 Introduzione'; Page=1},
@@ -168,10 +226,11 @@ $syncDOutline = @(
     @{Title='A.1 Notazione'; Page=7},
     @{Title='A.2 Simboli'; Page=8},
     @{Title='Appendice B'; Page=9},
+    @{Title='Note'; Page=10},
     @{Title='Solo qui'; Page=10}
 )
 $syncEOutline = @(
-    @{Title='Sommario'; Page=0},
+    @{Title=$huToc; Page=0},
     @{Title='1 Introduzione'; Page=1},
     @{Title='2 Corpo'; Page=2},
     @{Title='2.2.1 Dettaglio'; Page=3},
@@ -180,14 +239,16 @@ $syncEOutline = @(
     @{Title='Appendice A'; Page=6},
     @{Title='A.1 Notazione'; Page=7},
     @{Title='A.2 Simboli'; Page=8},
-    @{Title='Appendice B'; Page=11},
-    @{Title='Solo la'; Page=9}
+    @{Title=$huAppB; Page=11},
+    @{Title='Solo la'; Page=9},
+    @{Title='Materiale extra'; Page=12},
+    @{Title='Notes'; Page=13; Depth=1}
 )
 New-TestPdf -Path (Join-Path $OutDir 'sync-d.pdf') -Outline $syncDOutline -Pages @(
     1..12 | ForEach-Object { @{W=595; H=842; Label="SD - Pagina $_"} }
 )
 New-TestPdf -Path (Join-Path $OutDir 'sync-e.pdf') -Outline $syncEOutline -Pages @(
-    1..12 | ForEach-Object { @{W=612; H=792; Label="SE - Pagina $_"} }
+    1..14 | ForEach-Object { @{W=612; H=792; Label="SE - Pagina $_"} }
 )
 # No numbered bookmarks at all: the zero-match partner.
 New-TestPdf -Path (Join-Path $OutDir 'sync-c.pdf') -Pages @(

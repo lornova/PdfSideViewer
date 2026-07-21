@@ -157,13 +157,15 @@ SyncController, the outline, the status bar and the menu/toolbar checked state
 
 - clang-format-ish 100 columns, 4 spaces; comments explain constraints, not what the next line
   does. The maintainer communicates in Italian.
-- Every user-visible string goes through `util/Strings.h` (X-list with English and Italian
-  tables; English is the default and what E2E tests assert against). Engine-level error strings
+- Every user-visible string goes through `util/Strings.h` (X-list with per-language tables:
+  English, Italian, German, French, Hungarian, in Lang-enum order = "en"/"it"/"de"/"fr"/"hu"
+  code order = language-menu id order; English is the default and what E2E tests assert
+  against). Engine-level error strings
   (engine/Document.cpp) stay English: workers cache them in result structs.
 - `enum CommandId` in MainWindow.h is the single registry of WM_COMMAND/accelerator ids
-  (menu, toolbar and accelerators all reuse the same ids; 1017..1019, 1023..1024 and
-  1025..1026 and 1056..1058 must stay contiguous for CheckMenuRadioItem; 1030+/1040+ are the
-  MRU ranges,
+  (menu, toolbar and accelerators all reuse the same ids; 1017..1019, 1025..1026,
+  1056..1058 and 1059..1063 (the language group, in Lang-enum order; 1023..1024 retired)
+  must stay contiguous for CheckMenuRadioItem; 1030+/1040+ are the MRU ranges,
   kMruMaxEntries slots each, dispatched as ranges in WM_COMMAND). Control ids live in a
   separate >= 2000 space (2001 page box, 2100+ Options dialog, 2201 goto dialog, 2300+ menu
   band, 2400+ sync points dialog) so they can never collide with command dispatch.

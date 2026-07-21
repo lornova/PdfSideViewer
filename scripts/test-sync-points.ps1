@@ -502,8 +502,12 @@ try {
 
     # ---------------------------------------------------------------- phase 5
     # Extended matching (sync-d | sync-e): deep keys (2.2.1) on distinct
-    # pages, title-only pairs (Sommario), letter components (Appendice A/B,
-    # A.1/A.2). All ten channels matching is pinned by the TWO-DIGIT count in
+    # pages, title-only pairs (d's 'Sommario' <-> e's ACCENTED
+    # 'Tartalomjegyzek' via the "toc" canonical class), letter components
+    # (d's Appendice A/B, A.1/A.2; e spells B's heading with the accented
+    # intro word 'Fuggelek', so the pair also pins the locale-independent
+    # tokenizer/lowercasing on the non-ASCII, UTF-16-encoded titles). All ten
+    # channels matching is pinned by the TWO-DIGIT count in
     # the status cell (any missing channel drops to one digit = length 20);
     # the Appendice B goto pins the letter point behaviorally (delta +2 of
     # the last point (9,11); without it the previous segment's delta 0 would
@@ -517,6 +521,15 @@ try {
         'all 10 points generated (third level + titles + letters all matched)'
     Invoke-GotoPage $v $v.Left 10  # 0-based 9 = "Appendice B", last point (9,11)
     Assert-PaneAt $v $v.Right '12' 'letter point drives left Appendice B onto right p12'
+    # Depth guard regression: d's TOP-LEVEL 'Note' (0-based p10) and e's
+    # 'Notes' (NESTED under 'Materiale extra', 0-based p13) share the "notes"
+    # canonical class and the candidate (10,13) would be monotonic after
+    # (9,11), so only the matcher's equal-depth rule keeps it out. The count
+    # assert above cannot see it ('11 pts' has the same status length), hence
+    # the behavioral pin: with the false point left p11 would drag the right
+    # pane to p14; the honest +2 tail segment lands it on p13.
+    Invoke-GotoPage $v $v.Left 11
+    Assert-PaneAt $v $v.Right '13' 'depth guard: top-level Note does not pair with nested Notes'
     Stop-Viewer $v
 
     # ---------------------------------------------------------------- phase 6

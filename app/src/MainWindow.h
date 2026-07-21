@@ -36,9 +36,8 @@ enum CommandId : WORD {
     IDC_FULLSCREEN = 1020,  // F11 / Alt+Enter
     IDC_ABOUT = 1021,
     IDC_EXIT = 1022,
-    // Contiguous: CheckMenuRadioItem spans the language radio group.
-    IDC_LANG_ENGLISH = 1023,
-    IDC_LANG_ITALIAN = 1024,
+    // 1023..1024 held the two-language radio group; when it grew to five it
+    // moved to 1059+ (1025 landlocks it here). The old slots stay retired.
     // Contiguous: CheckMenuRadioItem spans the scroll-mode radio group.
     IDC_SCROLL_CONTINUOUS = 1025,
     IDC_SCROLL_PAGED = 1026, // Ctrl+5 (pane OnKeyDown, like Ctrl+2/3; NOT an accelerator)
@@ -61,6 +60,13 @@ enum CommandId : WORD {
     IDC_TOOLBAR_TEXT_BELOW = 1056,
     IDC_TOOLBAR_TEXT_RIGHT = 1057,
     IDC_TOOLBAR_TEXT_NONE = 1058,
+    // Contiguous AND in Lang-enum order: CheckMenuRadioItem spans the group
+    // and WM_COMMAND maps id - IDC_LANG_ENGLISH straight to a Lang.
+    IDC_LANG_ENGLISH = 1059,
+    IDC_LANG_ITALIAN = 1060,
+    IDC_LANG_GERMAN = 1061,
+    IDC_LANG_FRENCH = 1062,
+    IDC_LANG_HUNGARIAN = 1063,
     // Control ids live in a separate >= 2000 space so they can never collide
     // with command dispatch: 2001 page box, 2100+ Options dialog, 2201 goto
     // dialog, 2300+ the menu-band toolbar and its buttons (MenuBand.h), 2400+

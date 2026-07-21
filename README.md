@@ -27,8 +27,12 @@ executable that starts instantly.
   page and **ticks** along the right edge (solid = manual, faded = generated). Add a point at
   the current alignment (Shift+F7), review and remove them in a dialog, clear them all
   (Ctrl+Shift+F7), or **generate them from bookmarks**: numberings present in both documents
-  become sync points ("1.2", "Chapter 3", "2.2.1", "Appendice A", "A.1"), unnumbered
-  bookmarks pair by identical title ("Sommario", "Indice analitico"), the rest is skipped.
+  become sync points ("1.2", "2.2.1", "A.1", or with a verbal prefix in Italian, English,
+  German, French or Hungarian such as "Chapter 3", "Kapitel 3", "Chapitre 3", "Fejezet 3",
+  "Appendice A"), lettered appendix sub-items ("A ...", "B ...") pair by their letter, and
+  unnumbered bookmarks pair by title at the same outline depth, matching common section
+  names across the same five languages ("Indice" = "Contents" = "Inhaltsverzeichnis" =
+  "Table des matières" = "Tartalomjegyzék"), the rest is skipped.
   Generated points survive auto-reload (re-derived from the fresh outline), and each pair's
   points are remembered across sessions: reopening the same two documents brings its manual
   points back and re-derives the generated ones.
@@ -49,7 +53,8 @@ executable that starts instantly.
   narrow), plus the status bar (left pane info left, right pane info right, sync state
   centered), full screen (F11 / Alt+Enter), a width-adjustable outline sidebar (drag the
   divider; double-click fits it to the widest bookmark, removing the horizontal scroll),
-  recent files and recent left+right pairs, English/Italian UI.
+  recent files and recent left+right pairs, UI in English, Italian, German, French and
+  Hungarian.
 - **Pane headers**: an optional strip above each pane shows the open PDF's file name (or full
   path) and doubles as the active-pane cue - the focused pane's header carries an accent underline
   along the bottom edge, the other stays plain. Toggle the header and the name/path choice in the

@@ -241,7 +241,7 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     // WM_CREATE Layout. A command line only overrides the documents; the UI
     // preferences always apply.
     const AppSettings session = AppSettings::Load();
-    SetUiLanguage(session.language == L"it" ? Lang::Italian : Lang::English);
+    SetUiLanguage(LangFromCode(session.language));
     m_toolbarVisible = session.toolbar;
     m_statusVisible = session.statusbar;
     m_outlineVisible = session.outline;
@@ -568,7 +568,7 @@ void MainWindow::SaveSession() const {
     s.toolbar = m_toolbarVisible;
     s.statusbar = m_statusVisible;
     s.outline = m_outlineVisible;
-    s.language = UiLanguage() == Lang::Italian ? L"it" : L"en";
+    s.language = LangCode(UiLanguage());
     s.synctexInverse = m_synctexInverse;
     s.mruFiles = m_mruFiles;
     s.mruPairs = m_mruPairs;
@@ -613,6 +613,9 @@ HMENU MainWindow::BuildMenuBar() {
     HMENU lang = CreatePopupMenu();
     append(lang, IDC_LANG_ENGLISH, StrId::MenuLangEnglish);
     append(lang, IDC_LANG_ITALIAN, StrId::MenuLangItalian);
+    append(lang, IDC_LANG_GERMAN, StrId::MenuLangGerman);
+    append(lang, IDC_LANG_FRENCH, StrId::MenuLangFrench);
+    append(lang, IDC_LANG_HUNGARIAN, StrId::MenuLangHungarian);
 
     HMENU view = CreatePopupMenu();
     append(view, IDC_TOGGLE_TOOLBAR, StrId::MenuToolbar);
@@ -1457,7 +1460,9 @@ void MainWindow::ShowOptionsDialog() {
                    Str(StrId::OptWheelLines));
     dlg.AddControl(DialogTemplate::kEdit, ES_NUMBER | ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
                    0, 200, 230, 48, 13, kOptWheelId, L"");
-    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 7, 267, 120, 14,
+    // 138 wide (up to the OK button): the German label needs more than the
+    // 120 the English one suggests; keep new translations within ~130 DLU.
+    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 7, 267, 138, 14,
                    kOptClearMruId, Str(StrId::OptClearRecent));
     dlg.AddControl(DialogTemplate::kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 149, 267, 50, 14,
                    IDOK, Str(StrId::DlgOk));
@@ -1845,9 +1850,8 @@ void MainWindow::UpdateCommandUi() {
                                ? IDC_SCROLL_PAGED
                                : IDC_SCROLL_CONTINUOUS,
                            MF_BYCOMMAND);
-        CheckMenuRadioItem(m_menu, IDC_LANG_ENGLISH, IDC_LANG_ITALIAN,
-                           UiLanguage() == Lang::Italian ? IDC_LANG_ITALIAN : IDC_LANG_ENGLISH,
-                           MF_BYCOMMAND);
+        CheckMenuRadioItem(m_menu, IDC_LANG_ENGLISH, IDC_LANG_HUNGARIAN,
+                           IDC_LANG_ENGLISH + static_cast<UINT>(UiLanguage()), MF_BYCOMMAND);
         const auto enable = [this](UINT id, bool on) {
             EnableMenuItem(m_menu, id, MF_BYCOMMAND | (on ? MF_ENABLED : MF_GRAYED));
         };
@@ -2795,10 +2799,11 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             ToggleFullScreen();
             return 0;
         case IDC_LANG_ENGLISH:
-            SwitchLanguage(Lang::English);
-            return 0;
         case IDC_LANG_ITALIAN:
-            SwitchLanguage(Lang::Italian);
+        case IDC_LANG_GERMAN:
+        case IDC_LANG_FRENCH:
+        case IDC_LANG_HUNGARIAN:
+            SwitchLanguage(static_cast<Lang>(LOWORD(wParam) - IDC_LANG_ENGLISH));
             return 0;
         case IDC_ABOUT:
             ShowAboutBox();
