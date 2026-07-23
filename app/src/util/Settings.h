@@ -69,7 +69,7 @@ struct AppSettings {
     int defZoomMode = 2;   // PaneWindow::ZoomMode (0 manual, 1 fit width, 2 fit page)
     bool defScrollSync = true;
     bool defZoomSync = true;
-    std::wstring language = L"en"; // "en"/"it"/"de"/"fr"/"hu"; anything else falls back to en
+    std::wstring language = L"en"; // Strings.h kCodes ("en".."sv"); anything else falls back to en
     // SyncTeX inverse-search launch template: %f = absolute .tex path,
     // %l = 1-based line. A "://" marks a URI (ShellExecute), anything else is
     // a command line. Default targets VS Code's protocol handler.

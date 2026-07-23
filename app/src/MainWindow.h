@@ -67,6 +67,15 @@ enum CommandId : WORD {
     IDC_LANG_GERMAN = 1061,
     IDC_LANG_FRENCH = 1062,
     IDC_LANG_HUNGARIAN = 1063,
+    IDC_LANG_UKRAINIAN = 1064,
+    IDC_LANG_ROMANIAN = 1065,
+    IDC_LANG_PORTUGUESE = 1066,
+    IDC_LANG_GREEK = 1067,
+    IDC_LANG_SPANISH = 1068,
+    IDC_LANG_POLISH = 1069,
+    IDC_LANG_DUTCH = 1070,
+    IDC_LANG_CZECH = 1071,
+    IDC_LANG_SWEDISH = 1072,
     // Control ids live in a separate >= 2000 space so they can never collide
     // with command dispatch: 2001 page box, 2100+ Options dialog, 2201 goto
     // dialog, 2300+ the menu-band toolbar and its buttons (MenuBand.h), 2400+

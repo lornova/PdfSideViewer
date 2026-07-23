@@ -143,15 +143,24 @@ void SyncController::DriveFollower(PaneWindow& leader, PaneWindow& follower) {
 double SyncController::MapTarget(bool leftLeads, double pos) const {
     // Piecewise-constant integer delta: last point whose leading coordinate
     // <= pos rules the segment (before the first point its delta
-    // extrapolates). The follower is clamped just short of its NEXT point
-    // (same sub-page epsilon SyncPosition uses in paged mode), so it waits on
-    // the last page of its own section while the leader crosses pages with no
-    // counterpart, and resumes seamlessly when the leader reaches the point;
-    // leading from the short side instead jumps the surplus in one block. The
-    // two directions are therefore not exact inverses: m_applying stops the
-    // echo, and every scroll re-drives the follower from the leader's
-    // authoritative position anyway.
-    constexpr double kNextPointEps = 0.0001;
+    // extrapolates). The follower is clamped just short of its NEXT point, so
+    // it waits on the last page of its own section while the leader crosses
+    // pages with no counterpart, and resumes seamlessly when the leader
+    // reaches the point; leading from the short side instead jumps the
+    // surplus in one block. The two directions are therefore not exact
+    // inverses: m_applying stops the echo, and every scroll re-drives the
+    // follower from the leader's authoritative position anyway.
+    //
+    // The epsilon exists to ATTRIBUTE the wait position to the section's last
+    // page, and page attribution happens after a page-fraction -> pixel ->
+    // page round trip (ScrollToSyncPosition quantizes the scroll to whole
+    // pixels, SyncPosition reads the page back under the viewport center), so
+    // it must survive that quantization: a sub-pixel epsilon parks the center
+    // ON the page boundary and the counter shows the NEXT section's first
+    // page on some DPI/zoom combinations (seen at 96-DPI RDP metrics). 1% of
+    // a page stays >= 1px down to ~100px page heights and is still visually
+    // "the end of the page".
+    constexpr double kNextPointEps = 0.01;
     const auto lead = [leftLeads](const SyncPoint& p) { return leftLeads ? p.left : p.right; };
     const auto follow = [leftLeads](const SyncPoint& p) { return leftLeads ? p.right : p.left; };
     const auto next = std::upper_bound(

@@ -29,6 +29,11 @@ msbuild PdfSideViewer.sln -p:Configuration=Release -p:Platform=x64 -m
 MSBuild lives at `C:\Program Files\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe`
 (not on PATH). Output: `build\<platform>\<config>\PdfSideViewer.exe` (single static exe).
 `scripts\make-release.ps1 -Platform x64` zips a portable release.
+`scripts\make-installer.ps1` compiles `scripts\PdfSideViewer.iss` (Inno Setup 6, UTF-8 BOM
+required by the accented [CustomMessages]) into a per-user winget-ready installer; version
+read from resource.h. Inno gotcha: Check params on [UninstallRun] are evaluated at SETUP
+time, so conditional uninstall logic lives in CurUninstallStepChanged instead (the verbs
+are removed only if they point into {app}: a portable/dev copy may own the same HKCU keys).
 `scripts\make-test-pdfs.ps1` regenerates `testdata\*.pdf` (hand-built PDFs with links/outline).
 `scripts\make-icon.ps1` regenerates `app\res\app.ico` (deterministic System.Drawing artwork);
 the icon and VERSIONINFO live in `app\res\PdfSideViewer.rc` (never add an RT_MANIFEST there:
@@ -152,19 +157,27 @@ SyncController, the outline, the status bar and the menu/toolbar checked state
 - Cross-process E2E: `SetWindowText`/`GetWindowText` on another process's control DO NOT
   deliver WM_SETTEXT/WM_GETTEXT (SetWindowText even returns success touching only the caption
   cache); test scripts must SEND `WM_SETTEXT` explicitly.
+- Any epsilon meant to attribute a PAGE from a fractional sync position must survive the
+  page->pixel->page round trip (scrolls quantize to whole pixels): `MapTarget`'s wait clamp
+  is 1% of a page for this reason; 0.0001 parked the center ON the boundary and the counter
+  flipped to the next page under 96-DPI RDP metrics.
 
 ## Conventions
 
 - clang-format-ish 100 columns, 4 spaces; comments explain constraints, not what the next line
   does. The maintainer communicates in Italian.
 - Every user-visible string goes through `util/Strings.h` (X-list with per-language tables:
-  English, Italian, German, French, Hungarian, in Lang-enum order = "en"/"it"/"de"/"fr"/"hu"
-  code order = language-menu id order; English is the default and what E2E tests assert
+  English (en-GB), Italian, German, French, Hungarian, Ukrainian, Romanian, Portuguese
+  (pt-PT), Greek, Spanish (es-ES), Polish, Dutch, Czech, Swedish, in Lang-enum order =
+  "en"/"it"/"de"/"fr"/"hu"/"uk"/"ro"/"pt"/"el"/"es"/"pl"/"nl"/"cs"/"sv" code order =
+  language id order
+  (the menu itself displays the entries alphabetically by native name); English is the
+  default and what E2E tests assert
   against). Engine-level error strings
   (engine/Document.cpp) stay English: workers cache them in result structs.
 - `enum CommandId` in MainWindow.h is the single registry of WM_COMMAND/accelerator ids
   (menu, toolbar and accelerators all reuse the same ids; 1017..1019, 1025..1026,
-  1056..1058 and 1059..1063 (the language group, in Lang-enum order; 1023..1024 retired)
+  1056..1058 and 1059..1072 (the language group, in Lang-enum order; 1023..1024 retired)
   must stay contiguous for CheckMenuRadioItem; 1030+/1040+ are the MRU ranges,
   kMruMaxEntries slots each, dispatched as ranges in WM_COMMAND). Control ids live in a
   separate >= 2000 space (2001 page box, 2100+ Options dialog, 2201 goto dialog, 2300+ menu

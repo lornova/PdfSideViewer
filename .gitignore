@@ -2,6 +2,9 @@
 build/
 .vs/
 *.user
+# Stray compiler intermediates (vc140.pdb lands next to sources when a tool
+# invokes cl.exe without /Fd)
+*.pdb
 
 # MuPDF sources + build outputs: ~0.5 GB of upstream sources plus multi-GB
 # static libraries. Not tracked; run scripts/get-mupdf.ps1 to populate.

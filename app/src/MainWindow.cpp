@@ -611,11 +611,23 @@ HMENU MainWindow::BuildMenuBar() {
     append(file, IDC_EXIT, StrId::MenuExit);
 
     HMENU lang = CreatePopupMenu();
-    append(lang, IDC_LANG_ENGLISH, StrId::MenuLangEnglish);
-    append(lang, IDC_LANG_ITALIAN, StrId::MenuLangItalian);
+    // Alphabetical by native name (Greek and Cyrillic after Latin), NOT id
+    // order: the ids keep Lang-enum order and both the radio check and the
+    // id -> Lang mapping are MF_BYCOMMAND, so menu position is free.
+    append(lang, IDC_LANG_CZECH, StrId::MenuLangCzech);
     append(lang, IDC_LANG_GERMAN, StrId::MenuLangGerman);
+    append(lang, IDC_LANG_ENGLISH, StrId::MenuLangEnglish);
+    append(lang, IDC_LANG_SPANISH, StrId::MenuLangSpanish);
     append(lang, IDC_LANG_FRENCH, StrId::MenuLangFrench);
+    append(lang, IDC_LANG_ITALIAN, StrId::MenuLangItalian);
     append(lang, IDC_LANG_HUNGARIAN, StrId::MenuLangHungarian);
+    append(lang, IDC_LANG_DUTCH, StrId::MenuLangDutch);
+    append(lang, IDC_LANG_POLISH, StrId::MenuLangPolish);
+    append(lang, IDC_LANG_PORTUGUESE, StrId::MenuLangPortuguese);
+    append(lang, IDC_LANG_ROMANIAN, StrId::MenuLangRomanian);
+    append(lang, IDC_LANG_SWEDISH, StrId::MenuLangSwedish);
+    append(lang, IDC_LANG_GREEK, StrId::MenuLangGreek);
+    append(lang, IDC_LANG_UKRAINIAN, StrId::MenuLangUkrainian);
 
     HMENU view = CreatePopupMenu();
     append(view, IDC_TOGGLE_TOOLBAR, StrId::MenuToolbar);
@@ -1850,7 +1862,7 @@ void MainWindow::UpdateCommandUi() {
                                ? IDC_SCROLL_PAGED
                                : IDC_SCROLL_CONTINUOUS,
                            MF_BYCOMMAND);
-        CheckMenuRadioItem(m_menu, IDC_LANG_ENGLISH, IDC_LANG_HUNGARIAN,
+        CheckMenuRadioItem(m_menu, IDC_LANG_ENGLISH, IDC_LANG_SWEDISH,
                            IDC_LANG_ENGLISH + static_cast<UINT>(UiLanguage()), MF_BYCOMMAND);
         const auto enable = [this](UINT id, bool on) {
             EnableMenuItem(m_menu, id, MF_BYCOMMAND | (on ? MF_ENABLED : MF_GRAYED));
@@ -2384,10 +2396,15 @@ void MainWindow::ToggleFullScreen() {
 
 void MainWindow::UpdateTitle() {
     std::wstring title = L"PDF Side Viewer";
-    if (m_sync->ScrollSync())
-        title += Str(StrId::TitleScrollSyncTag);
-    if (m_sync->ZoomSync())
-        title += Str(StrId::TitleZoomSyncTag);
+    // The toolbar (checked buttons) and the status bar (sync part) already
+    // show the lock state: the title tags are the fallback cue when neither
+    // is on screen.
+    if (!m_toolbarVisible && !m_statusVisible) {
+        if (m_sync->ScrollSync())
+            title += Str(StrId::TitleScrollSyncTag);
+        if (m_sync->ZoomSync())
+            title += Str(StrId::TitleZoomSyncTag);
+    }
     SetWindowTextW(m_hwnd, title.c_str());
 }
 
@@ -2722,6 +2739,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             m_toolbarVisible = !m_toolbarVisible;
             Layout();
             UpdateCommandUi();
+            UpdateTitle();
             return 0;
         case IDC_LOCK_TOOLBARS:
             SetRebarLocked(!m_rebarLocked);
@@ -2730,6 +2748,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             m_statusVisible = !m_statusVisible;
             Layout();
             UpdateCommandUi();
+            UpdateTitle();
             return 0;
         case IDC_ZOOM_IN:
             FocusedPane()->ApplyZoomRatio(1.25f);
@@ -2803,6 +2822,15 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_LANG_GERMAN:
         case IDC_LANG_FRENCH:
         case IDC_LANG_HUNGARIAN:
+        case IDC_LANG_UKRAINIAN:
+        case IDC_LANG_ROMANIAN:
+        case IDC_LANG_PORTUGUESE:
+        case IDC_LANG_GREEK:
+        case IDC_LANG_SPANISH:
+        case IDC_LANG_POLISH:
+        case IDC_LANG_DUTCH:
+        case IDC_LANG_CZECH:
+        case IDC_LANG_SWEDISH:
             SwitchLanguage(static_cast<Lang>(LOWORD(wParam) - IDC_LANG_ENGLISH));
             return 0;
         case IDC_ABOUT:

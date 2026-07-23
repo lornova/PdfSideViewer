@@ -199,7 +199,9 @@ divider; double-click best-fits the width to the widest expanded item so the tre
 horizontal scrollbar), panes and splitter. Modal dialogs (Go to Page, Options) are
 built as in-memory `DLGTEMPLATE`s (`util/DialogTemplate.*`) for `DialogBoxIndirectParamW` — no
 .rc resources, free modality/Tab/Esc. Every user-visible string goes through `util/Strings.*`
-(an X-list keyed by `StrId` with English, Italian, German, French and Hungarian tables;
+(an X-list keyed by `StrId` with English (en-GB), Italian, German, French, Hungarian,
+Ukrainian, Romanian, Portuguese (pt-PT), Greek, Spanish (es-ES), Polish, Dutch, Czech and
+Swedish tables;
 English is the default, the choice persists in settings as a two-letter code and a live
 switch rebuilds the `HMENU` and retitles the band).
 Full screen (F11 / Alt+Enter, Esc exits) strips `WS_OVERLAPPEDWINDOW` and hides the WHOLE
@@ -372,10 +374,14 @@ Design:
   of the other, like WinMerge's line map, never a fractional scroll offset (the within-page
   fraction transfers unchanged, an interpolated map would rubber-band the scroll speed instead).
   With alignment gaps OFF, between two points the follower is clamped just short of its next
-  point (a sub-page epsilon mirroring `SyncPosition`'s paged-mode cap), so it WAITS at the end
+  point, so it WAITS at the end
   of its own section while the leader crosses pages that have no counterpart and resumes
   seamlessly when the leader reaches the point; leading from the short side jumps the surplus
-  pages in one block instead.
+  pages in one block instead. The clamp epsilon is 1% of a page, NOT a token value: page
+  attribution round-trips through whole-pixel scroll quantization
+  (`ScrollToSyncPosition` -> `SyncPosition`), and a sub-pixel epsilon parks the viewport
+  center ON the boundary, where the counter shows the next section's first page on some
+  DPI/zoom combinations (bug surfaced by 96-DPI RDP metrics).
   The two directions are not exact inverses at segment boundaries: the reentrancy guard stops
   the echo, and every scroll re-drives the follower from the leader's authoritative position.
   Invariants: points strictly increase in BOTH coordinates; a newly added manual point wins
@@ -386,13 +392,24 @@ Design:
   (Ctrl+Shift+F7).
 - **Bookmark generation**: "Sync Points from Bookmarks" parses a hierarchical key from each
   outline title (`util/OutlineNumbering`: multi-level prefix like "1.2.3", with an optional
-  verbal intro word across five languages - IT/EN "Capitolo/Cap/Chapter/Ch/Sezione/Sez/
+  verbal intro word across fourteen languages - IT/EN "Capitolo/Cap/Chapter/Ch/Sezione/Sez/
   Section/Sec/Parte/Part/Appendice/Appendix/Annex/Allegato", DE "Kapitel/Kap/Abschnitt/
   Abschn/Teil/Anhang/Anh/Anlage", FR "Chapitre/Chap/Sect/Partie/Annexe" (Section/Sec/
-  Appendice shared with IT/EN), HU "Fejezet/Fej/Szakasz/Rész/Függelék/Melléklet", plus
+  Appendice shared with IT/EN), HU "Fejezet/Fej/Szakasz/Rész/Függelék/Melléklet",
+  UK "Розділ/Розд/Глава/Гл/Частина/Додаток/Дод", RO "Capitol(ul)/Secțiune(a)/Partea/
+  Anexă/Anexa" (comma-below ș/ț AND their legacy cedilla spellings), PT "Capítulo/Seção/
+  Secção/Apêndice/Anexo" (Cap/Parte shared), EL "Κεφάλαιο/Κεφ/Ενότητα/Μέρος/Παράρτημα"
+  (plus the accent-less forms ALL-CAPS Greek titles lower to, with σ for final ς),
+  ES "Sección/Apéndice" (Capítulo/Cap/Parte/Anexo shared with PT), PL "Rozdział/Rozdz/
+  Część/Sekcja/Dodatek/Załącznik/Aneks", NL "Hoofdstuk/Hfst/Sectie/Paragraaf/Deel/
+  Bijlage/Aanhangsel", CS "Kapitola/Oddíl/Část/Sekce/Příloha/Díl" (Kap/Dodatek shared),
+  SV "Avsnitt/Bilaga" (Kapitel/Kap/Appendix shared; "Del" deliberately excluded, Spanish
+  "Del 1 al 10" would parse as a numbering), plus
   "§"; the intro-word tokenizer is Unicode-aware AND locale-independent (GetStringTypeW +
   invariant-locale lowercasing, never the user-language Char* APIs, so matching cannot
-  change with the host Windows language) and accented Hungarian words survive; ASCII
+  change with the host Windows language), accented Hungarian words survive, and a
+  non-ASCII first letter always tokenizes as a word (components stay ASCII), so
+  Cyrillic and Greek intro words reach the lookup; ASCII
   digits only; SINGLE-letter components encode negative,
   -1 = A, so "Appendice A" and "A.1" pair without colliding with numeric keys, while a lone
   letter without an intro word is rejected as a plain word EXCEPT under an appendix heading:
@@ -405,10 +422,16 @@ Design:
   "Introduzione" could anchor to a chapter's nested unnumbered "Introduction", and
   real translations share the outline structure, so requiring equal depth costs
   nothing), plus a cross-language canonicalization of common
-  front/back-matter section names across Italian, English, German, French and Hungarian
+  front/back-matter section names across Italian, English, German, French, Hungarian,
+  Ukrainian, Romanian, Portuguese, Greek, Spanish, Polish, Dutch, Czech and Swedish
   (`CanonicalTitleKey`), so "Indice"/"Contents"/"Inhaltsverzeichnis"/"Table des matières"/
-  "Tartalomjegyzék" collapse to one class. Italian "Indice" (front summary) and English/German "Index" (back
-  analytical index) are false friends kept in DIFFERENT classes on purpose; unrecognized
+  "Tartalomjegyzék"/"Зміст"/"Cuprins"/"Índice"/"Περιεχόμενα"/"Spis treści"/
+  "Inhoudsopgave"/"Obsah"/"Innehåll" collapse to
+  one class.
+  Italian "Indice" (front summary) and English/German "Index" (back
+  analytical index) are false friends kept in DIFFERENT classes on purpose (Portuguese
+  and Spanish "Índice" side with the TOC, the back index being "Índice
+  remissivo"/"Índice analítico"); unrecognized
   titles fall back to their own text, so same-language exact pairs are unaffected. First
   occurrence per key/title and per side wins, and one point is emitted per key present in
   BOTH outlines; only the bookmark's target page matters (alignment is whole-page).

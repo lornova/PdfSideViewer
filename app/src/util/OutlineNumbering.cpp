@@ -14,14 +14,31 @@
 //                             annex/allegato; DE kapitel/kap, abschnitt/abschn,
 //                             teil, anhang/anh, anlage; FR chapitre/chap, sect,
 //                             partie, annexe (section/sec/appendice shared);
-//                             HU fejezet/fej, szakasz, rész, függelék, melléklet
+//                             HU fejezet/fej, szakasz, rész, függelék, melléklet;
+//                             UK розділ/розд, глава/гл, частина, додаток/дод;
+//                             RO capitol(ul), secțiune(a), partea, anexă/anexa
+//                             (cedilla legacy spellings included); PT capítulo,
+//                             seção/secção, apêndice, anexo (cap/parte shared);
+//                             EL κεφάλαιο/κεφ, ενότητα, μέρος, παράρτημα (plus
+//                             accent-less variants: Greek ALL-CAPS drops the
+//                             accents, and Σ lowercases to σ, not final ς);
+//                             ES sección, apéndice (capítulo/cap/parte/anexo
+//                             shared with PT); PL rozdział/rozdz, część,
+//                             sekcja, dodatek, załącznik, aneks; NL hoofdstuk/
+//                             hfst, sectie, paragraaf, deel, bijlage,
+//                             aanhangsel; CS kapitola, oddíl, část, sekce,
+//                             příloha, díl (kap/dodatek shared); SV avsnitt,
+//                             bilaga (kapitel/kap/appendix shared; "del" is
+//                             deliberately OUT: Spanish "Del 1 al 10" would
+//                             parse as key [1])
 //          | '§' ws*
 //   key   := comp ('.' comp)* '.'?
 //   comp  := [0-9]{1,6} | single ASCII letter
 //   rest  := end-of-string | (ws | ':' | ')' | '-' | '–' | '—') anything
 //
-// The intro word is tokenized as the longest run of letters (accents INCLUDED,
-// so Hungarian "rész"/"függelék" survive) and compared WHOLE against the list:
+// The intro word is tokenized as the longest run of letters (accents and
+// Cyrillic INCLUDED, so "rész"/"függelék"/"розділ" survive) and compared WHOLE
+// against the list:
 // "Sezioni 2" must not match "Sez". Digits are ASCII
 // only (locale-dependent Unicode digits would make keys unstable across
 // documents) and capped at six per component (rejects ISBN/date noise and can
@@ -39,9 +56,11 @@
 // analitico", "Bibliografia" pair up when both documents carry them at the
 // matching level. That channel also
 // canonicalizes known front/back-matter section names across Italian, English,
-// German, French and Hungarian (CanonicalTitleKey), so a title pairs with its
-// translation ("Indice"/"Contents"/"Inhaltsverzeichnis"/"Table des matières"/
-// "Tartalomjegyzék").
+// German, French, Hungarian, Ukrainian, Romanian, Portuguese, Greek, Spanish,
+// Polish, Dutch, Czech and Swedish (CanonicalTitleKey), so a title pairs with
+// its translation ("Indice"/"Contents"/"Inhaltsverzeichnis"/"Table des
+// matières"/"Tartalomjegyzék"/"Зміст"/"Cuprins"/"Índice"/"Περιεχόμενα"/
+// "Spis treści"/"Inhoudsopgave"/"Obsah"/"Innehåll").
 
 namespace {
 
@@ -101,7 +120,29 @@ bool IsIntroWord(const std::wstring& lower) {
         // French (section/sec/appendice/part already covered above)
         L"chapitre", L"chap", L"sect", L"partie", L"annexe",
         // Hungarian (accented words rely on the Unicode-aware tokenizer below)
-        L"fejezet", L"fej", L"szakasz", L"rész", L"függelék", L"melléklet"};
+        L"fejezet", L"fej", L"szakasz", L"rész", L"függelék", L"melléklet",
+        // Ukrainian (Cyrillic: the intro branch accepts non-ASCII first letters)
+        L"розділ", L"розд", L"глава", L"гл", L"частина", L"додаток", L"дод",
+        // Romanian, with definite-article forms ("Capitolul 1", "Anexa A") and
+        // the legacy cedilla spellings (ş/ţ) older PDFs carry instead of ș/ț
+        L"capitol", L"capitolul", L"secțiune", L"secțiunea", L"secţiune", L"secţiunea",
+        L"partea", L"anexă", L"anexa",
+        // Portuguese (cap/parte shared above; secção pt-PT, seção pt-BR)
+        L"capítulo", L"seção", L"secção", L"apêndice", L"anexo",
+        // Greek, with the accent-less/σ-final forms ALL-CAPS titles lower to
+        L"κεφάλαιο", L"κεφαλαιο", L"κεφ", L"ενότητα", L"ενοτητα",
+        L"μέρος", L"μερος", L"μεροσ", L"παράρτημα", L"παραρτημα",
+        // Spanish (capítulo/cap/parte/anexo shared with Portuguese above)
+        L"sección", L"seccion", L"apéndice",
+        // Polish
+        L"rozdział", L"rozdz", L"część", L"sekcja", L"dodatek", L"załącznik", L"aneks",
+        // Dutch (appendix shared with EN above)
+        L"hoofdstuk", L"hfst", L"sectie", L"paragraaf", L"deel", L"bijlage", L"aanhangsel",
+        // Czech (kap shared with DE, dodatek with PL)
+        L"kapitola", L"oddíl", L"část", L"sekce", L"příloha", L"díl",
+        // Swedish (kapitel/kap shared with DE, appendix with EN; "del" left
+        // out on purpose: Spanish "Del 1 al 10" would parse as a numbering)
+        L"avsnitt", L"bilaga"};
     for (PCWSTR w : kWords)
         if (lower == w)
             return true;
@@ -131,10 +172,15 @@ std::wstring NormalizedTitleKey(const std::wstring& title) {
 // translation. Members are stored NORMALIZED (invariant-lowercase, no outer
 // whitespace) so the key from NormalizedTitleKey matches verbatim; the ids are
 // natural English words that self-identify their own class ("index" -> index).
-// Coverage: Italian, English, German, French, Hungarian. Italian "Indice" (the front
-// summary) and English/German "Index" (the back analytical index) are FALSE
-// FRIENDS and live in DIFFERENT classes on purpose: pairing them would align a
-// document's table of contents with the other's alphabetical index. A title in
+// Coverage: Italian, English, German, French, Hungarian, Ukrainian, Romanian,
+// Portuguese, Greek (whose common single-word headings also list the
+// accent-less spelling ALL-CAPS titles lower to, "εισαγωγη" for "Εισαγωγή"),
+// Spanish, Polish, Dutch, Czech, Swedish.
+// Italian "Indice" (the front summary) and English/German "Index"
+// (the back analytical index) are FALSE FRIENDS and live in DIFFERENT classes
+// on purpose: pairing them would align a document's table of contents with the
+// other's alphabetical index; Portuguese "Índice" sides with the TOC like the
+// Italian convention, its back index being "Índice remissivo". A title in
 // no class keeps matching by its own normalized text, so same-language exact
 // pairs (and unknown sections) are unaffected. "Sommario" reads as the table
 // of contents (Italian book convention) rather than as an abstract.
@@ -150,50 +196,145 @@ const std::map<std::wstring, std::wstring>& TitleClassMap() {
                       L"contents", L"table of contents",
                       L"inhaltsverzeichnis", L"inhalt",
                       L"table des matières", L"sommaire",
-                      L"tartalomjegyzék", L"tartalom"}},
+                      L"tartalomjegyzék", L"tartalom",
+                      L"зміст",
+                      L"cuprins",
+                      L"índice", L"índice geral", L"sumário", L"conteúdo",
+                      L"περιεχόμενα", L"περιεχομενα", L"πίνακας περιεχομένων",
+                      L"índice general", L"contenido", L"contenidos", L"sumario",
+                      L"tabla de contenidos",
+                      L"spis treści",
+                      L"inhoudsopgave", L"inhoud",
+                      L"obsah",
+                      L"innehåll", L"innehållsförteckning"}},
             {L"index", {L"indice analitico", L"indice dei nomi", L"indice dei termini",
                         L"index",
                         L"stichwortverzeichnis", L"sachregister", L"sachverzeichnis", L"register",
                         L"index alphabétique",
-                        L"tárgymutató", L"névmutató", L"mutató"}},
+                        L"tárgymutató", L"névmutató", L"mutató",
+                        L"покажчик", L"предметний покажчик", L"іменний покажчик",
+                        L"алфавітний покажчик",
+                        L"index alfabetic",
+                        L"índice remissivo", L"índice alfabético", L"índice onomástico",
+                        L"ευρετήριο", L"ευρετηριο", L"αλφαβητικό ευρετήριο",
+                        L"ευρετήριο όρων",
+                        L"índice analítico", L"índice temático",
+                        L"indeks", L"skorowidz",
+                        L"trefwoordenregister",
+                        L"rejstřík", L"věcný rejstřík", L"jmenný rejstřík",
+                        L"sakregister", L"personregister"}},
             {L"preface", {L"prefazione", L"premessa", L"presentazione",
                           L"preface", L"foreword",
                           L"vorwort", L"geleitwort",
                           L"préface", L"avant-propos",
-                          L"előszó"}},
+                          L"előszó",
+                          L"передмова",
+                          L"prefață", L"prefaţă", L"cuvânt înainte",
+                          L"prefácio",
+                          L"πρόλογος", L"προλογος", L"προλογοσ",
+                          L"prefacio", L"prólogo",
+                          L"przedmowa",
+                          L"voorwoord", L"woord vooraf",
+                          L"předmluva",
+                          L"förord"}},
             {L"introduction", {L"introduzione",
                                L"introduction",
                                L"einleitung", L"einführung",
-                               L"bevezetés", L"bevezető"}},
+                               L"bevezetés", L"bevezető",
+                               L"вступ",
+                               L"introducere",
+                               L"introdução",
+                               L"εισαγωγή", L"εισαγωγη",
+                               L"introducción",
+                               L"wstęp", L"wprowadzenie",
+                               L"inleiding", L"introductie",
+                               L"úvod",
+                               L"inledning", L"introduktion"}},
             {L"acknowledgments", {L"ringraziamenti",
                                   L"acknowledgments", L"acknowledgements",
                                   L"danksagung", L"dank",
                                   L"remerciements",
-                                  L"köszönetnyilvánítás", L"köszönet"}},
+                                  L"köszönetnyilvánítás", L"köszönet",
+                                  L"подяки", L"подяка",
+                                  L"mulțumiri", L"mulţumiri",
+                                  L"agradecimentos",
+                                  L"ευχαριστίες", L"ευχαριστιες", L"ευχαριστιεσ",
+                                  L"agradecimientos",
+                                  L"podziękowania",
+                                  L"dankwoord", L"dankbetuiging",
+                                  L"poděkování",
+                                  L"tack"}},
             {L"abstract", {L"abstract", L"riassunto",
                            L"summary",
                            L"zusammenfassung", L"kurzfassung",
                            L"résumé",
-                           L"kivonat", L"absztrakt", L"összefoglaló", L"összefoglalás"}},
+                           L"kivonat", L"absztrakt", L"összefoglaló", L"összefoglalás",
+                           L"анотація", L"реферат",
+                           L"rezumat",
+                           L"resumo",
+                           L"περίληψη", L"περιληψη",
+                           L"resumen",
+                           L"streszczenie", L"abstrakt",
+                           L"samenvatting",
+                           L"shrnutí", L"souhrn", L"resumé",
+                           L"sammanfattning", L"sammandrag"}},
             {L"conclusion", {L"conclusione", L"conclusioni",
                              L"conclusion", L"conclusions",
                              L"schluss", L"fazit", L"schlussfolgerung",
-                             L"következtetés", L"következtetések", L"összegzés"}},
+                             L"következtetés", L"következtetések", L"összegzés",
+                             L"висновки", L"висновок",
+                             L"concluzii", L"concluzie",
+                             L"conclusão", L"conclusões",
+                             L"συμπεράσματα", L"συμπερασματα", L"συμπέρασμα",
+                             L"συμπερασμα",
+                             L"conclusión", L"conclusiones",
+                             L"podsumowanie", L"wnioski", L"zakończenie",
+                             L"conclusie", L"conclusies", L"besluit",
+                             L"závěr", L"závěry",
+                             L"slutsats", L"slutsatser", L"avslutning"}},
             {L"afterword", {L"postfazione", L"epilogo",
                             L"afterword", L"epilogue",
                             L"nachwort", L"epilog",
                             L"postface", L"épilogue",
-                            L"utószó", L"epilógus"}},
+                            L"utószó", L"epilógus",
+                            L"післямова", L"епілог",
+                            L"postfață", L"postfaţă",
+                            L"posfácio", L"epílogo",
+                            L"επίλογος", L"επιλογος", L"επιλογοσ",
+                            L"posfacio",
+                            L"posłowie",
+                            L"nawoord",
+                            L"doslov",
+                            L"efterord"}},
             {L"appendix", {L"appendice", L"appendici",
                            L"appendix", L"appendices",
                            L"anhang", L"anhänge",
                            L"annexe", L"annexes",
-                           L"függelék", L"függelékek", L"melléklet", L"mellékletek"}},
+                           L"függelék", L"függelékek", L"melléklet", L"mellékletek",
+                           L"додаток", L"додатки",
+                           L"anexă", L"anexa", L"anexe", L"apendice",
+                           L"apêndice", L"apêndices", L"anexo", L"anexos",
+                           L"παράρτημα", L"παραρτημα", L"παραρτήματα", L"παραρτηματα",
+                           L"apéndice", L"apéndices",
+                           L"dodatek", L"dodatki", L"załącznik", L"załączniki",
+                           L"aneks", L"aneksy",
+                           L"bijlage", L"bijlagen", L"aanhangsel",
+                           L"příloha", L"přílohy", L"dodatky",
+                           L"bilaga", L"bilagor"}},
             {L"glossary", {L"glossario",
                            L"glossary",
                            L"glossar",
                            L"glossaire",
-                           L"szójegyzék", L"fogalomtár", L"szótár"}},
+                           L"szójegyzék", L"fogalomtár", L"szótár",
+                           L"глосарій", L"словник термінів",
+                           L"glosar",
+                           L"glossário",
+                           L"γλωσσάρι", L"γλωσσαρι", L"γλωσσάριο",
+                           L"glosario",
+                           L"słownik", L"słowniczek", L"glosariusz",
+                           L"woordenlijst", L"verklarende woordenlijst", L"glossarium",
+                           L"slovník pojmů", L"glosář", L"slovníček",
+                           L"ordlista"}},
             {L"bibliography", {L"bibliografia", L"riferimenti bibliografici", L"riferimenti",
                                L"opere citate", L"fonti",
                                L"bibliography", L"references", L"works cited", L"sources",
@@ -201,41 +342,125 @@ const std::map<std::wstring, std::wstring>& TitleClassMap() {
                                L"bibliographie", L"quellenverzeichnis", L"quellen",
                                L"références", L"ouvrages cités",
                                L"bibliográfia", L"irodalom", L"irodalomjegyzék",
-                               L"felhasznált irodalom", L"hivatkozások", L"források"}},
+                               L"felhasznált irodalom", L"hivatkozások", L"források",
+                               L"бібліографія", L"література", L"список літератури",
+                               L"список використаних джерел", L"джерела",
+                               L"referințe", L"referinţe", L"referințe bibliografice",
+                               L"surse",
+                               L"referências", L"referências bibliográficas", L"fontes",
+                               L"obras citadas",
+                               L"βιβλιογραφία", L"βιβλιογραφια",
+                               L"αναφορές", L"αναφορες", L"αναφορεσ",
+                               L"πηγές", L"πηγες", L"πηγεσ",
+                               L"bibliografía", L"referencias",
+                               L"referencias bibliográficas", L"fuentes",
+                               L"piśmiennictwo", L"źródła",
+                               L"literatuurlijst", L"bronnen", L"bronvermelding",
+                               L"referenties",
+                               L"literatura", L"seznam literatury",
+                               L"použitá literatura", L"zdroje",
+                               // Czech "reference" is left out: it collides
+                               // with the English singular "Reference"
+                               // (reference material, NOT a bibliography)
+                               L"litteraturförteckning", L"referenser", L"källor",
+                               L"källförteckning"}},
             {L"symbols", {L"indice dei simboli", L"elenco dei simboli", L"simboli",
                           L"symbol index", L"list of symbols", L"notation", L"notations",
                           L"symbolverzeichnis", L"formelzeichen",
                           L"liste des symboles", L"symboles",
-                          L"jelölések", L"jelölésjegyzék"}},
+                          L"jelölések", L"jelölésjegyzék",
+                          L"умовні позначення", L"перелік умовних позначень",
+                          L"simboluri", L"lista simbolurilor", L"notații", L"notaţii",
+                          L"símbolos", L"lista de símbolos", L"notação",
+                          L"σύμβολα", L"συμβολα", L"κατάλογος συμβόλων",
+                          L"notación",
+                          L"wykaz symboli", L"symbole", L"oznaczenia",
+                          L"symbolenlijst", L"lijst van symbolen", L"notatie",
+                          L"seznam symbolů", L"symboly", L"značení",
+                          L"symbollista", L"symboler", L"beteckningar"}},
             {L"version-history", {L"cronologia",
                                   L"version history", L"revision history", L"changelog",
                                   L"versionsgeschichte", L"änderungsverlauf",
                                   L"historique des versions", L"journal des modifications",
-                                  L"verziótörténet", L"változásnapló"}},
+                                  L"verziótörténet", L"változásnapló",
+                                  L"історія версій", L"журнал змін",
+                                  L"istoricul versiunilor", L"istoric versiuni",
+                                  L"jurnal de modificări",
+                                  L"histórico de versões", L"registo de alterações",
+                                  L"ιστορικό εκδόσεων", L"ιστορικο εκδοσεων",
+                                  L"historial de versiones", L"registro de cambios",
+                                  L"historia wersji", L"historia zmian",
+                                  L"versiegeschiedenis", L"wijzigingslogboek",
+                                  L"historie verzí", L"seznam změn",
+                                  L"versionshistorik", L"ändringslogg"}},
             {L"notes", {L"note",
                         L"notes",
                         L"anmerkungen",
-                        L"jegyzetek", L"megjegyzések"}},
+                        L"jegyzetek", L"megjegyzések",
+                        L"примітки",
+                        L"notas",
+                        L"σημειώσεις", L"σημειωσεις", L"σημειωσεισ",
+                        L"przypisy", L"uwagi", L"notatki",
+                        L"noten", L"aantekeningen", L"opmerkingen",
+                        L"poznámky",
+                        L"noter", L"anteckningar"}},
             {L"figures", {L"elenco delle figure", L"indice delle figure",
                           L"list of figures",
                           L"abbildungsverzeichnis",
                           L"liste des figures", L"table des figures",
-                          L"ábrajegyzék", L"ábrák jegyzéke"}},
+                          L"ábrajegyzék", L"ábrák jegyzéke",
+                          L"перелік ілюстрацій", L"список ілюстрацій", L"перелік рисунків",
+                          L"lista figurilor",
+                          L"lista de figuras", L"índice de figuras",
+                          L"κατάλογος σχημάτων", L"κατάλογος εικόνων",
+                          L"spis rysunków", L"wykaz rysunków", L"spis ilustracji",
+                          L"lijst van figuren", L"figurenlijst",
+                          L"lijst van afbeeldingen",
+                          L"seznam obrázků",
+                          L"figurförteckning", L"lista över figurer"}},
             {L"tables", {L"elenco delle tabelle", L"indice delle tabelle",
                          L"list of tables",
                          L"tabellenverzeichnis",
                          L"liste des tableaux",
-                         L"táblázatjegyzék", L"táblázatok jegyzéke"}},
+                         L"táblázatjegyzék", L"táblázatok jegyzéke",
+                         L"перелік таблиць", L"список таблиць",
+                         L"lista tabelelor",
+                         L"lista de tabelas", L"índice de tabelas",
+                         L"κατάλογος πινάκων",
+                         L"lista de tablas", L"índice de tablas",
+                         L"spis tabel", L"wykaz tabel",
+                         L"lijst van tabellen", L"tabellenlijst",
+                         L"seznam tabulek",
+                         L"tabellförteckning", L"lista över tabeller"}},
             {L"abbreviations", {L"abbreviazioni", L"sigle", L"elenco delle abbreviazioni",
                                 L"abbreviations", L"list of abbreviations",
                                 L"abkürzungsverzeichnis", L"abkürzungen",
                                 L"abréviations", L"liste des abréviations", L"sigles",
-                                L"rövidítések", L"rövidítésjegyzék"}},
+                                L"rövidítések", L"rövidítésjegyzék",
+                                L"перелік скорочень", L"список скорочень", L"скорочення",
+                                L"abrevieri", L"lista abrevierilor",
+                                L"abreviaturas", L"lista de abreviaturas", L"siglas",
+                                L"συντομογραφίες", L"συντομογραφιες", L"συντομογραφιεσ",
+                                L"κατάλογος συντομογραφιών",
+                                L"abreviaciones",
+                                L"wykaz skrótów", L"skróty", L"lista skrótów",
+                                L"afkortingen", L"lijst van afkortingen",
+                                L"afkortingenlijst",
+                                L"seznam zkratek", L"zkratky",
+                                L"förkortningar", L"förkortningslista"}},
             {L"dedication", {L"dedica",
                              L"dedication",
                              L"widmung",
                              L"dédicace",
-                             L"ajánlás"}},
+                             L"ajánlás",
+                             L"присвята",
+                             L"dedicație", L"dedicaţie",
+                             L"dedicatória",
+                             L"αφιέρωση", L"αφιερωση",
+                             L"dedicatoria",
+                             L"dedykacja",
+                             L"věnování",
+                             L"tillägnan"}},
         };
         std::map<std::wstring, std::wstring> m;
         for (const TitleClass& c : kClasses)
@@ -299,9 +524,12 @@ std::optional<std::vector<int>> ParseOutlineNumbering(const std::wstring& title,
         ++i;
         skipWs();
         hadIntro = true;
-    } else if (i < n && IsAsciiAlpha(title[i]) && i + 1 < n && IsWordLetter(title[i + 1])) {
+    } else if (i < n && IsWordLetter(title[i]) &&
+               (!IsAsciiAlpha(title[i]) || (i + 1 < n && IsWordLetter(title[i + 1])))) {
         // An ASCII letter starting a >= 2-letter word can only be an intro word;
-        // a single letter falls through to the component parser ("A.1 Notation").
+        // a single ASCII letter falls through to the component parser ("A.1
+        // Notation"). A non-ASCII letter ALWAYS starts a word (components stay
+        // ASCII by design), so Cyrillic "Розділ 1" reaches the intro lookup.
         // The run takes accented letters so "Rész 2"/"Függelék A" tokenize whole.
         size_t j = i;
         std::wstring word;

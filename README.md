@@ -28,11 +28,18 @@ executable that starts instantly.
   the current alignment (Shift+F7), review and remove them in a dialog, clear them all
   (Ctrl+Shift+F7), or **generate them from bookmarks**: numberings present in both documents
   become sync points ("1.2", "2.2.1", "A.1", or with a verbal prefix in Italian, English,
-  German, French or Hungarian such as "Chapter 3", "Kapitel 3", "Chapitre 3", "Fejezet 3",
-  "Appendice A"), lettered appendix sub-items ("A ...", "B ...") pair by their letter, and
+  German, French, Hungarian, Ukrainian, Romanian, Portuguese, Greek, Spanish, Polish,
+  Dutch, Czech or Swedish
+  such as "Chapter 3", "Kapitel 3", "Chapitre 3", "Fejezet 3", "Розділ 3", "Capitolul 3",
+  "Capítulo 3", "Κεφάλαιο 3", "Rozdział 3", "Hoofdstuk 3", "Kapitola 3", "Avsnitt 3",
+  "Appendice A"),
+  lettered appendix sub-items
+  ("A ...", "B ...") pair by their letter, and
   unnumbered bookmarks pair by title at the same outline depth, matching common section
-  names across the same five languages ("Indice" = "Contents" = "Inhaltsverzeichnis" =
-  "Table des matières" = "Tartalomjegyzék"), the rest is skipped.
+  names across the same fourteen languages ("Indice" = "Contents" = "Inhaltsverzeichnis" =
+  "Table des matières" = "Tartalomjegyzék" = "Зміст" = "Cuprins" = "Índice" =
+  "Περιεχόμενα" = "Spis treści" = "Inhoudsopgave" = "Obsah" = "Innehåll"), the rest is
+  skipped.
   Generated points survive auto-reload (re-derived from the fresh outline), and each pair's
   points are remembered across sessions: reopening the same two documents brings its manual
   points back and re-derives the generated ones.
@@ -53,8 +60,9 @@ executable that starts instantly.
   narrow), plus the status bar (left pane info left, right pane info right, sync state
   centered), full screen (F11 / Alt+Enter), a width-adjustable outline sidebar (drag the
   divider; double-click fits it to the widest bookmark, removing the horizontal scroll),
-  recent files and recent left+right pairs, UI in English, Italian, German, French and
-  Hungarian.
+  recent files and recent left+right pairs, UI in English, Italian, German, French,
+  Hungarian, Ukrainian, Romanian, Portuguese, Greek, Spanish, Polish, Dutch, Czech and
+  Swedish.
 - **Pane headers**: an optional strip above each pane shows the open PDF's file name (or full
   path) and doubles as the active-pane cue - the focused pane's header carries an accent underline
   along the bottom edge, the other stays plain. Toggle the header and the name/path choice in the
@@ -164,7 +172,10 @@ v143, Windows 10/11 SDK). MuPDF (official 1.28.x source release, `thirdparty/` i
    ```
 
 The result is a single self-contained `build\<platform>\Release\PdfSideViewer.exe`.
-`scripts\make-release.ps1` packages it into a portable zip.
+`scripts\make-release.ps1` packages it into a portable zip; `scripts\make-installer.ps1`
+(requires [Inno Setup 6](https://jrsoftware.org/isinfo.php), e.g.
+`winget install JRSoftware.InnoSetup`) builds `PdfSideViewer-Setup-x64.exe`, a per-user
+installer (no admin, silent-install capable) with optional Explorer-menu integration.
 
 Design notes and architecture are documented in [docs/DESIGN.md](docs/DESIGN.md).
 
