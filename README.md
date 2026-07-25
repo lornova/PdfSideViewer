@@ -91,8 +91,8 @@ executable that starts instantly.
 - **Swap panes** (F8) exchanges the two documents including their view states; sync points
   survive the swap, mirrored.
 - Drag & drop (drop two files to fill both panes), double-click an empty pane to open a file
-  there, close a document with Ctrl+W, command line (`PdfSideViewer.exe left.pdf right.pdf`),
-  session restore (documents, positions, window).
+  there, close a document with Ctrl+W (or both at once with File ▸ Close Session), command line
+  (`PdfSideViewer.exe left.pdf right.pdf`), session restore (documents, positions, window).
 
 ## Keyboard
 

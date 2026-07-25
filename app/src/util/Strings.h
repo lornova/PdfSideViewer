@@ -44,6 +44,10 @@
       L"&Fermer\tCtrl+W", L"Be&zárás\tCtrl+W", L"&Закрити\tCtrl+W", L"În&chide\tCtrl+W",           \
       L"Fe&char\tCtrl+W", L"&Κλείσιμο\tCtrl+W", L"&Cerrar\tCtrl+W", L"&Zamknij\tCtrl+W",           \
       L"&Sluiten\tCtrl+W", L"&Zavřít\tCtrl+W", L"&Stäng\tCtrl+W")                                  \
+    X(MenuCloseSession, L"Close &Session", L"Ch&iudi sessione", L"&Sitzung schließen",             \
+      L"Fermer la &session", L"&Munkamenet bezárása", L"Закрити &сеанс",                           \
+      L"Închide s&esiunea", L"&Fechar sessão", L"Κλείσιμο &συνεδρίας", L"Cerrar s&esión",          \
+      L"Zamknij &sesję", L"S&essie sluiten", L"Zavřít &relaci", L"Stäng s&ession")                 \
     X(MenuRecentFiles, L"Recent &Files", L"File recen&ti", L"&Zuletzt verwendete Dateien",         \
       L"Fichiers &récents", L"&Legutóbbi fájlok", L"Останні &файли", L"Fișiere &recente",          \
       L"Ficheiros &recentes", L"Πρόσφατα αρ&χεία", L"Archivos &recientes",                         \

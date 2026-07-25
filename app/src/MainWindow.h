@@ -76,6 +76,9 @@ enum CommandId : WORD {
     IDC_LANG_DUTCH = 1070,
     IDC_LANG_CZECH = 1071,
     IDC_LANG_SWEDISH = 1072,
+    // Appended after the language group (which must stay contiguous), not
+    // next to IDC_CLOSE_DOC: the enum order is free, the ids are not.
+    IDC_CLOSE_SESSION = 1073, // closes BOTH documents
     // Control ids live in a separate >= 2000 space so they can never collide
     // with command dispatch: 2001 page box, 2100+ Options dialog, 2201 goto
     // dialog, 2300+ the menu-band toolbar and its buttons (MenuBand.h), 2400+

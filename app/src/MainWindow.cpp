@@ -600,6 +600,7 @@ HMENU MainWindow::BuildMenuBar() {
     append(file, IDC_OPEN_LEFT, StrId::MenuOpenLeft);
     append(file, IDC_OPEN_RIGHT, StrId::MenuOpenRight);
     append(file, IDC_CLOSE_DOC, StrId::MenuCloseDoc);
+    append(file, IDC_CLOSE_SESSION, StrId::MenuCloseSession);
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(m_mruFilesMenu),
                 Str(StrId::MenuRecentFiles));
@@ -820,6 +821,10 @@ void MainWindow::CreateToolbar(HINSTANCE hinst) {
         return b;
     };
     const TBBUTTON buttons[] = {
+        // Leftmost on purpose: it toggles the outline sidebar, which docks on
+        // the left edge, so button and panel sit on the same side.
+        button(7, IDC_TOGGLE_OUTLINE, BTNS_CHECK, StrId::LblOutline),
+        separator(),
         button(0, IDC_OPEN_LEFT, BTNS_BUTTON, StrId::LblOpenLeft, true),
         button(1, IDC_OPEN_RIGHT, BTNS_BUTTON, StrId::LblOpenRight, true),
         separator(),
@@ -845,7 +850,6 @@ void MainWindow::CreateToolbar(HINSTANCE hinst) {
         button(10, IDC_SCROLL_PAGED, BTNS_CHECK, StrId::LblScrollPaged),
         separator(),
         button(6, IDC_FIND_SHOW, BTNS_BUTTON, StrId::LblFind),
-        button(7, IDC_TOGGLE_OUTLINE, BTNS_CHECK, StrId::LblOutline),
         separator(),
         button(8, IDC_FULLSCREEN, BTNS_BUTTON, StrId::LblFullScreen),
     };
@@ -2652,6 +2656,20 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             if (pane->HasPersistableDocument())
                 (pane == m_right.get() ? m_fallbackRight : m_fallbackLeft) = PaneSettings{};
             pane->CloseDocument(); // DocumentOpened refreshes status/outline/UI
+            return 0;
+        }
+        case IDC_CLOSE_SESSION: {
+            // Menu-only (no accelerator), so unlike Ctrl+W it needs no focus
+            // guard: the user aimed at both panes explicitly. Same rule on the
+            // fallbacks - a deliberate close must not resurrect on the next
+            // launch - and each CloseDocument fires DocumentOpened, which
+            // clears the sync map and refreshes status, outline and command UI.
+            if (m_left->HasPersistableDocument())
+                m_fallbackLeft = PaneSettings{};
+            if (m_right->HasPersistableDocument())
+                m_fallbackRight = PaneSettings{};
+            m_left->CloseDocument();
+            m_right->CloseDocument();
             return 0;
         }
         case IDC_FOCUS_NEXT_PANE:
