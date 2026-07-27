@@ -85,13 +85,26 @@ public:
     // FitZoomChanged: a fit recomputation moved the zoom without a user
     // gesture (resize, splitter drag); sync must refresh anchors, not
     // propagate, or the stale ratio causes discontinuous jumps.
-    enum class ViewEvent { Scrolled, Zoomed, DocumentOpened, FocusGained, FitZoomChanged };
+    // DocumentOpening fires when a (re)open STARTS - before the old state is
+    // torn down and long before the new view settles - so the sync controller
+    // can drop the pane from its joined set for the whole transition.
+    enum class ViewEvent {
+        Scrolled,
+        Zoomed,
+        DocumentOpening,
+        DocumentOpened,
+        FocusGained,
+        FitZoomChanged
+    };
     using ViewChangedHandler = std::function<void(PaneWindow&, ViewEvent, float zoomRatio)>;
     void SetViewChangedHandler(ViewChangedHandler handler) {
         m_onViewChanged = std::move(handler);
     }
-    void SetOpenSiblingHandler(std::function<void(std::wstring)> handler) {
-        m_openSibling = std::move(handler);
+    // Files dropped on this pane beyond the first, in drop order: the pane
+    // takes file 0 and hands the REST to the frame, which alone knows how many
+    // panes exist and which of them is the drop target.
+    void SetExtraFilesHandler(std::function<void(std::vector<std::wstring>)> handler) {
+        m_onExtraFiles = std::move(handler);
     }
     // Double-click on an empty (or failed) pane asks the frame to show the
     // open dialog for this pane; the pane itself owns no dialogs.
@@ -454,7 +467,7 @@ private:
     uint64_t m_openGen = 0; // matches the pending OpenAsync; gates OnDocOpened
 
     ViewChangedHandler m_onViewChanged;
-    std::function<void(std::wstring)> m_openSibling; // second file of a multi-drop
+    std::function<void(std::vector<std::wstring>)> m_onExtraFiles; // rest of a multi-drop
     std::function<void(ScrollMode)> m_onScrollModeRequest; // Ctrl+4/5: frame-owned global mode
     std::function<void()> m_onOpenRequest;           // double-click on an empty pane
 

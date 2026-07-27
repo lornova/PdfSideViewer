@@ -1,17 +1,19 @@
 # PdfSideViewer
 
 A fast, fully native Windows 10/11 desktop viewer that shows **two PDF documents side by
-side**, with **synchronized scrolling** that actually works: the pairing is a user-adjustable
-anchor (pre-scroll each pane, lock, done) and positions are exchanged in *page units*, so
-documents with different page formats and different zoom levels stay aligned page-for-page.
+side** (three, in the optional three-pane mode), with **synchronized scrolling** that actually
+works: the pairing is a user-adjustable anchor (pre-scroll each pane, lock, done) and positions
+are exchanged in *page units*, so documents with different page formats and different zoom
+levels stay aligned page-for-page.
 
 Pure Win32 + Direct2D, rendered by [MuPDF](https://mupdf.com): a single self-contained
 executable that starts instantly.
 
 ## Features
 
-- Two independent panes, each a full PDF viewer: continuous layout, tiled rendering crisp up
-  to 800% zoom, fit-width / fit-page modes, per-monitor DPI awareness.
+- Two independent panes (three in the optional three-pane mode), each a full PDF viewer:
+  continuous layout, tiled rendering crisp up to 800% zoom, fit-width / fit-page modes,
+  per-monitor DPI awareness.
 - **Page-by-page mode** (Ctrl+4): the view holds one page at a time. When the whole page fits,
   every key press or wheel notch flips a page; when zoomed in, input scrolls to the page edge
   first and only a further input flips (backward flips land at the bottom of the previous
@@ -57,11 +59,12 @@ executable that starts instantly.
 - **Go to page** (Ctrl+G) by number or by label ("ix", "A-3" - labels win on ambiguity), an
   editable page box in the toolbar row, and a page tooltip while dragging the scrollbar.
 - Compact chrome: menu bar and toolbar share ONE row in a rebar (with a chevron overflow when
-  narrow), plus the status bar (left pane info left, right pane info right, sync state
-  centered), full screen (F11 / Alt+Enter), a width-adjustable outline sidebar (drag the
+  narrow), plus the status bar (page and zoom per pane, with the sync state between the two
+  panes in the two-pane layout and after the rightmost pane's cells in the three-pane one),
+  full screen (F11 / Alt+Enter), a width-adjustable outline sidebar (drag the
   divider; double-click fits it to the widest bookmark, removing the horizontal scroll),
-  recent files and recent left+right pairs, UI in English, Italian, German, French,
-  Hungarian, Ukrainian, Romanian, Portuguese, Greek, Spanish, Polish, Dutch, Czech and
+  recent files and recent sessions (two or three documents), UI in English, Italian, German,
+  French, Hungarian, Ukrainian, Romanian, Portuguese, Greek, Spanish, Polish, Dutch, Czech and
   Swedish.
 - **Pane headers**: an optional strip above each pane shows the open PDF's file name (or full
   path) and doubles as the active-pane cue - the focused pane's header carries an accent underline
@@ -83,24 +86,43 @@ executable that starts instantly.
   override, the SyncTeX inverse-search command, and the Explorer context-menu integration.
   When full screen hides the toolbar, a small floating button in the top-right corner exits
   full screen.
-- **Explorer context menu** (optional, off by default): "Open left/right in PDF Side Viewer" on
-  .pdf files, registered per-user under `SystemFileAssociations` so it can NEVER become the
-  default PDF handler. "Open right" reuses the running window. Moving the exe requires
-  re-registering (re-tick the Options checkbox, or run `-register-shell`/`-unregister-shell`
-  from a script).
-- **Swap panes** (F8) exchanges the two documents including their view states; sync points
-  survive the swap, mirrored.
-- Drag & drop (drop two files to fill both panes), double-click an empty pane to open a file
-  there, close a document with Ctrl+W (or both at once with File ▸ Close Session), command line
-  (`PdfSideViewer.exe left.pdf right.pdf`), session restore (documents, positions, window).
+- **Explorer context menu** (optional, off by default): "Open left/right/centre in PDF Side
+  Viewer" on .pdf files, registered per-user under `SystemFileAssociations` so it can NEVER become
+  the default PDF handler. They reuse the running window, and "Open centre" switches it to three
+  panes. Moving the exe requires re-registering (re-tick the Options checkbox, or run
+  `-register-shell`/`-unregister-shell` from a script).
+- **Swap panes** (F8) exchanges the two documents including their view states; with three panes
+  it rotates them instead (left moves to centre, centre to right, right wraps around to left)
+  and Shift+F8 rotates the other way. Sync points survive either way, permuted along with the
+  documents.
+- **Three-pane mode** (optional; the app stays two-pane by default): View ▸ Panes ▸ Three Panes
+  adds a third document between the other two, and File ▸ Open Centre (Ctrl+Shift+M) switches to it
+  on the spot. Each pane keeps its own splitter, page/zoom cell in the status bar and view state;
+  going back to two panes closes the centre document and remembers it for the next switch. The
+  app stays two-pane unless you ask otherwise: a launch that does not reopen the last session
+  starts from the pane count chosen in Options ▸ Defaults, which is two. Sync
+  points work across all three: "Sync Points from Bookmarks" keeps the headings every open
+  document shares, so a third document can only narrow the map, never distort it. Made for
+  comparing three editions or translations of the same text side by side.
+- Drag & drop (drop two or three files at once to fill the panes; three of them turn the
+  three-pane mode on), double-click an empty pane to open a file there, close a document with
+  Ctrl+W (or the whole session with File ▸ Close Session, which also returns to the default pane
+  count), command line
+  (`PdfSideViewer.exe left.pdf right.pdf [centre.pdf]` — Beyond Compare's argument order, so the
+  THIRD file is the centre one and a third argument turns the mode on), session restore
+  (documents, positions, pane count, window).
+- **Recent Sessions** (File menu) remembers the documents that were open together, two or three of
+  them, and reopening one brings its layout back with it. Each remembered session also keeps its
+  manual sync points.
 
 ## Keyboard
 
 | Key | Action |
-|---|---|
+| --- | --- |
 | Ctrl+O / Ctrl+Shift+O | Open document in the left / right pane |
+| Ctrl+Shift+M | Open document in the centre pane (switches to three panes) |
 | Ctrl+W | Close the focused pane's document |
-| Tab | Switch pane |
+| Tab | Switch pane (cycles through all of them) |
 | F7 / Ctrl+F7 | Toggle scroll sync / zoom sync |
 | Shift+F7 / Ctrl+Shift+F7 | Add a sync point at the current alignment / clear sync points |
 | Alt + scroll | Adjust one pane while synced (re-anchors; with sync points the tweak is transient) |
@@ -112,7 +134,7 @@ executable that starts instantly.
 | Ctrl+2 / Ctrl+3 | Fit width / fit page |
 | Ctrl+4 / Ctrl+5 | Continuous / page-by-page scrolling |
 | Ctrl+G | Go to page (number or label) |
-| F8 | Swap the two panes |
+| F8 / Shift+F8 | Swap the two panes (with three, rotate: left → centre → right; Shift+F8 rotates back) |
 | F11 / Alt+Enter | Full screen (Esc exits) |
 | Ctrl+click | SyncTeX inverse search (open the .tex source at that spot) |
 | Space, Shift+Space, PgUp/PgDn, Home/End, arrows | Navigate |
@@ -122,11 +144,18 @@ executable that starts instantly.
 Compile with SyncTeX enabled (`pdflatex -synctex=1`, the LaTeX Workshop default). The viewer
 reads the `.synctex(.gz)` next to each PDF.
 
-**Inverse search** (PDF → editor): Ctrl+click a position in either pane. By default the viewer
+**Inverse search** (PDF → editor): Ctrl+click a position in any pane. By default the viewer
 opens VS Code at that line through the `vscode://file/...` protocol. The launch template lives
 in `settings.ini` under `[synctex] inverse` (`%f` = file, `%l` = line; a value containing
 `://` is treated as a URL, anything else as a command line), e.g. for another editor:
 `inverse=texstudio --line %l "%f"`.
+
+Inverse search **requires the viewer to run without administrator privileges**, and says so
+instead of launching anything: that template comes from a file the same user's ordinary
+processes can write, so honouring it from an elevated process would run their command at high
+integrity. The refusal also applies when the app cannot determine its own elevation, which is
+the safe answer to an unknown. PDF Side Viewer is a per-user application and never needs
+elevation.
 
 **Forward search** (editor → PDF): configure LaTeX Workshop to use PdfSideViewer as the
 external viewer in VS Code's `settings.json`:
@@ -144,9 +173,9 @@ external viewer in VS Code's `settings.json`:
 
 `PdfSideViewer.exe -forward-search file.tex 123 file.pdf` hands the request to the running
 instance (the pane holding that PDF scrolls there and flashes the target green; the PDF is
-opened if needed) or starts the viewer if none is running. With two panes this works per
-document: each pane queries its own `.synctex.gz`, so a bilingual it/en pair gets independent
-forward and inverse search.
+opened if needed) or starts the viewer if none is running. This works per pane: each pane
+queries its own `.synctex.gz`, so a bilingual it/en pair (or trio) gets independent forward
+and inverse search.
 
 ## Building
 
@@ -156,7 +185,7 @@ v143, Windows 10/11 SDK). MuPDF (official 1.28.x source release, `thirdparty/` i
 
 1. Fetch and build MuPDF once per platform (x64 and/or ARM64):
 
-   ```
+   ```powershell
    powershell scripts\get-mupdf.ps1 -Build                      # x64
    powershell scripts\get-mupdf.ps1 -Build -Platforms x64,ARM64 # both
    ```
@@ -167,7 +196,7 @@ v143, Windows 10/11 SDK). MuPDF (official 1.28.x source release, `thirdparty/` i
 
 2. Build the app:
 
-   ```
+   ```powershell
    msbuild PdfSideViewer.sln -p:Configuration=Release -p:Platform=x64 -m
    ```
 

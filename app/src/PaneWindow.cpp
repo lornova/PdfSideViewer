@@ -62,6 +62,32 @@ void PaneWindow::RegisterWindowClass(HINSTANCE hinst) {
 PaneWindow::PaneWindow(DxResources& dx, PCWSTR placeholderHint) : m_dx(dx), m_hint(placeholderHint) {}
 
 PaneWindow::~PaneWindow() {
+    // A pane can be destroyed while the frame lives on (the pane-count mode
+    // switch), and then nothing else would take its window down: it would
+    // linger as a child holding a dangling `this` in its userdata. At app
+    // shutdown the frame already destroyed it and m_hwnd is null by then
+    // (WM_NCDESTROY clears it), so this is a no-op on that path.
+    // The watcher dies FIRST: its thread posts to m_hwnd, and although the UI
+    // thread being parked here means an in-process recycled-handle post
+    // cannot happen anyway, joining it before the window goes away makes the
+    // no-stale-notification argument local instead of resting on message
+    // queue internals.
+    m_watcher.Stop();
+    if (m_hwnd) {
+        // One notification may have been posted just before the stop signal:
+        // remove it so a future window reusing the handle can never receive
+        // it. WM_QUIT bypasses EVERY PeekMessage filter and must be re-posted
+        // if swallowed (CLAUDE.md invariant).
+        MSG msg;
+        while (PeekMessageW(&msg, m_hwnd, WM_PSV_FILE_CHANGED, WM_PSV_FILE_CHANGED,
+                            PM_REMOVE)) {
+            if (msg.message == WM_QUIT) {
+                PostQuitMessage(static_cast<int>(msg.wParam));
+                break;
+            }
+        }
+        DestroyWindow(m_hwnd);
+    }
     m_doc.Shutdown();
 }
 
@@ -114,6 +140,14 @@ void PaneWindow::OpenDocument(std::wstring path) {
     m_hasRestoreView = false;
     m_docPath = path;
     m_state = State::Opening;
+    // The sync controller must drop this pane from its joined set NOW, before
+    // any teardown (per the ViewEvent contract): an already-joined pane
+    // re-opening (auto-reload, swap and rotation, an MRU open over a live
+    // document) would otherwise keep leading, and its saved-view restore echo
+    // in OnDocOpened would drive the siblings through anchors captured for
+    // the PREVIOUS document.
+    if (m_onViewChanged)
+        m_onViewChanged(*this, ViewEvent::DocumentOpening, 1.0f);
     m_doc.CancelSearch();
     ResetDocumentState();
     // Watch from Opening on (not from success): a failed open self-heals when
@@ -317,6 +351,15 @@ LRESULT CALLBACK PaneWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     }
     if (!self)
         return DefWindowProcW(hwnd, msg, wParam, lParam);
+    if (msg == WM_NCDESTROY) {
+        // Last message this window will ever get: cut the two links back to
+        // the object, so a later destructor knows the window is already gone
+        // and a recycled handle can never reach a freed PaneWindow.
+        const LRESULT result = self->HandleMessage(msg, wParam, lParam);
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        self->m_hwnd = nullptr;
+        return result;
+    }
     try {
         return self->HandleMessage(msg, wParam, lParam);
     } catch (const GraphicsError&) {
@@ -347,8 +390,14 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         wchar_t path[MAX_PATH];
         if (count >= 1 && DragQueryFileW(drop, 0, path, MAX_PATH))
             OpenDocument(path);
-        if (count >= 2 && m_openSibling && DragQueryFileW(drop, 1, path, MAX_PATH))
-            m_openSibling(path);
+        if (count >= 2 && m_onExtraFiles) {
+            std::vector<std::wstring> extra;
+            for (UINT i = 1; i < count; ++i)
+                if (DragQueryFileW(drop, i, path, MAX_PATH))
+                    extra.emplace_back(path);
+            if (!extra.empty())
+                m_onExtraFiles(std::move(extra));
+        }
         DragFinish(drop);
         SetFocus(m_hwnd);
         return 0;
@@ -435,6 +484,11 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
 
     case WM_PSV_FILE_CHANGED:
+        // A post from a PREVIOUS watch (same HWND, path already switched)
+        // must not read as a change to the new document: joining the old
+        // thread cannot retract what it already posted.
+        if (static_cast<UINT>(wParam) != m_watcher.Generation())
+            return 0;
         // Debounce: reload only after the change burst has been quiet for a
         // while. Every notification restarts both the timer and the retry
         // budget (new burst = new attempt).

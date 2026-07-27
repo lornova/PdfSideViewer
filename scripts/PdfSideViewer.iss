@@ -63,18 +63,18 @@ Name: "swedish"; MessagesFile: "compiler:Languages\Swedish.isl"
 
 ; Same wording as the app's Options checkbox (Strings.h OptShellIntegration).
 [CustomMessages]
-english.ShellTask=Show "Open left/right in PDF Side Viewer" in the Explorer menu for PDF files
-italian.ShellTask=Mostra "Apri a sinistra/destra in PDF Side Viewer" nel menu di Esplora file per i PDF
-german.ShellTask=„Links/Rechts in PDF Side Viewer öffnen“ im Explorer-Menü für PDF-Dateien anzeigen
-french.ShellTask=Afficher « Ouvrir à gauche/droite dans PDF Side Viewer » dans le menu de l'Explorateur pour les PDF
-hungarian.ShellTask=„Megnyitás balra/jobbra a PDF Side Viewerben” megjelenítése az Intéző menüjében a PDF-ekhez
-ukrainian.ShellTask=Показувати «Відкрити ліворуч/праворуч у PDF Side Viewer» у меню Провідника для файлів PDF
-portuguese.ShellTask=Mostrar «Abrir à esquerda/direita no PDF Side Viewer» no menu do Explorador para ficheiros PDF
-spanish.ShellTask=Mostrar «Abrir a la izquierda/derecha en PDF Side Viewer» en el menú del Explorador para archivos PDF
-polish.ShellTask=Pokaż „Otwórz po lewej/prawej w PDF Side Viewer” w menu Eksploratora dla plików PDF
-dutch.ShellTask="Links/rechts openen in PDF Side Viewer" tonen in het Verkenner-menu voor PDF-bestanden
-czech.ShellTask=Zobrazit „Otevřít vlevo/vpravo v PDF Side Viewer“ v nabídce Průzkumníka pro soubory PDF
-swedish.ShellTask=Visa "Öppna till vänster/höger i PDF Side Viewer" i Utforskaren-menyn för PDF-filer
+english.ShellTask=Show "Open left/right/centre in PDF Side Viewer" in the Explorer menu for PDF files
+italian.ShellTask=Mostra "Apri a sinistra/destra/al centro in PDF Side Viewer" nel menu di Esplora file per i PDF
+german.ShellTask=„Links/Rechts/Mitte in PDF Side Viewer öffnen“ im Explorer-Menü für PDF-Dateien anzeigen
+french.ShellTask=Afficher « Ouvrir à gauche/droite/au centre dans PDF Side Viewer » dans le menu de l'Explorateur pour les PDF
+hungarian.ShellTask=„Megnyitás balra/jobbra/középre a PDF Side Viewerben” megjelenítése az Intéző menüjében a PDF-ekhez
+ukrainian.ShellTask=Показувати «Відкрити ліворуч/праворуч/по центру у PDF Side Viewer» у меню Провідника для файлів PDF
+portuguese.ShellTask=Mostrar «Abrir à esquerda/direita/ao centro no PDF Side Viewer» no menu do Explorador para ficheiros PDF
+spanish.ShellTask=Mostrar «Abrir a la izquierda/derecha/en el centro en PDF Side Viewer» en el menú del Explorador para archivos PDF
+polish.ShellTask=Pokaż „Otwórz po lewej/prawej/na środku w PDF Side Viewer” w menu Eksploratora dla plików PDF
+dutch.ShellTask="Links/rechts/midden openen in PDF Side Viewer" tonen in het Verkenner-menu voor PDF-bestanden
+czech.ShellTask=Zobrazit „Otevřít vlevo/vpravo/uprostřed v PDF Side Viewer“ v nabídce Průzkumníka pro soubory PDF
+swedish.ShellTask=Visa "Öppna till vänster/höger/mitten i PDF Side Viewer" i Utforskaren-menyn för PDF-filer
 
 [Tasks]
 Name: "shellintegration"; Description: "{cm:ShellTask}"
@@ -100,37 +100,37 @@ Filename: "{app}\PdfSideViewer.exe"; Description: "{cm:LaunchProgram,PDF Side Vi
 // Verb removal is uninstall-time CODE, not an [UninstallRun] entry: Check
 // parameters on [UninstallRun] are evaluated during SETUP (documented Inno
 // semantics) - at that point the verbs still hold their pre-install value, so
-// the entry would be recorded (or dropped) from stale state. Here the registry
-// is read when the uninstall actually runs, and EACH verb is removed only if
-// its command points INTO this install: a portable or dev copy may own one or
-// both HKCU keys, and uninstalling this copy must not break that one. The
-// match requires the trailing backslash so a sibling directory such as
-// "...\PDF Side Viewer-dev" can never pass as "...\PDF Side Viewer". The keys
-// are deleted directly (the app's ShellIntegration keeps everything under the
-// verb key, so the subtree is the whole verb) because per-verb granularity is
-// needed for mixed ownership and -unregister-shell always removes both.
-const
-  ShellBase = 'Software\Classes\SystemFileAssociations\.pdf\shell\';
-
-function VerbPointsHere(const Verb: string): Boolean;
-var
-  Cmd: string;
-begin
-  Result := RegQueryStringValue(HKCU, ShellBase + Verb + '\command', '', Cmd)
-    and (Pos(Lowercase(ExpandConstant('{app}')) + '\', Lowercase(Cmd)) > 0);
-end;
-
-procedure RemoveVerbIfOurs(const Verb: string);
-begin
-  if VerbPointsHere(Verb) then
-    RegDeleteKeyIncludingSubkeys(HKCU, ShellBase + Verb);
-end;
-
+// the entry would be recorded (or dropped) from stale state. The removal
+// itself is DELEGATED to the app (-unregister-shell-owned): per-verb exact
+// ownership and the per-user lock live in ONE implementation instead of a
+// Pascal reimplementation that would drift (its old substring match let a
+// sibling "...-dev" directory pass, and it raced live copies).
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+var
+  ResultCode: Integer;
 begin
   if CurUninstallStep = usUninstall then
   begin
-    RemoveVerbIfOurs('PsvOpenLeft');
-    RemoveVerbIfOurs('PsvOpenRight');
+    // The exe still exists at usUninstall: it removes the verbs it owns.
+    // -unregister-shell-owned runs the SAME ownership parsing (exact first
+    // quoted token) and the SAME per-user cross-process lock file as the
+    // running app, so the read-check-delete sequence cannot race a live
+    // copy's registration. There is deliberately NO direct-registry fallback:
+    // an unlocked read-check-delete from this script could delete a verb a
+    // portable copy rewrote in between, and a STALE verb left behind by a
+    // corrupted install (exe that cannot launch, or a failed-closed exit
+    // code, e.g. lock contention) is the safer failure - it is inert and
+    // removable later with -unregister-shell from any working copy.
+    if Exec(ExpandConstant('{app}\PdfSideViewer.exe'), '-unregister-shell-owned', '',
+            SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+    begin
+      // The argument array stays on THIS line: Inno reads a line whose first
+      // non-blank character is '[' as a section header, so wrapping it would
+      // fail the compile with "Invalid section tag".
+      if ResultCode <> 0 then
+        Log(Format('shell cleanup exited %d; owned verbs left behind', [ResultCode]));
+    end
+    else
+      Log('PdfSideViewer.exe could not run; shell verbs (if any) left behind');
   end;
 end;

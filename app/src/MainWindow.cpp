@@ -3,6 +3,7 @@
 #include "resource.h"
 #include "util/DialogTemplate.h"
 #include "util/GlyphIcons.h"
+#include "util/IpcXml.h"
 #include "util/OutlineNumbering.h"
 #include "util/Settings.h"
 #include "util/ShellIntegration.h"
@@ -58,6 +59,24 @@ std::wstring MruMenuLabel(size_t index, const std::wstring& text) {
     label += L"  ";
     label += EscapeMenuText(text);
     return label;
+}
+
+// How many slots an MRU/sync-point entry actually names.
+size_t SessionSlotCount(const MruSession& session) {
+    size_t used = 0;
+    for (const std::wstring& path : session.path)
+        used += path.empty() ? 0 : 1;
+    return used;
+}
+
+// Same documents in the same slots. Case-insensitive like the rest of the path
+// handling; an empty slot only matches an empty slot, so a two-document entry
+// is never confused with the three-document one that contains it.
+bool SameSession(const MruSession& a, const MruSession& b) {
+    for (size_t i = 0; i < a.path.size(); ++i)
+        if (lstrcmpiW(a.path[i].c_str(), b.path[i].c_str()) != 0)
+            return false;
+    return true;
 }
 
 void ReplaceAll(std::wstring& s, PCWSTR what, const std::wstring& with) {
@@ -117,7 +136,21 @@ constexpr GlyphSpec kToolbarGlyphs[] = {
     {0xE894},       // 15 clear sync points (Clear)
     {0xE8E4},       // 16 alignment gaps (uneven rows)
     {0xE748},       // 17 swap panes (Switch)
+    // Open centre: a pane FLANKED on both sides. Same box family as the
+    // open-left/right arrows next to it, which is what makes the trio read as
+    // one control (chosen by rendering the candidates side by side).
+    {0xE8AE}, // 18 open centre
 };
+
+// Per-slot user-visible strings, indexed by PaneSlot.
+constexpr StrId kSlotPlaceholder[kPaneSlots] = {StrId::PlaceholderLeft, StrId::PlaceholderCenter,
+                                                StrId::PlaceholderRight};
+constexpr StrId kSlotOpenDlgTitle[kPaneSlots] = {
+    StrId::OpenDlgTitleLeft, StrId::OpenDlgTitleCenter, StrId::OpenDlgTitleRight};
+constexpr StrId kSlotStatusPrefix[kPaneSlots] = {
+    StrId::StatusLeftPrefix, StrId::StatusCenterPrefix, StrId::StatusRightPrefix};
+constexpr StrId kSlotStatusNoDoc[kPaneSlots] = {
+    StrId::StatusLeftNoDoc, StrId::StatusCenterNoDoc, StrId::StatusRightNoDoc};
 
 constexpr UINT_PTR kPageBoxId = 2001; // rebar band 2: editable current-page box
 
@@ -155,6 +188,7 @@ constexpr WORD kOptFsToolbarId = 2112;
 constexpr WORD kOptFsStatusId = 2113;
 constexpr WORD kOptHeaderId = 2114;
 constexpr WORD kOptHeaderPathId = 2115;
+constexpr WORD kOptPaneCountId = 2116;
 constexpr WORD kSyncPtsListId = 2401;
 constexpr WORD kSyncPtsRemoveId = 2402;
 constexpr WORD kSyncPtsClearId = 2403;
@@ -165,6 +199,11 @@ constexpr UINT kMsgSyncPtsRefresh = WM_APP + 20;
 struct OptionsDialogState {
     MainWindow* self = nullptr;
     bool clearRecent = false; // armed by the button, applied on OK (cancel-safe)
+    bool shellAtOpen = false;  // shell checkbox as the dialog found it: OK acts
+                               // on it only if the user actually moved it
+    bool shellPartial = false; // some verbs ours but not all - a state the
+                               // checkbox cannot display, and which an
+                               // untouched unchecked box must still clean up
 };
 
 // The find bar is a plain container: forward its children's notifications to
@@ -231,8 +270,7 @@ MainWindow::~MainWindow() {
         ImageList_Destroy(m_fsBarIcons);
 }
 
-bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
-                        std::wstring rightFile,
+bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> files,
                         std::optional<ForwardSearchRequest> forward) {
     m_dx.EnsureCreated(); // fail fast in wWinMain if graphics init is impossible
 
@@ -254,46 +292,70 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_toolbarText = std::clamp(session.toolbarText, 0, 2); // read by CreateToolbar
     m_fsShowToolbar = session.fsToolbar;
     m_fsShowStatus = session.fsStatus;
+    m_defaults.paneCount = std::clamp(session.defPaneCount, 2, kPaneSlots);
     m_defaults.scrollMode = session.defScrollMode != 0 ? PaneWindow::ScrollMode::Paged
                                                        : PaneWindow::ScrollMode::Continuous;
     m_defaults.zoomMode = static_cast<PaneWindow::ZoomMode>(session.defZoomMode);
     m_defaults.scrollSync = session.defScrollSync;
     m_defaults.zoomSync = session.defZoomSync;
     m_mruFiles = session.mruFiles;
-    m_mruPairs = session.mruPairs;
+    m_mruSessions = session.mruSessions;
     m_savedPoints = session.syncPoints;
+    // Before any pane is created: the count decides which slots exist. With
+    // session restore ON the last arrangement comes back; without it, the
+    // configured DEFAULT applies, exactly like the scroll mode and the sync
+    // locks - a launch that does not reopen the last session must not inherit
+    // its layout either. A third positional argument overrides both (and gets
+    // persisted, like every other implicit activation).
+    m_paneCount = std::clamp(m_restoreSession ? session.paneCount : m_defaults.paneCount, 2,
+                             kPaneSlots);
+    if (!files[kSlotCenter].empty())
+        m_paneCount = 3;
+
+    bool anyFile = false;
+    for (int slot = 0; slot < kPaneSlots; ++slot)
+        anyFile = anyFile || !files[static_cast<size_t>(slot)].empty();
 
     if (forward) {
         // Cold-start forward search: prefer the saved session when it already
-        // contains the pdf (the sibling document comes back too); otherwise
+        // contains the pdf (the sibling documents come back too); otherwise
         // open just that pdf. The query itself replays on DocumentOpened.
         m_parkedForward = std::move(*forward);
-        const bool inSession =
-            lstrcmpiW(session.left.path.c_str(), m_parkedForward->pdf.c_str()) == 0 ||
-            lstrcmpiW(session.right.path.c_str(), m_parkedForward->pdf.c_str()) == 0;
-        if (!inSession && leftFile.empty() && rightFile.empty())
-            leftFile = m_parkedForward->pdf;
+        bool inSession = false;
+        for (int slot = 0; slot < kPaneSlots; ++slot)
+            if (SlotOn(slot) && lstrcmpiW(session.panes[static_cast<size_t>(slot)].path.c_str(),
+                                          m_parkedForward->pdf.c_str()) == 0)
+                inSession = true;
+        if (!inSession && !anyFile) {
+            files[kSlotLeft] = m_parkedForward->pdf;
+            anyFile = true;
+        }
     }
 
-    m_left = std::make_unique<PaneWindow>(m_dx, Str(StrId::PlaceholderLeft));
-    m_right = std::make_unique<PaneWindow>(m_dx, Str(StrId::PlaceholderRight));
-    m_sync = std::make_unique<SyncController>(*m_left, *m_right);
+    PerPane<PaneWindow*> panePtrs{};
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        if (!SlotOn(slot))
+            continue;
+        m_panes[static_cast<size_t>(slot)] =
+            std::make_unique<PaneWindow>(m_dx, Str(kSlotPlaceholder[slot]));
+        panePtrs[static_cast<size_t>(slot)] = Pane(slot);
+    }
+    m_sync = std::make_unique<SyncController>();
+    m_sync->SetPanes(panePtrs);
     // UI preferences like the toolbar flags: applied on every launch path.
     m_showAlignmentGaps = session.showGaps;
     m_showAnchors = session.showAnchors;
     m_showTicks = session.showTicks;
     m_sync->SetAlignmentGapsEnabled(m_showAlignmentGaps);
     m_sync->SetMapChangedHandler([this] { ApplyAlignmentGaps(); });
-    m_left->SetMarkerVisibility(m_showAnchors, m_showTicks);
-    m_right->SetMarkerVisibility(m_showAnchors, m_showTicks);
     m_showHeader = session.showHeader;
     m_headerShowPath = session.headerShowPath;
-    m_left->SetHeaderOptions(m_showHeader, m_headerShowPath);
-    m_right->SetHeaderOptions(m_showHeader, m_headerShowPath);
-    // m_activePane defaults to the left pane; mark it so the cue and the outline
-    // association are visible before the first focus (and while the window is
-    // inactive at startup).
-    m_left->SetActive(true);
+    // The per-pane pushes happen in ConfigurePane, below, once the handlers
+    // exist: a pane created later by the mode switch must get the same set.
+    // m_activePane defaults to the leftmost pane; mark it so the cue and the
+    // outline association are visible before the first focus (and while the
+    // window is inactive at startup).
+    Pane(kSlotLeft)->SetActive(true);
 
     // The HMENU is NEVER attached to the window: it is the popup source for
     // the rebar-hosted menu band, and the band lives in the client area (the
@@ -311,17 +373,22 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
     m_dpi = GetDpiForWindow(m_hwnd);
     SetWindowPos(m_hwnd, nullptr, 0, 0, MulDiv(kInitialWidthDip, m_dpi, 96),
                  MulDiv(kInitialHeightDip, m_dpi, 96), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
-    // UIPI hardening: accept WM_COPYDATA (forward search, Explorer verbs)
-    // even from a lower-integrity second instance.
-    ChangeWindowMessageFilterEx(m_hwnd, WM_COPYDATA, MSGFLT_ALLOW, nullptr);
+    // NO ChangeWindowMessageFilterEx exception for WM_COPYDATA: default UIPI
+    // is the authorization boundary of the IPC channel (the payload itself is
+    // unauthenticated). Senders are the same exe at the same integrity in
+    // every supported flow; the one case the default blocks - this instance
+    // running ELEVATED while Explorer/the editor runs medium - degrades to
+    // the documented cold-start fallback instead of letting lower-integrity
+    // processes feed an elevated viewer arbitrary local and UNC paths.
 
-    const auto onViewChanged = [this](PaneWindow& p, PaneWindow::ViewEvent e, float r) {
+    m_onViewChanged = [this](PaneWindow& p, PaneWindow::ViewEvent e, float r) {
         if (e == PaneWindow::ViewEvent::FocusGained) {
             m_activePane = &p; // the page box targets the last-focused pane
             // The active-pane cue persists through window deactivation, so it is
             // driven here from m_activePane, not from the panes' Win32 focus.
-            m_left->SetActive(m_left.get() == &p);
-            m_right->SetActive(m_right.get() == &p);
+            for (int slot = 0; slot < kPaneSlots; ++slot)
+                if (SlotOn(slot))
+                    Pane(slot)->SetActive(Pane(slot) == &p);
             if (m_outlineVisible && m_outlinePane != &p)
                 UpdateOutlineSidebar(&p);
             else
@@ -342,34 +409,35 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
                 // path change (open, close, swap) cancels the parked regen:
                 // the map's context is gone. Manual points stay gone on
                 // reload: they reference pages the rebuild may have moved.
-                std::wstring& lastDoc = (&p == m_right.get()) ? m_lastDocRight : m_lastDocLeft;
+                const int slot = SlotOfPane(&p);
+                std::wstring& lastDoc = m_lastDoc[static_cast<size_t>(std::max(slot, 0))];
                 const std::wstring& cur = p.DocumentPath();
                 const bool pathChanged =
                     cur.empty() || lstrcmpiW(cur.c_str(), lastDoc.c_str()) != 0;
                 if (pathChanged)
                     m_sync->CancelAutoRegen();
                 lastDoc = cur;
-                if (m_sync->AutoRegenPending() && m_left->HasDocument() &&
-                    m_right->HasDocument() && !m_left->Outline().empty() &&
-                    !m_right->Outline().empty())
+                if (m_sync->AutoRegenPending() && AllPanesHaveOutlines())
                     GenerateSyncPointsFromBookmarks(false);
-                if (m_swapMap.pending) {
-                    const std::wstring& expect =
-                        (&p == m_left.get()) ? m_swapMap.expectLeft : m_swapMap.expectRight;
+                if (m_swapMap.pending && slot >= 0) {
+                    const std::wstring& expect = m_swapMap.expect[static_cast<size_t>(slot)];
                     if (!p.HasDocument() ||
                         lstrcmpiW(p.DocumentPath().c_str(), expect.c_str()) != 0) {
                         // Failed reopen, close, or an interleaved open of a
                         // different file: the parked map's context is gone.
                         m_swapMap = {};
                     } else {
-                        ((&p == m_left.get()) ? m_swapMap.leftSettled
-                                              : m_swapMap.rightSettled) = true;
-                        if (m_swapMap.leftSettled && m_swapMap.rightSettled) {
+                        m_swapMap.settled[static_cast<size_t>(slot)] = true;
+                        bool allSettled = true;
+                        for (int s = 0; s < kPaneSlots; ++s)
+                            if (SlotOn(s) && !m_swapMap.settled[static_cast<size_t>(s)])
+                                allSettled = false;
+                        if (allSettled) {
                             m_sync->RestorePoints(std::move(m_swapMap.points));
                             m_swapMap = {};
                             if (m_sync->ScrollSync())
                                 m_sync->RealignFollower(*FocusedPane());
-                            RememberSyncPoints(); // the mirrored pair persists too
+                            RememberSyncPoints(); // the mirrored session persists too
                         }
                     }
                 }
@@ -383,8 +451,7 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
             // recording point. Error opens keep HasDocument() false.
             if (e == PaneWindow::ViewEvent::DocumentOpened && p.HasDocument()) {
                 RecordMruFile(p.DocumentPath());
-                if (m_left->HasDocument() && m_right->HasDocument())
-                    RecordMruPair(m_left->DocumentPath(), m_right->DocumentPath());
+                RecordMruSession(); // no-op unless every active pane has a document
                 RebuildMruMenus();
                 // Parked forward search: covers cold start, on-demand opens
                 // and requests that landed while an auto-reload was underway.
@@ -407,41 +474,14 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
         else if (GetKeyState(VK_MENU) < 0)
             m_altScrollGesture = true; // Alt is a scroll modifier here, not a menu key
     };
-    m_left->SetViewChangedHandler(onViewChanged);
-    m_right->SetViewChangedHandler(onViewChanged);
-    m_left->SetOpenSiblingHandler([this](std::wstring p) { m_right->OpenDocument(std::move(p)); });
-    m_right->SetOpenSiblingHandler([this](std::wstring p) { m_left->OpenDocument(std::move(p)); });
-    m_left->SetOpenRequestHandler([this] { OpenDocumentDialog(false); });
-    m_right->SetOpenRequestHandler([this] { OpenDocumentDialog(true); });
-
-    // Applied before any document opens (panes are still closed: only the
-    // flag lands); the restore path then adopts the saved page under it.
-    // Session restore off = the configured DEFAULTS drive the launch state.
-    m_scrollMode = (m_restoreSession ? session.scrollMode != 0
-                                     : m_defaults.scrollMode == PaneWindow::ScrollMode::Paged)
-                       ? PaneWindow::ScrollMode::Paged
-                       : PaneWindow::ScrollMode::Continuous;
-    m_left->SetScrollMode(m_scrollMode);
-    m_right->SetScrollMode(m_scrollMode);
-    m_left->SetDefaultZoomMode(m_defaults.zoomMode);
-    m_right->SetDefaultZoomMode(m_defaults.zoomMode);
-    m_left->SetWheelLinesOverride(m_wheelLines);
-    m_right->SetWheelLinesOverride(m_wheelLines);
-    const auto requestScrollMode = [this](PaneWindow::ScrollMode mode) { ApplyScrollMode(mode); };
-    m_left->SetScrollModeRequestHandler(requestScrollMode);
-    m_right->SetScrollModeRequestHandler(requestScrollMode);
-
-    const auto onInverseSearch = [this](PaneWindow&, const SyncTexIndex::InverseHit* hit,
-                                        bool hadData) {
+    m_onInverseSearch = [this](PaneWindow&, const SyncTexIndex::InverseHit* hit, bool hadData) {
         if (hit)
             LaunchInverseSearch(*hit);
         else
             ShowStatusMessage(hadData ? StrId::SyncTexNoMatch : StrId::SyncTexNoData);
     };
-    m_left->SetInverseSearchHandler(onInverseSearch);
-    m_right->SetInverseSearchHandler(onInverseSearch);
 
-    const auto onSearchStatus = [this](PaneWindow& pane, int active, int total, bool done) {
+    m_onSearchStatus = [this](PaneWindow& pane, int active, int total, bool done) {
         if (&pane != m_findTarget || !m_findCount)
             return;
         wchar_t buffer[64];
@@ -451,31 +491,39 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
             swprintf_s(buffer, L"%d/%d%s", active + 1, total, done ? L"" : L"+");
         SetWindowTextW(m_findCount, buffer);
     };
-    m_left->SetSearchStatusHandler(onSearchStatus);
-    m_right->SetSearchStatusHandler(onSearchStatus);
+
+    // Applied before any document opens (panes are still closed: only the
+    // flag lands); the restore path then adopts the saved page under it.
+    // Session restore off = the configured DEFAULTS drive the launch state.
+    m_scrollMode = (m_restoreSession ? session.scrollMode != 0
+                                     : m_defaults.scrollMode == PaneWindow::ScrollMode::Paged)
+                       ? PaneWindow::ScrollMode::Paged
+                       : PaneWindow::ScrollMode::Continuous;
+    for (int slot = 0; slot < kPaneSlots; ++slot)
+        if (SlotOn(slot))
+            ConfigurePane(slot);
 
     // The pane sessions seed the SaveSession fallbacks even when the command
     // line wins, so an unopened pane never wipes saved state.
     const float dpiRatio = static_cast<float>(m_dpi) / static_cast<float>(session.dpi);
-    m_fallbackLeft = session.left;
-    m_fallbackLeft.scrollX *= dpiRatio;
-    m_fallbackLeft.scrollY *= dpiRatio;
-    m_fallbackRight = session.right;
-    m_fallbackRight.scrollX *= dpiRatio;
-    m_fallbackRight.scrollY *= dpiRatio;
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        PaneSettings& fb = m_fallback[static_cast<size_t>(slot)];
+        fb = session.panes[static_cast<size_t>(slot)];
+        fb.scrollX *= dpiRatio;
+        fb.scrollY *= dpiRatio;
+    }
 
     if (m_outlineVisible)
-        UpdateOutlineSidebar(m_left.get()); // adopt a target; filled on DocumentOpened
+        UpdateOutlineSidebar(Pane(kSlotLeft)); // adopt a target; filled on DocumentOpened
 
-    if (!leftFile.empty() || !rightFile.empty()) {
+    if (anyFile) {
         // Explicit command line wins over the saved session for the DOCUMENTS
         // only; the sync preference applies to every launch path (same order
         // as ApplySession: anchors recapture when the opens complete).
         m_sync->SetZoomSync(m_restoreSession ? session.zoomSync : m_defaults.zoomSync);
-        if (!leftFile.empty())
-            m_left->OpenDocument(std::move(leftFile));
-        if (!rightFile.empty())
-            m_right->OpenDocument(std::move(rightFile));
+        for (int slot = 0; slot < kPaneSlots; ++slot)
+            if (SlotOn(slot) && !files[static_cast<size_t>(slot)].empty())
+                Pane(slot)->OpenDocument(std::move(files[static_cast<size_t>(slot)]));
         m_sync->SetScrollSync(m_restoreSession ? session.scrollSync : m_defaults.scrollSync);
     } else {
         ApplySession(session);
@@ -485,33 +533,188 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile,
 
     ShowWindow(m_hwnd, m_startMaximized ? SW_SHOWMAXIMIZED : nCmdShow);
     UpdateWindow(m_hwnd);
-    SetFocus(m_left->Hwnd());
+    SetFocus(Pane(kSlotLeft)->Hwnd());
+    return true;
+}
+
+void MainWindow::ConfigurePane(int slot) {
+    PaneWindow* pane = Pane(slot);
+    if (!pane)
+        return;
+    pane->SetViewChangedHandler(m_onViewChanged);
+    pane->SetInverseSearchHandler(m_onInverseSearch);
+    pane->SetSearchStatusHandler(m_onSearchStatus);
+    pane->SetOpenRequestHandler([this, slot] { OpenDocumentDialog(slot); });
+    // Extra files of a multi-file drop land in the OTHER panes, in VISUAL
+    // order (a drop carries no positional convention to preserve, unlike the
+    // command line). Three files always mean a three-pane arrangement, so the
+    // mode switches on before they are distributed.
+    pane->SetExtraFilesHandler([this, slot](std::vector<std::wstring> extra) {
+        if (extra.size() >= 2)
+            SetPaneCount(3);
+        size_t next = 0;
+        for (int s = 0; s < kPaneSlots && next < extra.size(); ++s)
+            if (SlotOn(s) && s != slot)
+                Pane(s)->OpenDocument(std::move(extra[next++]));
+    });
+    pane->SetScrollModeRequestHandler(
+        [this](PaneWindow::ScrollMode mode) { ApplyScrollMode(mode); });
+    pane->SetScrollMode(m_scrollMode);
+    pane->SetDefaultZoomMode(m_defaults.zoomMode);
+    pane->SetWheelLinesOverride(m_wheelLines);
+    pane->SetMarkerVisibility(m_showAnchors, m_showTicks);
+    pane->SetHeaderOptions(m_showHeader, m_headerShowPath);
+    pane->SetDarkMode(m_dark);
+}
+
+void MainWindow::SetPaneCount(int count) {
+    count = std::clamp(count, 2, kPaneSlots);
+    if (count == m_paneCount)
+        return;
+    const bool growing = count > m_paneCount;
+    // The point map is a relation over the ACTIVE documents: a tuple carrying a
+    // stale (or absent) centre coordinate would break the all-coordinates
+    // monotonicity the gap arithmetic relies on. Cleared FIRST, while the
+    // controller's CURRENT pane set is still fully alive: emptying a non-empty
+    // map re-captures the plain anchors (OnMapEmptied -> RecaptureAnchor walks
+    // that set), so clearing after the centre pane died would read freed memory.
+    m_sync->ClearPoints();
+    // A swap-parked map describes the OLD arrangement, but its settled walk
+    // tests whichever slots are CURRENTLY active: after a mode change a
+    // partial match could reinstall the projected map over the new
+    // arrangement's own (a trio map masquerading as the pair's). The switch
+    // invalidates the park's context exactly like any other mismatch.
+    m_swapMap = {};
+    if (!growing) {
+        // Leaving three-pane mode closes the centre document, like the
+        // explicit Close Session verb: a hidden pane still holding a loaded
+        // document would cost a worker thread and a watcher for nothing. Its
+        // session parks in the fallback, and the grow path below REOPENS it:
+        // switching back brings the document with it, as documented.
+        if (PaneWindow* centre = Pane(kSlotCenter)) {
+            if (centre->HasPersistableDocument())
+                m_fallback[kSlotCenter] =
+                    PaneSettings{centre->DocumentPath(), centre->PersistZoom(),
+                                 centre->PersistScrollX(), centre->PersistScrollY(),
+                                 static_cast<int>(centre->PersistZoomMode())};
+            if (m_activePane == centre) {
+                // The cue is frame-driven (FocusGained only): the new holder
+                // must be marked here or NO pane shows it until a click.
+                m_activePane = Pane(kSlotLeft);
+                m_activePane->SetActive(true);
+            }
+            if (m_findTarget == centre) {
+                // The bar targets a dying document: close it like CloseFindBar
+                // minus the focus restore (the handoff below picks a survivor).
+                // Merely nulling the target would leave the bar visible and
+                // inert (LayoutFindBar and the debounce both bail on null).
+                m_findTarget = nullptr;
+                if (m_findBar)
+                    ShowWindow(m_findBar, SW_HIDE);
+                KillTimer(m_hwnd, kFindDebounceTimer);
+            }
+            if (m_outlinePane == centre)
+                m_outlinePane = nullptr;
+            // Focus on the dying pane (or trapped in the find bar just hidden
+            // above) would fall to the frame, killing pane-local keys until a
+            // click: hand it to the left pane while everything is still alive.
+            const HWND focus = GetFocus();
+            if (focus &&
+                (focus == centre->Hwnd() || IsChild(centre->Hwnd(), focus) ||
+                 (m_findBar && IsChild(m_findBar, focus) && !IsWindowVisible(m_findBar))))
+                SetFocus(Pane(kSlotLeft)->Hwnd());
+            // The pane is going away: a stale "last opened path" would make
+            // the grow-path reopen look like a reload (pathChanged == false)
+            // and skip the saved-points restore.
+            m_lastDoc[kSlotCenter].clear();
+        }
+    }
+    m_paneCount = count;
+    if (growing) {
+        m_panes[kSlotCenter] =
+            std::make_unique<PaneWindow>(m_dx, Str(kSlotPlaceholder[kSlotCenter]));
+        Pane(kSlotCenter)->Create(m_hwnd, kPaneChildIdBase + kSlotCenter);
+        Pane(kSlotCenter)->OnDpiChanged(m_dpi);
+        ConfigurePane(kSlotCenter);
+    }
+    // The controller must never hold a dead pane, not even transiently: the
+    // new set is installed (and the anchors recaptured over it) BEFORE the
+    // shrink path destroys the centre.
+    PerPane<PaneWindow*> panes{};
+    for (int slot = 0; slot < kPaneSlots; ++slot)
+        if (SlotOn(slot))
+            panes[static_cast<size_t>(slot)] = Pane(slot);
+    m_sync->SetPanes(panes);
+    m_sync->SetScrollSync(m_sync->ScrollSync()); // recapture over the new set
+    m_sync->SetZoomSync(m_sync->ZoomSync());
+    if (!growing)
+        m_panes[kSlotCenter].reset(); // destructor tears the HWND down too
+    if (growing) {
+        // Reopen the parked centre session, if its file still exists (same
+        // probe as the session restore; a missing file leaves the pane empty).
+        // The DocumentOpened this triggers also restores the trio's remembered
+        // sync points, because the shrink cleared m_lastDoc above.
+        const PaneSettings& fb = m_fallback[kSlotCenter];
+        if (!fb.path.empty() &&
+            GetFileAttributesW(fb.path.c_str()) != INVALID_FILE_ATTRIBUTES)
+            Pane(kSlotCenter)->OpenDocumentWithView(
+                fb.path, fb.zoom, fb.scrollX, fb.scrollY,
+                static_cast<PaneWindow::ZoomMode>(fb.zoomMode));
+    } else {
+        // Shrinking leaves the surviving pair loaded, so no DocumentOpened
+        // will fire to bring back its remembered sync points (the grow path
+        // gets one from the centre reopen): restore them here. The guards
+        // inside make it a no-op when a pane is empty (Close Session shrinks
+        // after closing everything) or a live map already won.
+        TryRestoreSavedPoints();
+    }
+    m_statusText.clear(); // the part scheme changes with the mode
+    Layout();
+    UpdateStatusBar();
+    UpdateCommandUi();
+    UpdatePageBox();
+    if (m_outlineVisible)
+        UpdateOutlineSidebar(m_activePane ? m_activePane : Pane(kSlotLeft));
+}
+
+bool MainWindow::AllPanesHaveDocuments() const {
+    for (int slot = 0; slot < kPaneSlots; ++slot)
+        if (SlotOn(slot) && !(Pane(slot) && Pane(slot)->HasDocument()))
+            return false;
+    return true;
+}
+
+bool MainWindow::AllPanesHaveOutlines() const {
+    if (!AllPanesHaveDocuments())
+        return false;
+    for (int slot = 0; slot < kPaneSlots; ++slot)
+        if (SlotOn(slot) && Pane(slot)->Outline().empty())
+            return false;
     return true;
 }
 
 void MainWindow::ApplySession(const AppSettings& session) {
     m_splitRatio = session.splitRatio;
+    m_splitRatio3Left = session.splitRatio3Left;
+    m_splitRatio3Center = session.splitRatio3Center;
     m_sync->SetZoomSync(m_restoreSession ? session.zoomSync : m_defaults.zoomSync);
     // Session restore off: chrome, placement and splitter still restore, but
     // the panes start empty and the sync locks come from the defaults. The
     // fallbacks stay seeded from the session either way, so a restore-less
     // launch does not wipe the stored panes at the next SaveSession.
     if (m_restoreSession) {
-        // m_fallback* already hold the DPI-rescaled offsets; a later
+        // m_fallback already holds the DPI-rescaled offsets; a later
         // WM_DPICHANGED (e.g. from the placement below) rescales the panes'
         // pending restores.
-        if (!m_fallbackLeft.path.empty() &&
-            GetFileAttributesW(m_fallbackLeft.path.c_str()) != INVALID_FILE_ATTRIBUTES)
-            m_left->OpenDocumentWithView(
-                m_fallbackLeft.path, m_fallbackLeft.zoom, m_fallbackLeft.scrollX,
-                m_fallbackLeft.scrollY,
-                static_cast<PaneWindow::ZoomMode>(m_fallbackLeft.zoomMode));
-        if (!m_fallbackRight.path.empty() &&
-            GetFileAttributesW(m_fallbackRight.path.c_str()) != INVALID_FILE_ATTRIBUTES)
-            m_right->OpenDocumentWithView(
-                m_fallbackRight.path, m_fallbackRight.zoom, m_fallbackRight.scrollX,
-                m_fallbackRight.scrollY,
-                static_cast<PaneWindow::ZoomMode>(m_fallbackRight.zoomMode));
+        for (int slot = 0; slot < kPaneSlots; ++slot) {
+            if (!SlotOn(slot))
+                continue;
+            const PaneSettings& fb = m_fallback[static_cast<size_t>(slot)];
+            if (!fb.path.empty() &&
+                GetFileAttributesW(fb.path.c_str()) != INVALID_FILE_ATTRIBUTES)
+                Pane(slot)->OpenDocumentWithView(fb.path, fb.zoom, fb.scrollX, fb.scrollY,
+                                                 static_cast<PaneWindow::ZoomMode>(fb.zoomMode));
+        }
     }
     // After the restored positions land, DocumentOpened events recapture the
     // anchor, so enabling scroll sync here preserves the saved alignment.
@@ -544,6 +747,8 @@ void MainWindow::SaveSession() const {
         s.maximized = wp.showCmd == SW_SHOWMAXIMIZED;
     }
     s.splitRatio = m_splitRatio;
+    s.splitRatio3Left = m_splitRatio3Left;
+    s.splitRatio3Center = m_splitRatio3Center;
     s.scrollSync = m_sync->ScrollSync();
     s.zoomSync = m_sync->ZoomSync();
     s.showGaps = m_showAlignmentGaps;
@@ -560,6 +765,7 @@ void MainWindow::SaveSession() const {
     s.toolbarText = m_toolbarText;
     s.fsToolbar = m_fsShowToolbar;
     s.fsStatus = m_fsShowStatus;
+    s.defPaneCount = m_defaults.paneCount;
     s.defScrollMode = m_defaults.scrollMode == PaneWindow::ScrollMode::Paged ? 1 : 0;
     s.defZoomMode = static_cast<int>(m_defaults.zoomMode);
     s.defScrollSync = m_defaults.scrollSync;
@@ -571,23 +777,39 @@ void MainWindow::SaveSession() const {
     s.language = LangCode(UiLanguage());
     s.synctexInverse = m_synctexInverse;
     s.mruFiles = m_mruFiles;
-    s.mruPairs = m_mruPairs;
+    s.mruSessions = m_mruSessions;
     s.syncPoints = m_savedPoints;
-    s.left = m_left->HasPersistableDocument()
-                 ? PaneSettings{m_left->DocumentPath(), m_left->PersistZoom(),
-                                m_left->PersistScrollX(), m_left->PersistScrollY(),
-                                static_cast<int>(m_left->PersistZoomMode())}
-                 : m_fallbackLeft;
-    s.right = m_right->HasPersistableDocument()
-                  ? PaneSettings{m_right->DocumentPath(), m_right->PersistZoom(),
-                                 m_right->PersistScrollX(), m_right->PersistScrollY(),
-                                 static_cast<int>(m_right->PersistZoomMode())}
-                  : m_fallbackRight;
-    s.Save();
+    s.paneCount = m_paneCount;
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        if (!SlotOn(slot)) {
+            // A PARKED centre survives the restart through its fallback: the
+            // mode was three-pane once, the user shrank it, and switching back
+            // up (this session or the next) must bring the document with it.
+            s.panes[static_cast<size_t>(slot)] = m_fallback[static_cast<size_t>(slot)];
+            continue;
+        }
+        PaneWindow* pane = Pane(slot);
+        s.panes[static_cast<size_t>(slot)] =
+            pane->HasPersistableDocument()
+                ? PaneSettings{pane->DocumentPath(), pane->PersistZoom(), pane->PersistScrollX(),
+                               pane->PersistScrollY(), static_cast<int>(pane->PersistZoomMode())}
+                : m_fallback[static_cast<size_t>(slot)];
+    }
+    // The result is advisory here: a failed save promotes nothing (the
+    // previous file keeps its name, or on an exotic provider the new one is
+    // kept beside it for a manual rename - see AppSettings::Save), and there
+    // is no UI left to warn through at teardown time.
+    (void)s.Save();
 }
 
 PaneWindow* MainWindow::FocusedPane() const {
-    return GetFocus() == m_right->Hwnd() ? m_right.get() : m_left.get();
+    // Anything that is not one of the panes (the page box, the find bar) falls
+    // back to the leftmost, exactly like the two-pane ternary it replaces.
+    const HWND focus = GetFocus();
+    for (int slot = 0; slot < kPaneSlots; ++slot)
+        if (SlotOn(slot) && Pane(slot)->Hwnd() == focus)
+            return Pane(slot);
+    return Pane(kSlotLeft);
 }
 
 HMENU MainWindow::BuildMenuBar() {
@@ -595,17 +817,22 @@ HMENU MainWindow::BuildMenuBar() {
         AppendMenuW(menu, MF_STRING, id, Str(text));
     };
     m_mruFilesMenu = CreatePopupMenu();
-    m_mruPairsMenu = CreatePopupMenu();
+    m_mruSessionsMenu = CreatePopupMenu();
     HMENU file = CreatePopupMenu();
+    // VISUAL order (left, centre, right), like the toolbar trio: the entries
+    // name places on screen, so listing them in any other order reads wrong.
+    // The centre is always present, two panes or three, because opening it is
+    // the primary way INTO the three-pane mode - greying it would hide it.
     append(file, IDC_OPEN_LEFT, StrId::MenuOpenLeft);
+    append(file, IDC_OPEN_CENTER, StrId::MenuOpenCenter);
     append(file, IDC_OPEN_RIGHT, StrId::MenuOpenRight);
     append(file, IDC_CLOSE_DOC, StrId::MenuCloseDoc);
     append(file, IDC_CLOSE_SESSION, StrId::MenuCloseSession);
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(m_mruFilesMenu),
                 Str(StrId::MenuRecentFiles));
-    AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(m_mruPairsMenu),
-                Str(StrId::MenuRecentPairs));
+    AppendMenuW(file, MF_POPUP, reinterpret_cast<UINT_PTR>(m_mruSessionsMenu),
+                Str(StrId::MenuRecentSessions));
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     append(file, IDC_OPTIONS, StrId::MenuOptions);
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
@@ -635,6 +862,13 @@ HMENU MainWindow::BuildMenuBar() {
     append(view, IDC_TOGGLE_STATUSBAR, StrId::MenuStatusBar);
     append(view, IDC_TOGGLE_OUTLINE, StrId::MenuOutline);
     append(view, IDC_LOCK_TOOLBARS, StrId::MenuLockToolbars);
+    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+    // Own popup, not two flat items: the View popup has no free mnemonic left
+    // for a second entry in every language (Portuguese runs out).
+    HMENU panes = CreatePopupMenu();
+    append(panes, IDC_PANES_TWO, StrId::MenuPanesTwo);
+    append(panes, IDC_PANES_THREE, StrId::MenuPanesThree);
+    AppendMenuW(view, MF_POPUP, reinterpret_cast<UINT_PTR>(panes), Str(StrId::MenuPanes));
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     append(view, IDC_ZOOM_IN, StrId::MenuZoomIn);
     append(view, IDC_ZOOM_OUT, StrId::MenuZoomOut);
@@ -692,17 +926,27 @@ void MainWindow::RebuildMruMenus() {
         if (m_mruFiles.empty())
             AppendMenuW(m_mruFilesMenu, MF_STRING | MF_GRAYED, 0, Str(StrId::MenuMruEmpty));
     }
-    if (reset(m_mruPairsMenu)) {
-        for (size_t i = 0; i < m_mruPairs.size(); ++i) {
-            const std::wstring text =
-                CompactPath(m_mruPairs[i].left, 36) + L"  +  " +
-                CompactPath(m_mruPairs[i].right, 36);
-            AppendMenuW(m_mruPairsMenu, MF_STRING,
+    if (reset(m_mruSessionsMenu)) {
+        for (size_t i = 0; i < m_mruSessions.size(); ++i) {
+            // Names shorten as the session grows, so a three-document entry
+            // stays inside a sane menu width.
+            const size_t used = SessionSlotCount(m_mruSessions[i]);
+            const int budget = used >= 3 ? 24 : 36;
+            std::wstring text;
+            for (int slot = 0; slot < kPaneSlots; ++slot) {
+                const std::wstring& path = m_mruSessions[i].path[static_cast<size_t>(slot)];
+                if (path.empty())
+                    continue;
+                if (!text.empty())
+                    text += L"  +  ";
+                text += CompactPath(path, budget);
+            }
+            AppendMenuW(m_mruSessionsMenu, MF_STRING,
                         static_cast<UINT_PTR>(IDC_MRU_PAIR_FIRST) + i,
                         MruMenuLabel(i, text).c_str());
         }
-        if (m_mruPairs.empty())
-            AppendMenuW(m_mruPairsMenu, MF_STRING | MF_GRAYED, 0, Str(StrId::MenuMruEmpty));
+        if (m_mruSessions.empty())
+            AppendMenuW(m_mruSessionsMenu, MF_STRING | MF_GRAYED, 0, Str(StrId::MenuMruEmpty));
     }
 }
 
@@ -721,19 +965,18 @@ void MainWindow::RecordMruFile(const std::wstring& path) {
         v.resize(kMruMaxEntries);
 }
 
-void MainWindow::RecordMruPair(const std::wstring& left, const std::wstring& right) {
-    if (left.empty() || right.empty())
-        return;
-    const std::wstring l = NormalizePath(left);
-    const std::wstring r = NormalizePath(right);
-    auto& v = m_mruPairs;
+void MainWindow::RecordMruSession() {
+    MruSession entry;
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        if (!SlotOn(slot) || !Pane(slot)->HasDocument())
+            return; // a session entry describes a COMPLETE arrangement
+        entry.path[static_cast<size_t>(slot)] = NormalizePath(Pane(slot)->DocumentPath());
+    }
+    auto& v = m_mruSessions;
     v.erase(std::remove_if(v.begin(), v.end(),
-                           [&](const MruPair& p) {
-                               return lstrcmpiW(p.left.c_str(), l.c_str()) == 0 &&
-                                      lstrcmpiW(p.right.c_str(), r.c_str()) == 0;
-                           }),
+                           [&](const MruSession& s) { return SameSession(s, entry); }),
             v.end());
-    v.insert(v.begin(), {l, r});
+    v.insert(v.begin(), std::move(entry));
     if (v.size() > kMruMaxEntries)
         v.resize(kMruMaxEntries);
 }
@@ -752,22 +995,26 @@ void MainWindow::OpenMruFile(size_t index) {
     FocusedPane()->OpenDocument(path);
 }
 
-void MainWindow::OpenMruPair(size_t index) {
-    if (index >= m_mruPairs.size())
+void MainWindow::OpenMruSession(size_t index) {
+    if (index >= m_mruSessions.size())
         return;
-    const MruPair pair = m_mruPairs[index]; // copy: the erase below invalidates
-    const bool leftMissing = GetFileAttributesW(pair.left.c_str()) == INVALID_FILE_ATTRIBUTES;
-    const bool rightMissing = GetFileAttributesW(pair.right.c_str()) == INVALID_FILE_ATTRIBUTES;
-    if (leftMissing || rightMissing) {
-        m_mruPairs.erase(m_mruPairs.begin() + static_cast<ptrdiff_t>(index));
+    const MruSession entry = m_mruSessions[index]; // copy: the erase below invalidates
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        const std::wstring& path = entry.path[static_cast<size_t>(slot)];
+        if (path.empty() || GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+            continue;
+        m_mruSessions.erase(m_mruSessions.begin() + static_cast<ptrdiff_t>(index));
         RebuildMruMenus();
-        const std::wstring msg =
-            Str(StrId::MruMissingFile) + (leftMissing ? pair.left : pair.right);
+        const std::wstring msg = Str(StrId::MruMissingFile) + path;
         MessageBoxW(m_hwnd, msg.c_str(), L"PDF Side Viewer", MB_OK | MB_ICONWARNING);
         return;
     }
-    m_left->OpenDocument(pair.left);
-    m_right->OpenDocument(pair.right);
+    // A three-document entry brings its layout with it: the pane count is part
+    // of what was open together, not a separate preference.
+    SetPaneCount(entry.path[kSlotCenter].empty() ? 2 : 3);
+    for (int slot = 0; slot < kPaneSlots; ++slot)
+        if (SlotOn(slot) && !entry.path[static_cast<size_t>(slot)].empty())
+            Pane(slot)->OpenDocument(entry.path[static_cast<size_t>(slot)]);
 }
 
 void MainWindow::CreateToolbar(HINSTANCE hinst) {
@@ -826,6 +1073,8 @@ void MainWindow::CreateToolbar(HINSTANCE hinst) {
         button(7, IDC_TOGGLE_OUTLINE, BTNS_CHECK, StrId::LblOutline),
         separator(),
         button(0, IDC_OPEN_LEFT, BTNS_BUTTON, StrId::LblOpenLeft, true),
+        // In visual order, so the trio matches the panes it opens into.
+        button(18, IDC_OPEN_CENTER, BTNS_BUTTON, StrId::LblOpenCenter, true),
         button(1, IDC_OPEN_RIGHT, BTNS_BUTTON, StrId::LblOpenRight, true),
         separator(),
         button(2, IDC_TOGGLE_SCROLL_SYNC, BTNS_CHECK, StrId::LblScrollSync),
@@ -1297,6 +1546,8 @@ StrId MainWindow::CommandTipId(UINT id) {
         return StrId::TipOpenLeft;
     case IDC_OPEN_RIGHT:
         return StrId::TipOpenRight;
+    case IDC_OPEN_CENTER:
+        return StrId::TipOpenCenter;
     case IDC_TOGGLE_SCROLL_SYNC:
         return StrId::TipScrollSync;
     case IDC_TOGGLE_ZOOM_SYNC:
@@ -1335,7 +1586,7 @@ StrId MainWindow::CommandTipId(UINT id) {
 void MainWindow::UpdatePageBox() {
     if (!m_pageBox || GetFocus() == m_pageBox)
         return; // never fight the user's caret
-    PaneWindow* pane = m_activePane ? m_activePane : m_left.get();
+    PaneWindow* pane = m_activePane ? m_activePane : Pane(kSlotLeft);
     std::wstring text;
     if (pane && pane->HasDocument()) {
         const int count = pane->PageCount();
@@ -1350,7 +1601,7 @@ void MainWindow::UpdatePageBox() {
 }
 
 bool MainWindow::GotoFromText(const std::wstring& text) {
-    PaneWindow* pane = m_activePane ? m_activePane : m_left.get();
+    PaneWindow* pane = m_activePane ? m_activePane : Pane(kSlotLeft);
     if (!pane || !pane->HasDocument() || text.empty())
         return false;
     // Label-first, deliberately: in a document labeled i, ii, 1, 2 the input
@@ -1369,7 +1620,7 @@ bool MainWindow::GotoFromText(const std::wstring& text) {
 }
 
 void MainWindow::ShowGotoPageDialog() {
-    PaneWindow* pane = m_activePane ? m_activePane : m_left.get();
+    PaneWindow* pane = m_activePane ? m_activePane : Pane(kSlotLeft);
     if (!pane || !pane->HasDocument())
         return;
     constexpr WORD kGotoEditId = 2201;
@@ -1396,7 +1647,7 @@ INT_PTR CALLBACK MainWindow::GotoDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPAR
         SetWindowLongPtrW(dlg, DWLP_USER, lParam);
         self = reinterpret_cast<MainWindow*>(lParam);
         // Prefill with the current short form (label if any, else ordinal).
-        PaneWindow* pane = self->m_activePane ? self->m_activePane : self->m_left.get();
+        PaneWindow* pane = self->m_activePane ? self->m_activePane : self->Pane(kSlotLeft);
         if (pane && pane->HasDocument()) {
             const int count = pane->PageCount();
             const int page = std::clamp(static_cast<int>(pane->SyncPosition()), 0, count - 1);
@@ -1437,52 +1688,60 @@ INT_PTR CALLBACK MainWindow::GotoDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPAR
 }
 
 void MainWindow::ShowOptionsDialog() {
-    DialogTemplate dlg(Str(StrId::OptTitle), 260, 288);
+    DialogTemplate dlg(Str(StrId::OptTitle), 260, 312);
     dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 7, 246, 10,
                    kOptRestoreId, Str(StrId::OptRestoreSession));
-    dlg.AddControl(DialogTemplate::kButton, BS_GROUPBOX, 0, 7, 22, 246, 74, 0xFFFF,
+    dlg.AddControl(DialogTemplate::kButton, BS_GROUPBOX, 0, 7, 22, 246, 90, 0xFFFF,
                    Str(StrId::OptDefaultsGroup));
+    // The arrangement comes FIRST in the group: it decides how many panes
+    // exist before anything about how they display.
     dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 15, 37, 90, 10, 0xFFFF,
-                   Str(StrId::OptDefScrollMode));
+                   Str(StrId::OptDefPanes));
     dlg.AddControl(DialogTemplate::kComboBox, CBS_DROPDOWNLIST | WS_TABSTOP, 0, 110, 35, 138,
-                   60, kOptScrollModeId, L"");
+                   60, kOptPaneCountId, L"");
     dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 15, 53, 90, 10, 0xFFFF,
-                   Str(StrId::OptDefZoomMode));
+                   Str(StrId::OptDefScrollMode));
     dlg.AddControl(DialogTemplate::kComboBox, CBS_DROPDOWNLIST | WS_TABSTOP, 0, 110, 51, 138,
+                   60, kOptScrollModeId, L"");
+    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 15, 69, 90, 10, 0xFFFF,
+                   Str(StrId::OptDefZoomMode));
+    dlg.AddControl(DialogTemplate::kComboBox, CBS_DROPDOWNLIST | WS_TABSTOP, 0, 110, 67, 138,
                    60, kOptZoomModeId, L"");
-    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 15, 68, 230, 10,
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 15, 84, 230, 10,
                    kOptScrollSyncId, Str(StrId::OptDefScrollSync));
-    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 15, 80, 230, 10,
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 15, 96, 230, 10,
                    kOptZoomSyncId, Str(StrId::OptDefZoomSync));
-    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 7, 102, 246, 10, 0xFFFF,
+    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 7, 118, 246, 10, 0xFFFF,
                    Str(StrId::OptSynctexInverse));
-    dlg.AddControl(DialogTemplate::kEdit, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 0, 7, 113,
+    dlg.AddControl(DialogTemplate::kEdit, ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP, 0, 7, 129,
                    246, 13, kOptSynctexId, L"");
+    // Three lines tall: naming a third verb pushes the longest translations
+    // past the two lines the two-verb label needed.
     dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | BS_MULTILINE | BS_TOP | WS_TABSTOP,
-                   0, 7, 131, 246, 18, kOptShellId, Str(StrId::OptShellIntegration));
-    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 152, 246, 10,
-                   kOptAnchorsId, Str(StrId::OptShowAnchors));
-    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 164, 246, 10,
-                   kOptTicksId, Str(StrId::OptShowTicks));
+                   0, 7, 147, 246, 26, kOptShellId, Str(StrId::OptShellIntegration));
     dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 176, 246, 10,
-                   kOptFsToolbarId, Str(StrId::OptFsToolbar));
+                   kOptAnchorsId, Str(StrId::OptShowAnchors));
     dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 188, 246, 10,
-                   kOptFsStatusId, Str(StrId::OptFsStatus));
+                   kOptTicksId, Str(StrId::OptShowTicks));
     dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 200, 246, 10,
+                   kOptFsToolbarId, Str(StrId::OptFsToolbar));
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 212, 246, 10,
+                   kOptFsStatusId, Str(StrId::OptFsStatus));
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 7, 224, 246, 10,
                    kOptHeaderId, Str(StrId::OptShowHeader));
-    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 15, 212, 238, 10,
+    dlg.AddControl(DialogTemplate::kButton, BS_AUTOCHECKBOX | WS_TABSTOP, 0, 15, 236, 238, 10,
                    kOptHeaderPathId, Str(StrId::OptHeaderShowPath));
-    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 7, 232, 188, 10, 0xFFFF,
+    dlg.AddControl(DialogTemplate::kStatic, SS_LEFT, 0, 7, 256, 188, 10, 0xFFFF,
                    Str(StrId::OptWheelLines));
     dlg.AddControl(DialogTemplate::kEdit, ES_NUMBER | ES_AUTOHSCROLL | WS_BORDER | WS_TABSTOP,
-                   0, 200, 230, 48, 13, kOptWheelId, L"");
+                   0, 200, 254, 48, 13, kOptWheelId, L"");
     // 138 wide (up to the OK button): the German label needs more than the
     // 120 the English one suggests; keep new translations within ~130 DLU.
-    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 7, 267, 138, 14,
+    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 7, 291, 138, 14,
                    kOptClearMruId, Str(StrId::OptClearRecent));
-    dlg.AddControl(DialogTemplate::kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 149, 267, 50, 14,
+    dlg.AddControl(DialogTemplate::kButton, BS_DEFPUSHBUTTON | WS_TABSTOP, 0, 149, 291, 50, 14,
                    IDOK, Str(StrId::DlgOk));
-    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 203, 267, 50, 14,
+    dlg.AddControl(DialogTemplate::kButton, BS_PUSHBUTTON | WS_TABSTOP, 0, 203, 291, 50, 14,
                    IDCANCEL, Str(StrId::DlgCancel));
     OptionsDialogState state{this, false};
     const HINSTANCE hinst =
@@ -1500,6 +1759,12 @@ INT_PTR CALLBACK MainWindow::OptionsDlgProc(HWND dlg, UINT msg, WPARAM wParam, L
         MainWindow* self = state->self;
         CheckDlgButton(dlg, kOptRestoreId,
                        self->m_restoreSession ? BST_CHECKED : BST_UNCHECKED);
+        const HWND panesCombo = GetDlgItem(dlg, kOptPaneCountId);
+        SendMessageW(panesCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(Str(StrId::OptPanesTwo)));
+        SendMessageW(panesCombo, CB_ADDSTRING, 0,
+                     reinterpret_cast<LPARAM>(Str(StrId::OptPanesThree)));
+        SendMessageW(panesCombo, CB_SETCURSEL, self->m_defaults.paneCount >= 3 ? 1 : 0, 0);
         const HWND scrollCombo = GetDlgItem(dlg, kOptScrollModeId);
         SendMessageW(scrollCombo, CB_ADDSTRING, 0,
                      reinterpret_cast<LPARAM>(Str(StrId::OptScrollContinuous)));
@@ -1521,8 +1786,9 @@ INT_PTR CALLBACK MainWindow::OptionsDlgProc(HWND dlg, UINT msg, WPARAM wParam, L
         CheckDlgButton(dlg, kOptZoomSyncId,
                        self->m_defaults.zoomSync ? BST_CHECKED : BST_UNCHECKED);
         SetDlgItemTextW(dlg, kOptSynctexId, self->m_synctexInverse.c_str());
-        CheckDlgButton(dlg, kOptShellId,
-                       ShellIntegration::IsRegistered() ? BST_CHECKED : BST_UNCHECKED);
+        state->shellAtOpen = ShellIntegration::IsRegistered();
+        state->shellPartial = !state->shellAtOpen && ShellIntegration::OwnsAnyVerb();
+        CheckDlgButton(dlg, kOptShellId, state->shellAtOpen ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(dlg, kOptAnchorsId, self->m_showAnchors ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(dlg, kOptTicksId, self->m_showTicks ? BST_CHECKED : BST_UNCHECKED);
         CheckDlgButton(dlg, kOptFsToolbarId,
@@ -1553,6 +1819,10 @@ INT_PTR CALLBACK MainWindow::OptionsDlgProc(HWND dlg, UINT msg, WPARAM wParam, L
                 return TRUE;
             MainWindow* self = state->self;
             self->m_restoreSession = IsDlgButtonChecked(dlg, kOptRestoreId) == BST_CHECKED;
+            // A DEFAULT, like the ones below it: the arrangement on screen is
+            // not touched, only what the next non-restored launch starts with.
+            self->m_defaults.paneCount =
+                SendDlgItemMessageW(dlg, kOptPaneCountId, CB_GETCURSEL, 0, 0) == 1 ? 3 : 2;
             self->m_defaults.scrollMode =
                 SendDlgItemMessageW(dlg, kOptScrollModeId, CB_GETCURSEL, 0, 0) == 1
                     ? PaneWindow::ScrollMode::Paged
@@ -1573,32 +1843,45 @@ INT_PTR CALLBACK MainWindow::OptionsDlgProc(HWND dlg, UINT msg, WPARAM wParam, L
             // Live pushes: fresh documents and the very next wheel tick see
             // the new values; persistence happens at SaveSession like every
             // other setting.
-            self->m_left->SetDefaultZoomMode(self->m_defaults.zoomMode);
-            self->m_right->SetDefaultZoomMode(self->m_defaults.zoomMode);
-            self->m_left->SetWheelLinesOverride(self->m_wheelLines);
-            self->m_right->SetWheelLinesOverride(self->m_wheelLines);
             self->m_showAnchors = IsDlgButtonChecked(dlg, kOptAnchorsId) == BST_CHECKED;
             self->m_showTicks = IsDlgButtonChecked(dlg, kOptTicksId) == BST_CHECKED;
-            self->m_left->SetMarkerVisibility(self->m_showAnchors, self->m_showTicks);
-            self->m_right->SetMarkerVisibility(self->m_showAnchors, self->m_showTicks);
             self->m_showHeader = IsDlgButtonChecked(dlg, kOptHeaderId) == BST_CHECKED;
             self->m_headerShowPath = IsDlgButtonChecked(dlg, kOptHeaderPathId) == BST_CHECKED;
-            self->m_left->SetHeaderOptions(self->m_showHeader, self->m_headerShowPath);
-            self->m_right->SetHeaderOptions(self->m_showHeader, self->m_headerShowPath);
+            for (int slot = 0; slot < kPaneSlots; ++slot) {
+                if (!self->SlotOn(slot))
+                    continue;
+                PaneWindow* pane = self->Pane(slot);
+                pane->SetDefaultZoomMode(self->m_defaults.zoomMode);
+                pane->SetWheelLinesOverride(self->m_wheelLines);
+                pane->SetMarkerVisibility(self->m_showAnchors, self->m_showTicks);
+                pane->SetHeaderOptions(self->m_showHeader, self->m_headerShowPath);
+            }
             self->m_fsShowToolbar = IsDlgButtonChecked(dlg, kOptFsToolbarId) == BST_CHECKED;
             self->m_fsShowStatus = IsDlgButtonChecked(dlg, kOptFsStatusId) == BST_CHECKED;
             if (self->m_fullscreen)
                 self->Layout(); // apply the full-screen chrome choice live
+            // Acts when the user MOVED the checkbox, and also when an
+            // unchecked box sits over a PARTIAL set this exe owns: "some verbs
+            // ours, not all" is a state the checkbox cannot display (it shows
+            // unchecked), so without the second term those leftovers would be
+            // unreachable from the dialog. An untouched box over a clean state
+            // does nothing at all: no cross-process lock (up to five seconds
+            // of frozen UI on a contended or unreachable profile), no beep at
+            // somebody who never asked for anything. When it does act, the
+            // desired state is applied as ONE locked probe-and-mutate:
+            // deciding here from an unlocked IsRegistered() and then calling a
+            // locked mutator leaves a window in which another copy of the app
+            // invalidates the decision and the request is silently dropped.
+            // Apply also repairs partial states (an upgrade over the two-verb
+            // release, a failed write), which a plain desired-!=-registered
+            // comparison would leave stuck in Explorer forever.
             const bool wantShell = IsDlgButtonChecked(dlg, kOptShellId) == BST_CHECKED;
-            if (wantShell != ShellIntegration::IsRegistered()) {
-                const bool applied = wantShell ? ShellIntegration::Register()
-                                               : ShellIntegration::Unregister();
-                if (!applied)
-                    MessageBeep(MB_ICONWARNING);
-            }
+            if ((wantShell != state->shellAtOpen || (!wantShell && state->shellPartial)) &&
+                !ShellIntegration::Apply(wantShell))
+                MessageBeep(MB_ICONWARNING);
             if (state->clearRecent) {
                 self->m_mruFiles.clear();
-                self->m_mruPairs.clear();
+                self->m_mruSessions.clear();
                 self->RebuildMruMenus();
             }
             EndDialog(dlg, 1);
@@ -1626,8 +1909,8 @@ LRESULT CALLBACK MainWindow::PageBoxProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             wchar_t text[64] = L"";
             GetWindowTextW(hwnd, text, ARRAYSIZE(text));
             if (self->GotoFromText(text)) {
-                PaneWindow* pane = self->m_activePane ? self->m_activePane
-                                                      : self->m_left.get();
+                PaneWindow* pane =
+                    self->m_activePane ? self->m_activePane : self->Pane(kSlotLeft);
                 SetFocus(pane->Hwnd());
                 self->UpdatePageBox();
             } else {
@@ -1637,7 +1920,7 @@ LRESULT CALLBACK MainWindow::PageBoxProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             return 0;
         }
         if (wParam == VK_ESCAPE) {
-            PaneWindow* pane = self->m_activePane ? self->m_activePane : self->m_left.get();
+            PaneWindow* pane = self->m_activePane ? self->m_activePane : self->Pane(kSlotLeft);
             SetFocus(pane->Hwnd());
             self->UpdatePageBox(); // restore the live page text
             return 0;
@@ -1676,7 +1959,20 @@ void MainWindow::RebuildToolbarIcons() {
 }
 
 namespace {
-void PopulateSyncPointsList(HWND list, const std::vector<SyncPoint>& points) {
+// "p3 <-> p7", one coordinate per active pane in visual order.
+std::wstring FormatPointPages(const SyncPoint& p, int paneCount) {
+    std::wstring pages;
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        if (!SlotActive(slot, paneCount))
+            continue;
+        if (!pages.empty())
+            pages += L" \x2194 ";
+        pages += L"p" + std::to_wstring(p.page[static_cast<size_t>(slot)] + 1);
+    }
+    return pages;
+}
+
+void PopulateSyncPointsList(HWND list, const std::vector<SyncPoint>& points, int paneCount) {
     ListView_DeleteAllItems(list);
     for (size_t i = 0; i < points.size(); ++i) {
         const SyncPoint& p = points[i];
@@ -1688,8 +1984,7 @@ void PopulateSyncPointsList(HWND list, const std::vector<SyncPoint>& points) {
         item.pszText = const_cast<wchar_t*>(ordinal.c_str());
         ListView_InsertItem(list, &item);
         ListView_SetItemText(list, row, 1, const_cast<wchar_t*>(p.label.c_str()));
-        const std::wstring pages = L"p" + std::to_wstring(p.left + 1) + L" \x2194 p" +
-                                   std::to_wstring(p.right + 1);
+        const std::wstring pages = FormatPointPages(p, paneCount);
         ListView_SetItemText(list, row, 2, const_cast<wchar_t*>(pages.c_str()));
         ListView_SetItemText(list, row, 3,
                              const_cast<wchar_t*>(Str(p.manual ? StrId::SyncPtOriginManual
@@ -1744,7 +2039,7 @@ INT_PTR CALLBACK MainWindow::SyncPointsDlgProc(HWND dlg, UINT msg, WPARAM wParam
         addCol(1, 96, StrId::SyncPtsColNumbering);
         addCol(2, 120, StrId::SyncPtsColPages);
         addCol(3, 82, StrId::SyncPtsColOrigin);
-        PopulateSyncPointsList(list, self->m_sync->Points());
+        PopulateSyncPointsList(list, self->m_sync->Points(), self->m_paneCount);
         self->m_syncPtsDlg = dlg; // reset by ShowSyncPointsDialog on return
         return TRUE;
     }
@@ -1757,7 +2052,7 @@ INT_PTR CALLBACK MainWindow::SyncPointsDlgProc(HWND dlg, UINT msg, WPARAM wParam
             return TRUE;
         const HWND list = GetDlgItem(dlg, kSyncPtsListId);
         const int sel = ListView_GetNextItem(list, -1, LVNI_SELECTED);
-        PopulateSyncPointsList(list, self->m_sync->Points());
+        PopulateSyncPointsList(list, self->m_sync->Points(), self->m_paneCount);
         const int n = static_cast<int>(self->m_sync->Points().size());
         if (n > 0 && sel >= 0) {
             const int keep = std::min(sel, n - 1);
@@ -1788,7 +2083,7 @@ INT_PTR CALLBACK MainWindow::SyncPointsDlgProc(HWND dlg, UINT msg, WPARAM wParam
             if (self && sel >= 0) {
                 self->m_sync->RemovePoint(static_cast<size_t>(sel));
                 const int n = static_cast<int>(self->m_sync->Points().size());
-                PopulateSyncPointsList(list, self->m_sync->Points());
+                PopulateSyncPointsList(list, self->m_sync->Points(), self->m_paneCount);
                 if (n > 0) {
                     const int keep = std::min(sel, n - 1);
                     ListView_SetItemState(list, keep, LVIS_SELECTED | LVIS_FOCUSED,
@@ -1808,7 +2103,8 @@ INT_PTR CALLBACK MainWindow::SyncPointsDlgProc(HWND dlg, UINT msg, WPARAM wParam
         case kSyncPtsClearId:
             if (self) {
                 self->m_sync->ClearPoints();
-                PopulateSyncPointsList(GetDlgItem(dlg, kSyncPtsListId), self->m_sync->Points());
+                PopulateSyncPointsList(GetDlgItem(dlg, kSyncPtsListId), self->m_sync->Points(),
+                                       self->m_paneCount);
                 SetFocus(GetDlgItem(dlg, IDCANCEL)); // Clear had focus and gets disabled
                 EnableWindow(GetDlgItem(dlg, kSyncPtsRemoveId), FALSE);
                 EnableWindow(GetDlgItem(dlg, kSyncPtsClearId), FALSE);
@@ -1833,9 +2129,8 @@ INT_PTR CALLBACK MainWindow::SyncPointsDlgProc(HWND dlg, UINT msg, WPARAM wParam
 void MainWindow::UpdateCommandUi() {
     if (!m_sync)
         return;
-    const bool bothDocs = m_left->HasDocument() && m_right->HasDocument();
-    const bool canGenerate =
-        bothDocs && !m_left->Outline().empty() && !m_right->Outline().empty();
+    const bool bothDocs = AllPanesHaveDocuments();
+    const bool canGenerate = AllPanesHaveOutlines();
     const bool hasPoints = m_sync->HasPoints();
     if (m_menu) {
         const auto check = [this](UINT id, bool on) {
@@ -1868,6 +2163,8 @@ void MainWindow::UpdateCommandUi() {
                            MF_BYCOMMAND);
         CheckMenuRadioItem(m_menu, IDC_LANG_ENGLISH, IDC_LANG_SWEDISH,
                            IDC_LANG_ENGLISH + static_cast<UINT>(UiLanguage()), MF_BYCOMMAND);
+        CheckMenuRadioItem(m_menu, IDC_PANES_TWO, IDC_PANES_THREE,
+                           m_paneCount >= 3 ? IDC_PANES_THREE : IDC_PANES_TWO, MF_BYCOMMAND);
         const auto enable = [this](UINT id, bool on) {
             EnableMenuItem(m_menu, id, MF_BYCOMMAND | (on ? MF_ENABLED : MF_GRAYED));
         };
@@ -1928,23 +2225,57 @@ void MainWindow::UpdateStatusBar() {
         syncText += Str(StrId::StatusSyncPtsPre) + std::to_wstring(m_sync->Points().size()) +
                     Str(StrId::StatusSyncPtsPost);
 
-    // Layout: [L page][L zoom][filler][sync centered][R page][R zoom][filler].
-    const std::wstring texts[7] = {
-        pageText(*m_left, StrId::StatusLeftPrefix, StrId::StatusLeftNoDoc),
-        zoomText(*m_left),
-        std::wstring(),
-        std::move(syncText),
-        pageText(*m_right, StrId::StatusRightPrefix, StrId::StatusRightNoDoc),
-        zoomText(*m_right),
-        std::wstring(),
+    // Two panes: [L page][L zoom][filler][sync centred][R page][R zoom][filler].
+    // Three:     [L][L][filler][C][C][filler][R][R][sync][filler].
+    std::vector<std::wstring> texts;
+    std::vector<bool> filler;
+    const auto cell = [&](std::wstring text, bool noBorder) {
+        texts.push_back(std::move(text));
+        filler.push_back(noBorder);
     };
-    for (int i = 0; i < 7; ++i) {
+    const auto paneCells = [&](int slot) {
+        cell(pageText(*Pane(slot), kSlotStatusPrefix[slot], kSlotStatusNoDoc[slot]), false);
+        cell(zoomText(*Pane(slot)), false);
+    };
+    if (m_paneCount == 2) {
+        paneCells(kSlotLeft);
+        cell({}, true); // filler
+        cell(std::move(syncText), false);
+        paneCells(kSlotRight);
+    } else {
+        for (int slot = 0; slot < kPaneSlots; ++slot) {
+            if (!SlotOn(slot))
+                continue;
+            if (slot != kSlotLeft)
+                cell({}, true); // filler up to this pane
+            paneCells(slot);
+        }
+        cell(std::move(syncText), false); // no midline to straddle: after the right pane
+    }
+    cell({}, true); // filler under the grip
+    if (m_statusText.size() != texts.size()) {
+        // The part scheme changed (pane-count switch, first run): EVERY part
+        // must be rewritten, INCLUDING the now-empty fillers - a part that
+        // used to be a substantive cell would otherwise keep its border and
+        // tip, because the change guard below would skip empty == empty.
+        // Same impossible-text trick as the language switch.
+        m_statusText.assign(texts.size(), std::wstring(1, L'\xFFFF'));
+    }
+    for (size_t i = 0; i < texts.size(); ++i) {
         if (m_statusText[i] == texts[i])
             continue; // SB_SETTEXT repaints the part even when nothing changed
         m_statusText[i] = texts[i];
         // The fillers are visual gaps, not cells: no sunken border on them.
-        const WPARAM part = static_cast<WPARAM>(i) | ((i == 2 || i == 6) ? SBT_NOBORDERS : 0);
+        const WPARAM part = static_cast<WPARAM>(i) | (filler[i] ? SBT_NOBORDERS : 0);
         SendMessageW(m_status, SB_SETTEXTW, part,
+                     reinterpret_cast<LPARAM>(m_statusText[i].c_str()));
+        // EVERY substantive part carries its full text as the tip (surfaced
+        // by SBARS_TOOLTIPS only when truncated): the compressed three-pane
+        // cells clip page labels too, not just the sync summary. Fillers get
+        // the empty tip, which also clears a part whose ROLE changed with the
+        // mode switch (tip text is per-part control state, independent of
+        // the text).
+        SendMessageW(m_status, SB_SETTIPTEXTW, static_cast<WPARAM>(i),
                      reinterpret_cast<LPARAM>(m_statusText[i].c_str()));
     }
 }
@@ -1959,12 +2290,13 @@ void MainWindow::ApplyScrollMode(PaneWindow::ScrollMode mode) {
     // Global by design: one mental switch, and sync-locked panes flip pages
     // together instead of mixing paged and continuous behavior.
     m_scrollMode = mode;
-    m_left->SetScrollMode(mode);
-    m_right->SetScrollMode(mode);
+    for (int slot = 0; slot < kPaneSlots; ++slot)
+        if (SlotOn(slot))
+            Pane(slot)->SetScrollMode(mode);
     UpdateCommandUi();
 }
 
-void MainWindow::SwapPanes() {
+void MainWindow::SwapPanes(bool reverse) {
     struct Snapshot {
         bool has = false;
         std::wstring path;
@@ -1977,11 +2309,38 @@ void MainWindow::SwapPanes() {
         return Snapshot{pane.HasPersistableDocument(), pane.DocumentPath(), pane.PersistZoom(),
                         pane.PersistScrollX(), pane.PersistScrollY(), pane.PersistZoomMode()};
     };
-    const Snapshot left = snap(*m_left);
-    const Snapshot right = snap(*m_right);
-    if (!left.has && !right.has)
+    // The swap is a ROTATION of the active slots: each pane adopts what its
+    // predecessor in visual order held (Shift+F8 reverses: each adopts its
+    // SUCCESSOR). With two panes both directions are the same 2-cycle, bit
+    // for bit the old exchange; with three, F8 cycles left -> center -> right.
+    PerPane<int> prevSlot{};
+    PerPane<Snapshot> before;
+    int first = -1;
+    int last = -1;
+    bool anyDoc = false;
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        if (!SlotOn(slot))
+            continue;
+        before[static_cast<size_t>(slot)] = snap(*Pane(slot));
+        anyDoc = anyDoc || before[static_cast<size_t>(slot)].has;
+        if (first < 0)
+            first = slot;
+        else
+            prevSlot[static_cast<size_t>(slot)] = last;
+        last = slot;
+    }
+    if (first < 0 || !anyDoc)
         return;
-    // Park the map MIRRORED before the reopen storm: each side's
+    prevSlot[static_cast<size_t>(first)] = last; // close the cycle
+    // The source-of-content mapping: predecessor forward, successor (the
+    // inverse permutation) in reverse. Everything below - expectations,
+    // point tuples, fallbacks, reopens - permutes through this one map.
+    PerPane<int> srcSlot = prevSlot;
+    if (reverse)
+        for (int slot = 0; slot < kPaneSlots; ++slot)
+            if (SlotOn(slot))
+                srcSlot[static_cast<size_t>(prevSlot[static_cast<size_t>(slot)])] = slot;
+    // Park the map PERMUTED before the reopen storm: each pane's
     // DocumentOpened clears the live map, and the path change cancels the
     // parked regen (the parked map replaces it). A swap-during-swap discards
     // the older park (its expected paths will not match the newer arrivals).
@@ -1992,29 +2351,41 @@ void MainWindow::SwapPanes() {
     // DocumentOpened), and parking that map would reinstall alien
     // coordinates. Same guard makes a second swap issued mid-reopen simply
     // discard (the panes are Opening), as the parked-map contract promises.
-    if (m_sync->HasPoints() && m_left->HasDocument() && m_right->HasDocument()) {
+    if (m_sync->HasPoints() && AllPanesHaveDocuments()) {
         m_swapMap.pending = true;
-        m_swapMap.expectLeft = right.path;
-        m_swapMap.expectRight = left.path;
-        for (const SyncPoint& p : m_sync->Points())
-            m_swapMap.points.push_back(SyncPoint{p.right, p.left, p.manual, p.label});
+        for (int slot = 0; slot < kPaneSlots; ++slot)
+            if (SlotOn(slot))
+                m_swapMap.expect[static_cast<size_t>(slot)] =
+                    before[static_cast<size_t>(srcSlot[static_cast<size_t>(slot)])].path;
+        for (const SyncPoint& p : m_sync->Points()) {
+            SyncPoint moved = p;
+            for (int slot = 0; slot < kPaneSlots; ++slot)
+                if (SlotOn(slot))
+                    moved.page[static_cast<size_t>(slot)] =
+                        p.page[static_cast<size_t>(srcSlot[static_cast<size_t>(slot)])];
+            m_swapMap.points.push_back(std::move(moved));
+        }
     }
-    std::swap(m_fallbackLeft, m_fallbackRight);
+    const PerPane<PaneSettings> fallbackBefore = m_fallback;
+    for (int slot = 0; slot < kPaneSlots; ++slot)
+        if (SlotOn(slot))
+            m_fallback[static_cast<size_t>(slot)] =
+                fallbackBefore[static_cast<size_t>(srcSlot[static_cast<size_t>(slot)])];
     // The documents reload through their workers (a live Document cannot
     // change pane: the worker posts to its pane's HWND); the views ride the
     // session-restore path and the sync anchors recapture on DocumentOpened.
-    // The swapped MRU pair that gets recorded is intended: the new
-    // arrangement genuinely is reversed.
-    if (right.has)
-        m_left->OpenDocumentWithView(right.path, right.zoom, right.scrollX, right.scrollY,
-                                     right.zoomMode);
-    else
-        m_left->CloseDocument();
-    if (left.has)
-        m_right->OpenDocumentWithView(left.path, left.zoom, left.scrollX, left.scrollY,
-                                      left.zoomMode);
-    else
-        m_right->CloseDocument();
+    // The rotated MRU entry that gets recorded is intended: the new
+    // arrangement genuinely is reordered.
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        if (!SlotOn(slot))
+            continue;
+        const Snapshot& src = before[static_cast<size_t>(srcSlot[static_cast<size_t>(slot)])];
+        if (src.has)
+            Pane(slot)->OpenDocumentWithView(src.path, src.zoom, src.scrollX, src.scrollY,
+                                             src.zoomMode);
+        else
+            Pane(slot)->CloseDocument();
+    }
 }
 
 void MainWindow::SwitchLanguage(Lang lang) {
@@ -2031,8 +2402,9 @@ void MainWindow::SwitchLanguage(Lang lang) {
     if (m_toolbarText != 0)
         RebuildToolbarInBand(); // button labels live in the language tables
     UpdateTitle();
-    m_left->SetPlaceholderHint(Str(StrId::PlaceholderLeft));
-    m_right->SetPlaceholderHint(Str(StrId::PlaceholderRight));
+    for (int slot = 0; slot < kPaneSlots; ++slot)
+        if (SlotOn(slot))
+            Pane(slot)->SetPlaceholderHint(Str(kSlotPlaceholder[slot]));
     for (std::wstring& cached : m_statusText)
         cached.assign(1, L'\xFFFF'); // impossible text: force every part to rewrite
     UpdateStatusBar();
@@ -2048,27 +2420,54 @@ void MainWindow::ShowStatusMessage(std::wstring text) {
         return;
     // Borrow the sync part (index 3) for a transient message; the timer
     // restores it.
-    m_statusText[3] = std::move(text);
-    SendMessageW(m_status, SB_SETTEXTW, 3, reinterpret_cast<LPARAM>(m_statusText[3].c_str()));
+    const size_t part = static_cast<size_t>(SyncStatusPart());
+    if (m_statusText.size() <= part)
+        m_statusText.resize(part + 1);
+    m_statusText[part] = std::move(text);
+    SendMessageW(m_status, SB_SETTEXTW, static_cast<WPARAM>(part),
+                 reinterpret_cast<LPARAM>(m_statusText[part].c_str()));
+    // Same tip rule as UpdateStatusBar: a squeezed cell must still surface
+    // the whole transient message on hover.
+    SendMessageW(m_status, SB_SETTIPTEXTW, static_cast<WPARAM>(part),
+                 reinterpret_cast<LPARAM>(m_statusText[part].c_str()));
     SetTimer(m_hwnd, kStatusMsgTimer, 4000, nullptr);
 }
 
 void MainWindow::GenerateSyncPointsFromBookmarks(bool interactive) {
-    if (!m_left->HasDocument() || !m_right->HasDocument())
+    if (!AllPanesHaveDocuments())
         return; // accelerator/reload-proofing; the menu item is greyed
+    // One column per ACTIVE pane, in slot order, so the join returns exactly
+    // the keys every open document shares.
+    std::vector<const std::vector<Document::OutlineItem>*> outlines;
+    std::vector<int> slots;
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        if (!SlotOn(slot))
+            continue;
+        outlines.push_back(&Pane(slot)->Outline());
+        slots.push_back(slot);
+    }
     std::vector<SyncPoint> candidates;
-    for (const auto& [li, ri] : MatchOutlineNumberings(m_left->Outline(), m_right->Outline())) {
-        const Document::OutlineItem& l = m_left->Outline()[static_cast<size_t>(li)];
-        const Document::OutlineItem& r = m_right->Outline()[static_cast<size_t>(ri)];
-        if (l.targetPage < 0 || r.targetPage < 0)
+    for (const std::vector<int>& row : MatchOutlineNumberings(outlines)) {
+        SyncPoint point;
+        bool usable = true;
+        for (size_t n = 0; n < slots.size() && usable; ++n) {
+            const Document::OutlineItem& item =
+                (*outlines[n])[static_cast<size_t>(row[n])];
+            if (item.targetPage < 0)
+                usable = false; // external link: no page to anchor to
+            else
+                point.page[static_cast<size_t>(slots[n])] = item.targetPage;
+        }
+        if (!usable)
             continue;
         // Numbered match: the numbering key. Title match: the title itself.
-        std::wstring label;
-        if (const auto key = ParseOutlineNumbering(l.title))
-            label = FormatOutlineNumbering(*key);
+        // Read from the FIRST outline, which drove the join's ordering.
+        const Document::OutlineItem& lead = (*outlines[0])[static_cast<size_t>(row[0])];
+        if (const auto key = ParseOutlineNumbering(lead.title))
+            point.label = FormatOutlineNumbering(*key);
         else
-            label = l.title;
-        candidates.push_back(SyncPoint{l.targetPage, r.targetPage, false, std::move(label)});
+            point.label = lead.title;
+        candidates.push_back(std::move(point));
     }
     if (candidates.empty()) {
         if (interactive)
@@ -2108,59 +2507,89 @@ void MainWindow::GenerateSyncPointsFromBookmarks(bool interactive) {
 
 namespace {
 // One pass over the sorted map. A segment spans the interior pages between
-// consecutive points; prev = (-1,-1) seeds the pre-first segment so
+// consecutive points; prev = -1 everywhere seeds the pre-first segment so
 // different-length preambles align from the top. Within a segment the
-// interiors pair 1:1 from the segment start; the shorter side gets one gap
-// slot per unmatched counterpart page, inserted just before its own point
-// page, silhouetted like the page it mirrors (top-to-bottom order). The tail
-// after the last point gets no gaps: free divergence, the virtual sync
-// clamps. Each segment contributes max(a, b) slots to both sides, so by
-// induction every point's two pages land on the same slot index.
-void ComputeAlignmentGaps(const std::vector<SyncPoint>& points, const PaneWindow& left,
-                          const PaneWindow& right, std::vector<PageLayout::AlignmentGap>& outLeft,
-                          std::vector<PageLayout::AlignmentGap>& outRight) {
-    int prevL = -1;
-    int prevR = -1;
+// interiors pair 1:1 from the segment start; every pane shorter than the
+// LONGEST one gets a gap slot per unmatched page, inserted just before its own
+// point page and silhouetted like the longest pane's page it mirrors
+// (top-to-bottom order). The tail after the last point gets no gaps: free
+// divergence, the virtual sync clamps. Each segment contributes
+// max(interior) slots to EVERY pane, so by induction every point's pages land
+// on the same slot index in all of them. With two panes the longest pane is
+// the counterpart and max/min collapse to the original pairwise arithmetic.
+void ComputeAlignmentGaps(const std::vector<SyncPoint>& points, const PerPane<PaneWindow*>& panes,
+                          PerPane<std::vector<PageLayout::AlignmentGap>>& out) {
+    PerPane<int> prev;
+    prev.fill(-1);
     for (const SyncPoint& p : points) {
-        const int l = std::clamp(p.left, 0, left.PageCount() - 1);
-        const int r = std::clamp(p.right, 0, right.PageCount() - 1);
-        if (l <= prevL || r <= prevR)
+        PerPane<int> page{};
+        PerPane<int> interior{};
+        int slots = 0;
+        int donor = -1;
+        bool increasing = true;
+        for (int s = 0; s < kPaneSlots; ++s) {
+            const size_t i = static_cast<size_t>(s);
+            if (!panes[i])
+                continue;
+            page[i] = std::clamp(p.page[i], 0, panes[i]->PageCount() - 1);
+            if (page[i] <= prev[i])
+                increasing = false;
+            interior[i] = page[i] - prev[i] - 1;
+            if (interior[i] > slots) {
+                slots = interior[i];
+                donor = s;
+            }
+        }
+        if (!increasing)
             continue; // defensive only: the map invariant says impossible
-        const int a = l - prevL - 1; // interior page counts
-        const int b = r - prevR - 1;
-        const int common = std::min(a, b);
-        for (int i = common; i < a; ++i) // left surplus -> right-side gaps
-            outRight.push_back({r, left.PageSizePt(prevL + 1 + i)});
-        for (int i = common; i < b; ++i) // right surplus -> left-side gaps
-            outLeft.push_back({l, right.PageSizePt(prevR + 1 + i)});
-        prevL = l;
-        prevR = r;
+        if (donor >= 0) {
+            const size_t d = static_cast<size_t>(donor);
+            for (int s = 0; s < kPaneSlots; ++s) {
+                const size_t i = static_cast<size_t>(s);
+                if (!panes[i])
+                    continue;
+                for (int k = interior[i]; k < slots; ++k)
+                    out[i].push_back({page[i], panes[d]->PageSizePt(prev[d] + 1 + k)});
+            }
+        }
+        prev = page;
     }
 }
 } // namespace
 
 namespace {
-std::wstring FormatManualPoints(const std::vector<SyncPoint>& points) {
-    // Capped well under ReadString's 2048-wchar buffer (~14 wchars per pair):
-    // GetPrivateProfileString truncates SILENTLY, and a torn trailing pair
-    // could restore a wrong anchor instead of a missing one.
-    constexpr size_t kMaxSavedManualPoints = 100;
+// One 0-based page per ACTIVE slot, joined by ':'; entries separated by ';'.
+std::wstring FormatManualPoints(const std::vector<SyncPoint>& points,
+                                const std::vector<int>& slots) {
+    // Bounded on purpose, even though the reader no longer has a fixed
+    // buffer: a settings.ini that grows without limit is its own problem, and
+    // a truncated tail must be a whole missing entry rather than a torn one
+    // that restores a WRONG anchor. Each coordinate costs up to 6 wchars, so
+    // three of them need a lower cap than two did.
+    const size_t maxPoints = slots.size() >= 3 ? 65 : 100;
     std::wstring out;
     size_t saved = 0;
     for (const SyncPoint& p : points) {
         if (!p.manual)
             continue;
-        if (++saved > kMaxSavedManualPoints)
+        if (++saved > maxPoints)
             break;
         if (!out.empty())
             out.push_back(L';');
-        out += std::to_wstring(p.left) + L":" + std::to_wstring(p.right);
+        for (size_t n = 0; n < slots.size(); ++n) {
+            if (n > 0)
+                out.push_back(L':');
+            out += std::to_wstring(p.page[static_cast<size_t>(slots[n])]);
+        }
     }
     return out;
 }
 
-std::vector<SyncPoint> ParseManualPoints(const std::wstring& text, int leftCount,
-                                         int rightCount) {
+// Reads back exactly as many coordinates as there are active slots: an entry
+// with a different arity belonged to another arrangement and is dropped, so a
+// two-pane session never inherits a three-document map or vice versa.
+std::vector<SyncPoint> ParseManualPoints(const std::wstring& text, const std::vector<int>& slots,
+                                         const std::vector<int>& pageCounts) {
     std::vector<SyncPoint> points;
     size_t pos = 0;
     while (pos < text.size()) {
@@ -2169,47 +2598,86 @@ std::vector<SyncPoint> ParseManualPoints(const std::wstring& text, int leftCount
             end = text.size();
         const std::wstring item = text.substr(pos, end - pos);
         pos = end + 1;
-        const size_t colon = item.find(L':');
-        if (colon == std::wstring::npos)
+        // Every field must be FULLY numeric: wcstol returns 0 on garbage
+        // (":", "abc:def"), which would otherwise restore a phantom point.
+        std::vector<int> pages;
+        const wchar_t* cursor = item.c_str();
+        const wchar_t* itemEnd = item.c_str() + item.size();
+        bool valid = true;
+        while (valid && cursor < itemEnd) {
+            wchar_t* stop = nullptr;
+            const long value = wcstol(cursor, &stop, 10);
+            if (stop == cursor || (stop != itemEnd && *stop != L':')) {
+                valid = false;
+            } else if (stop == itemEnd) {
+                pages.push_back(static_cast<int>(value)); // last field
+                cursor = itemEnd;
+            } else {
+                pages.push_back(static_cast<int>(value));
+                cursor = stop + 1; // past the ':'
+                if (cursor == itemEnd)
+                    valid = false; // trailing ':' with no field after it
+            }
+        }
+        if (!valid || pages.size() != slots.size())
             continue;
-        // Both halves must be FULLY numeric: wcstol returns 0 on garbage
-        // (":", "abc:def"), which would otherwise restore a phantom {0,0}.
-        wchar_t* endL = nullptr;
-        const long l = wcstol(item.c_str(), &endL, 10);
-        wchar_t* endR = nullptr;
-        const long r = wcstol(item.c_str() + colon + 1, &endR, 10);
-        if (endL != item.c_str() + colon || endR != item.c_str() + item.size())
+        // Out-of-range coordinates mean the pagination changed since the save
+        // (or the file was hand-edited): drop them, and enforce the map's
+        // all-coordinates monotonicity defensively for the same reason.
+        bool usable = true;
+        for (size_t n = 0; n < pages.size() && usable; ++n)
+            if (pages[n] < 0 || pages[n] >= pageCounts[n])
+                usable = false;
+        if (!usable)
             continue;
-        // Out-of-range pairs mean the pagination changed since the save (or
-        // the file was hand-edited): drop them, and enforce the map's double
-        // monotonicity defensively for the same reason.
-        if (l < 0 || r < 0 || l >= leftCount || r >= rightCount)
-            continue;
-        if (!points.empty() && (points.back().left >= static_cast<int>(l) ||
-                                points.back().right >= static_cast<int>(r)))
-            continue;
-        points.push_back(SyncPoint{static_cast<int>(l), static_cast<int>(r), true, {}});
+        if (!points.empty()) {
+            for (size_t n = 0; n < pages.size() && usable; ++n)
+                if (points.back().page[static_cast<size_t>(slots[n])] >= pages[n])
+                    usable = false;
+            if (!usable)
+                continue;
+        }
+        SyncPoint point;
+        for (size_t n = 0; n < pages.size(); ++n)
+            point.page[static_cast<size_t>(slots[n])] = pages[n];
+        point.manual = true;
+        points.push_back(std::move(point));
     }
     return points;
 }
 } // namespace
 
+// The active slots and the paths that identify the current arrangement.
+// Empty when a pane is missing a document: there is no session to key on.
+MruSession MainWindow::CurrentSession(std::vector<int>* slots) const {
+    MruSession session;
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        if (!SlotOn(slot))
+            continue;
+        if (!Pane(slot) || !Pane(slot)->HasDocument())
+            return MruSession{};
+        session.path[static_cast<size_t>(slot)] = Pane(slot)->DocumentPath();
+        if (slots)
+            slots->push_back(slot);
+    }
+    return session;
+}
+
 void MainWindow::RememberSyncPoints() {
-    if (!m_sync || !m_left->HasDocument() || !m_right->HasDocument())
+    if (!m_sync || !AllPanesHaveDocuments())
         return;
-    const std::wstring& l = m_left->DocumentPath();
-    const std::wstring& r = m_right->DocumentPath();
-    std::erase_if(m_savedPoints, [&](const SavedSyncPoints& e) {
-        return lstrcmpiW(e.left.c_str(), l.c_str()) == 0 &&
-               lstrcmpiW(e.right.c_str(), r.c_str()) == 0;
-    });
+    std::vector<int> slots;
+    const MruSession key = CurrentSession(&slots);
+    if (SessionSlotCount(key) == 0)
+        return;
+    std::erase_if(m_savedPoints,
+                  [&](const SavedSyncPoints& e) { return SameSession({e.path}, key); });
     SavedSyncPoints entry;
-    entry.left = l;
-    entry.right = r;
-    entry.manual = FormatManualPoints(m_sync->Points());
+    entry.path = key.path;
+    entry.manual = FormatManualPoints(m_sync->Points(), slots);
     entry.hadAuto = m_sync->HasAutoPoints();
-    // An emptied map FORGETS the pair: a deliberate clear must not resurrect
-    // at the next launch.
+    // An emptied map FORGETS the session: a deliberate clear must not
+    // resurrect at the next launch.
     if (entry.manual.empty() && !entry.hadAuto)
         return;
     m_savedPoints.insert(m_savedPoints.begin(), std::move(entry));
@@ -2218,21 +2686,23 @@ void MainWindow::RememberSyncPoints() {
 }
 
 void MainWindow::TryRestoreSavedPoints() {
-    // Only when a pair OPENS with no map of its own: a live map (the swap's
+    // Only when a session OPENS with no map of its own: a live map (the swap's
     // reinstalled mirror, points the user already placed) always wins.
-    if (!m_sync || m_sync->HasPoints() || !m_left->HasDocument() || !m_right->HasDocument())
+    if (!m_sync || m_sync->HasPoints() || !AllPanesHaveDocuments())
         return;
-    const std::wstring& l = m_left->DocumentPath();
-    const std::wstring& r = m_right->DocumentPath();
-    const auto it = std::find_if(
-        m_savedPoints.begin(), m_savedPoints.end(), [&](const SavedSyncPoints& e) {
-            return lstrcmpiW(e.left.c_str(), l.c_str()) == 0 &&
-                   lstrcmpiW(e.right.c_str(), r.c_str()) == 0;
-        });
+    std::vector<int> slots;
+    const MruSession key = CurrentSession(&slots);
+    if (SessionSlotCount(key) == 0)
+        return;
+    const auto it =
+        std::find_if(m_savedPoints.begin(), m_savedPoints.end(),
+                     [&](const SavedSyncPoints& e) { return SameSession({e.path}, key); });
     if (it == m_savedPoints.end())
         return;
-    std::vector<SyncPoint> manual =
-        ParseManualPoints(it->manual, m_left->PageCount(), m_right->PageCount());
+    std::vector<int> pageCounts;
+    for (int slot : slots)
+        pageCounts.push_back(Pane(slot)->PageCount());
+    std::vector<SyncPoint> manual = ParseManualPoints(it->manual, slots, pageCounts);
     if (!manual.empty())
         m_sync->RestorePoints(std::move(manual));
     if (it->hadAuto)
@@ -2242,37 +2712,81 @@ void MainWindow::TryRestoreSavedPoints() {
 }
 
 void MainWindow::ApplyAlignmentGaps() {
-    if (!m_sync || !m_left || !m_right)
+    if (!m_sync || !Pane(kSlotLeft) || !Pane(kSlotRight))
         return;
-    std::vector<PageLayout::AlignmentGap> gapsLeft;
-    std::vector<PageLayout::AlignmentGap> gapsRight;
-    if (m_showAlignmentGaps && m_sync->HasPoints() && m_left->HasDocument() &&
-        m_right->HasDocument())
-        ComputeAlignmentGaps(m_sync->Points(), *m_left, *m_right, gapsLeft, gapsRight);
-    // The rebuilds scroll the panes; their echoes must not drive the sibling
+    PerPane<PaneWindow*> panes{};
+    for (int slot = 0; slot < kPaneSlots; ++slot)
+        if (SlotOn(slot))
+            panes[static_cast<size_t>(slot)] = Pane(slot);
+    PerPane<std::vector<PageLayout::AlignmentGap>> gaps;
+    if (m_showAlignmentGaps && m_sync->HasPoints() && AllPanesHaveDocuments())
+        ComputeAlignmentGaps(m_sync->Points(), panes, gaps);
+    // The rebuilds scroll the panes; their echoes must not drive the siblings
     // mid-operation (this runs inside the controller's own event handling on
-    // the DocumentOpened clear). Both panes get the same fresh gap epoch:
-    // virtual sync only runs between matching nonzero epochs.
+    // the DocumentOpened clear). Every pane gets the same fresh gap epoch:
+    // virtual sync only runs when they ALL match and are nonzero.
     const uint64_t version = ++m_gapsEpoch;
     m_sync->ApplySilently([&] {
-        m_left->SetAlignmentGaps(std::move(gapsLeft), version);
-        m_right->SetAlignmentGaps(std::move(gapsRight), version);
+        for (int slot = 0; slot < kPaneSlots; ++slot)
+            if (SlotOn(slot))
+                Pane(slot)->SetAlignmentGaps(std::move(gaps[static_cast<size_t>(slot)]), version);
     });
     // Markers are toggle-INDEPENDENT: the anchors and ticks show wherever a
     // map exists, gaps or not.
-    std::vector<PaneWindow::SyncMarker> markersLeft;
-    std::vector<PaneWindow::SyncMarker> markersRight;
-    for (const SyncPoint& p : m_sync->Points()) {
-        markersLeft.push_back({p.left, p.manual, p.label});
-        markersRight.push_back({p.right, p.manual, p.label});
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        if (!SlotOn(slot))
+            continue;
+        std::vector<PaneWindow::SyncMarker> markers;
+        markers.reserve(m_sync->Points().size());
+        for (const SyncPoint& p : m_sync->Points())
+            markers.push_back({p.page[static_cast<size_t>(slot)], p.manual, p.label});
+        Pane(slot)->SetSyncMarkers(std::move(markers));
     }
-    m_left->SetSyncMarkers(std::move(markersLeft));
-    m_right->SetSyncMarkers(std::move(markersRight));
     if (m_syncPtsDlg)
         PostMessageW(m_syncPtsDlg, kMsgSyncPtsRefresh, 0, 0);
 }
 
+namespace {
+// The process token's elevation, resolved once: it cannot change while we run.
+// FAILS CLOSED. This gates a security decision, and "the query failed" is not
+// the same answer as "TokenIsElevated == 0": an unreadable token reads as
+// ELEVATED so the refusal below applies, rather than letting a permanently
+// cached first failure open the gate for the rest of the process lifetime.
+bool RunningElevated() {
+    static const bool elevated = [] {
+        HANDLE token = nullptr;
+        if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
+            return true;
+        TOKEN_ELEVATION info{};
+        DWORD size = 0;
+        const bool queried =
+            GetTokenInformation(token, TokenElevation, &info, sizeof(info), &size) != FALSE;
+        CloseHandle(token);
+        return !queried || info.TokenIsElevated != 0;
+    }();
+    return elevated;
+}
+} // namespace
+
 void MainWindow::LaunchInverseSearch(const SyncTexIndex::InverseHit& hit) {
+    // An ELEVATED viewer launches nothing. settings.ini is medium-integrity
+    // data by design (the declared boundary is the settings directory, which
+    // the user's own unelevated processes can write), so this command line -
+    // and, for the URI form, the HKCU-registered protocol handler behind it -
+    // would run at HIGH integrity from data that lower-integrity code can
+    // choose. The app is a per-user install and elevation is not a supported
+    // mode: the editor stays reachable from the ordinary instance. Said in a
+    // message box with its OWN string, not the generic launch failure: this is
+    // a deliberate refusal the user has to be able to act on, and the status
+    // bar can be hidden - Ctrl+click would then simply look broken. The string
+    // states the REQUIREMENT rather than diagnosing the state, because this
+    // path is also taken when the token query failed, where "you are running
+    // as administrator" would be a claim the code cannot actually make.
+    if (RunningElevated()) {
+        MessageBoxW(m_hwnd, Str(StrId::SyncTexElevated), L"PDF Side Viewer",
+                    MB_OK | MB_ICONINFORMATION);
+        return;
+    }
     std::wstring cmd = m_synctexInverse.empty() ? L"vscode://file/%f:%l" : m_synctexInverse;
     const bool uri = cmd.find(L"://") != std::wstring::npos;
     std::wstring file = hit.texPath;
@@ -2303,32 +2817,66 @@ void MainWindow::LaunchInverseSearch(const SyncTexIndex::InverseHit& hit) {
     }
 }
 
-BOOL MainWindow::HandleOpenDocumentCopyData(const COPYDATASTRUCT& cds) {
-    // Same validation discipline as the forward-search op: caps, exact size,
-    // copy-now (the buffer dies at return), rooted paths only.
-    if (cds.cbData < sizeof(OpenDocumentBlob))
+BOOL MainWindow::HandleCopyData(const COPYDATASTRUCT& cds) {
+    // Requests from short-lived second instances (Explorer-verb opens, SyncTeX
+    // forward search), one versioned XML payload for both. The message crosses
+    // process boundaries: IpcXml::Parse enforces shape, caps and the closed
+    // vocabulary (and copies everything out: the buffer dies at return); the
+    // SEMANTIC checks live here. FALSE = unhandled, and the sender cold-starts.
+    if (cds.dwData != IpcXml::kCopyDataId || !cds.lpData)
         return FALSE;
-    OpenDocumentBlob blob{};
-    memcpy(&blob, cds.lpData, sizeof(blob));
-    if (blob.side > 1 || blob.pathLen == 0 || blob.pathLen > 0x8000)
+    std::optional<IpcXml::Command> cmd = IpcXml::Parse(cds.lpData, cds.cbData);
+    if (!cmd)
         return FALSE;
-    const size_t expected =
-        sizeof(OpenDocumentBlob) + static_cast<size_t>(blob.pathLen) * sizeof(wchar_t);
-    if (cds.cbData != expected)
-        return FALSE;
-    const auto* chars = reinterpret_cast<const wchar_t*>(
-        static_cast<const BYTE*>(cds.lpData) + sizeof(OpenDocumentBlob));
-    std::wstring path(chars, blob.pathLen);
-    const bool rooted = path.size() >= 3 && (path[1] == L':' || path.rfind(L"\\\\", 0) == 0);
-    if (!rooted)
-        return FALSE;
-    // The sender granted AllowSetForegroundWindow; flash as the fallback cue.
-    if (!SetForegroundWindow(m_hwnd)) {
-        FLASHWINFO fi{sizeof(fi), m_hwnd, FLASHW_TRAY | FLASHW_TIMERNOFG, 3, 0};
-        FlashWindowEx(&fi);
+    // Drive-rooted ("C:\..." or "C:/...") or a complete UNC share
+    // ("\\server\share..."). Everything else is refused: drive-RELATIVE
+    // ("C:file"), the device and extended NAMESPACES ("\\.\", "\\?\") and
+    // bare server roots - the panes expect plain absolute paths. Reserved
+    // DOS device NAMES inside an otherwise valid path ("C:\CON") pass here
+    // by design and are left to the engine's open to fail; this predicate is
+    // shape validation, not an authorization boundary (that is default UIPI:
+    // see the WM_COPYDATA note in Create).
+    const auto rooted = [](const std::wstring& p) {
+        const auto letter = [](wchar_t c) {
+            return (c >= L'A' && c <= L'Z') || (c >= L'a' && c <= L'z');
+        };
+        if (p.size() >= 3 && letter(p[0]) && p[1] == L':' && (p[2] == L'\\' || p[2] == L'/'))
+            return true;
+        if (p.rfind(L"\\\\", 0) != 0 || p.size() < 5)
+            return false;
+        if (p[2] == L'\\' || p[2] == L'.' || p[2] == L'?')
+            return false; // device/extended namespaces, malformed roots
+        const size_t share = p.find(L'\\', 2);
+        return share != std::wstring::npos && share + 1 < p.size() && p[share + 1] != L'\\';
+    };
+    if (cmd->open) {
+        if (!rooted(cmd->open->path))
+            return FALSE;
+        // The sender granted AllowSetForegroundWindow; flash as the fallback cue.
+        if (!SetForegroundWindow(m_hwnd)) {
+            FLASHWINFO fi{sizeof(fi), m_hwnd, FLASHW_TRAY | FLASHW_TIMERNOFG, 3, 0};
+            FlashWindowEx(&fi);
+        }
+        // Asking for a slot that is not up yet turns the layout on, exactly
+        // like the File menu's Open Centre: a verb must always land somewhere.
+        const int slot = cmd->open->slot; // Parse guarantees the range
+        if (!SlotOn(slot))
+            SetPaneCount(3);
+        Pane(slot)->OpenDocument(std::move(cmd->open->path));
+        return TRUE;
     }
-    (blob.side != 0 ? m_right : m_left)->OpenDocument(std::move(path));
-    return TRUE;
+    if (cmd->forward) {
+        // Both paths, not only the pdf: the tex is later handed to the editor
+        // launch template, and the sender absolutizes both.
+        if (cmd->forward->line < 1 || cmd->forward->line > 10'000'000 ||
+            !rooted(cmd->forward->pdf) || !rooted(cmd->forward->tex))
+            return FALSE;
+        ForwardSearchRequest req{std::move(cmd->forward->tex), cmd->forward->line,
+                                 std::move(cmd->forward->pdf)};
+        RouteForwardSearch(std::move(req));
+        return TRUE;
+    }
+    return FALSE;
 }
 
 void MainWindow::RouteForwardSearch(ForwardSearchRequest req) {
@@ -2344,15 +2892,13 @@ void MainWindow::RouteForwardSearch(ForwardSearchRequest req) {
         return pane.HasPersistableDocument() &&
                lstrcmpiW(pane.DocumentPath().c_str(), req.pdf.c_str()) == 0;
     };
-    const bool leftMatch = matches(*m_left);
-    const bool rightMatch = matches(*m_right);
     PaneWindow* target = nullptr;
-    if (leftMatch && rightMatch)
-        target = FocusedPane(); // same pdf in both panes: follow user attention
-    else if (leftMatch)
-        target = m_left.get();
-    else if (rightMatch)
-        target = m_right.get();
+    for (int slot = 0; slot < kPaneSlots && !target; ++slot)
+        if (SlotOn(slot) && matches(*Pane(slot)))
+            target = Pane(slot); // first match in visual order
+    // The same pdf open in several panes: follow user attention.
+    if (target && matches(*FocusedPane()))
+        target = FocusedPane();
 
     if (!target) {
         target = FocusedPane();
@@ -2433,9 +2979,10 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         m_dpi = GetDpiForWindow(m_hwnd);
         const HINSTANCE hinst =
             reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(m_hwnd, GWLP_HINSTANCE));
-        m_left->Create(m_hwnd, 100);
-        m_right->Create(m_hwnd, 101);
-        m_activePane = m_left.get();
+        for (int slot = 0; slot < kPaneSlots; ++slot)
+            if (SlotOn(slot))
+                Pane(slot)->Create(m_hwnd, kPaneChildIdBase + slot);
+        m_activePane = Pane(kSlotLeft);
         BuildRebar(hinst); // menu band + command toolbar + page box, one row
         CreateFindBar();   // after the panes: overlays must be above them
         m_outlineTree = CreateWindowExW(
@@ -2443,9 +2990,13 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             WS_CHILD | WS_CLIPSIBLINGS | WS_BORDER | TVS_HASBUTTONS | TVS_HASLINES |
                 TVS_LINESATROOT | TVS_SHOWSELALWAYS,
             0, 0, 0, 0, m_hwnd, reinterpret_cast<HMENU>(IDC_OUTLINE_TREE), hinst, nullptr);
+        // SBARS_TOOLTIPS: the control shows a part's tip when its text is
+        // truncated - the sync cell relies on it under the three-pane
+        // compression, where localized mode strings outgrow the floor width.
         m_status = CreateWindowExW(0, STATUSCLASSNAMEW, nullptr,
-                                   WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SBARS_SIZEGRIP, 0,
-                                   0, 0, 0, m_hwnd,
+                                   WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | SBARS_SIZEGRIP |
+                                       SBARS_TOOLTIPS,
+                                   0, 0, 0, 0, m_hwnd,
                                    reinterpret_cast<HMENU>(static_cast<UINT_PTR>(103)), hinst,
                                    nullptr);
         UpdateUiFont(); // find bar + tree + status bar
@@ -2463,21 +3014,35 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         if (m_fullscreen)
             break; // borderless monitor-sized window: no track clamps
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-        // Two 120-DIP panes + splitter must stay usable under menu + toolbar
-        // + status bar.
-        mmi->ptMinTrackSize = {MulDiv(520, m_dpi, 96), MulDiv(380, m_dpi, 96)};
+        // Every 120-DIP pane + its splitter must stay usable under menu +
+        // toolbar + status bar; a third pane raises the floor accordingly.
+        const int extra = (m_paneCount - 2) * (kMinPaneDip + kSplitterDip);
+        mmi->ptMinTrackSize = {MulDiv(520 + extra, m_dpi, 96), MulDiv(380, m_dpi, 96)};
         return 0;
     }
 
     case WM_DPICHANGED: {
+        // Fallback scroll offsets are device px at the CURRENT dpi (seeded
+        // DPI-rescaled at startup): a parked or never-opened session must
+        // track a monitor change too, or the next grow-reopen applies old-DPI
+        // pixels - and SaveSession would stamp them with the NEW dpi, making
+        // the error survive the restart. Active panes rescale their own live
+        // and pending offsets in OnDpiChanged below.
+        const float fbRatio =
+            static_cast<float>(HIWORD(wParam)) / static_cast<float>(m_dpi);
+        for (PaneSettings& fb : m_fallback) {
+            fb.scrollX *= fbRatio;
+            fb.scrollY *= fbRatio;
+        }
         m_dpi = HIWORD(wParam);
         UpdateUiFont();
         RebuildToolbarIcons();
         UpdateRebarBandSizes();
         // Panes must know the new DPI before SetWindowPos: its synchronous
         // WM_SIZE cascade rebuilds and presents their targets immediately.
-        m_left->OnDpiChanged(m_dpi);
-        m_right->OnDpiChanged(m_dpi);
+        for (int slot = 0; slot < kPaneSlots; ++slot)
+            if (SlotOn(slot))
+                Pane(slot)->OnDpiChanged(m_dpi);
         RECT target = *reinterpret_cast<const RECT*>(lParam);
         if (m_fullscreen) {
             // The suggested rect is for the framed window; stay glued to the
@@ -2509,9 +3074,13 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(m_hwnd, &pt);
-            const RECT splitter = SplitterRect();
             const RECT divider = OutlineDividerRect();
-            if (PtInRect(&splitter, pt) || PtInRect(&divider, pt)) {
+            bool onSplitter = false;
+            for (int i = 0; i < ActiveSplitters(); ++i) {
+                const RECT splitter = SplitterRect(i);
+                onSplitter = onSplitter || PtInRect(&splitter, pt);
+            }
+            if (onSplitter || PtInRect(&divider, pt)) {
                 SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
                 return TRUE;
             }
@@ -2520,11 +3089,16 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_LBUTTONDOWN: {
         const POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        const RECT splitter = SplitterRect();
         const RECT divider = OutlineDividerRect();
-        if (PtInRect(&splitter, pt))
-            m_drag = DragTarget::PaneSplitter;
-        else if (PtInRect(&divider, pt))
+        for (int i = 0; i < ActiveSplitters(); ++i) {
+            const RECT splitter = SplitterRect(i);
+            if (PtInRect(&splitter, pt)) {
+                m_drag = DragTarget::PaneSplitter;
+                m_dragSplitter = i;
+                break;
+            }
+        }
+        if (m_drag == DragTarget::None && PtInRect(&divider, pt))
             m_drag = DragTarget::OutlineDivider;
         if (m_drag != DragTarget::None)
             SetCapture(m_hwnd);
@@ -2533,7 +3107,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_MOUSEMOVE:
         if (m_drag == DragTarget::PaneSplitter) {
-            SetSplitRatioFromX(GET_X_LPARAM(lParam));
+            SetSplitRatioFromX(m_dragSplitter, GET_X_LPARAM(lParam));
             Layout();
         } else if (m_drag == DragTarget::OutlineDivider) {
             SetOutlineWidthFromX(GET_X_LPARAM(lParam));
@@ -2552,10 +3126,14 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_LBUTTONDBLCLK: {
         const POINT pt = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
-        const RECT splitter = SplitterRect();
         const RECT divider = OutlineDividerRect();
-        if (PtInRect(&splitter, pt)) {
-            m_splitRatio = 0.5f;
+        bool onSplitter = false;
+        for (int i = 0; i < ActiveSplitters(); ++i) {
+            const RECT splitter = SplitterRect(i);
+            onSplitter = onSplitter || PtInRect(&splitter, pt);
+        }
+        if (onSplitter) {
+            ResetSplitRatios(); // equal shares, whatever the pane count
             Layout();
         } else if (PtInRect(&divider, pt)) {
             FitOutlineToContent(); // best fit: no horizontal scroll in the tree
@@ -2575,45 +3153,16 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (wParam == kStatusMsgTimer) {
             KillTimer(m_hwnd, kStatusMsgTimer);
-            m_statusText[3].assign(1, L'\xFFFF'); // force the sync part to rewrite
+            // Force the sync part to rewrite (impossible text).
+            m_statusText[static_cast<size_t>(SyncStatusPart())].assign(1, L'\xFFFF');
             UpdateStatusBar();
             return 0;
         }
         break;
 
     case WM_COPYDATA: {
-        // Requests from short-lived second instances (SyncTeX forward search,
-        // Explorer-verb opens). The message crosses process boundaries:
-        // validate every payload exactly.
         const auto* cds = reinterpret_cast<const COPYDATASTRUCT*>(lParam);
-        if (!cds || !cds->lpData)
-            return FALSE;
-        if (cds->dwData == kCdOpenDocument)
-            return HandleOpenDocumentCopyData(*cds);
-        if (cds->dwData != kCdForwardSearch || cds->cbData < sizeof(ForwardSearchBlob))
-            return FALSE;
-        ForwardSearchBlob blob;
-        memcpy(&blob, cds->lpData, sizeof(blob));
-        if (blob.line < 1 || blob.line > 10'000'000 || blob.texLen == 0 || blob.pdfLen == 0 ||
-            blob.texLen > 0x8000 || blob.pdfLen > 0x8000)
-            return FALSE;
-        const size_t expected =
-            sizeof(ForwardSearchBlob) +
-            (static_cast<size_t>(blob.texLen) + blob.pdfLen) * sizeof(wchar_t);
-        if (cds->cbData != expected)
-            return FALSE;
-        const auto* chars = reinterpret_cast<const wchar_t*>(
-            static_cast<const BYTE*>(cds->lpData) + sizeof(ForwardSearchBlob));
-        ForwardSearchRequest req;
-        req.tex.assign(chars, blob.texLen); // copy NOW: the buffer dies at return
-        req.pdf.assign(chars + blob.texLen, blob.pdfLen);
-        req.line = static_cast<int>(blob.line);
-        const bool pdfRooted =
-            req.pdf.size() >= 3 && (req.pdf[1] == L':' || req.pdf.rfind(L"\\\\", 0) == 0);
-        if (!pdfRooted)
-            return FALSE;
-        RouteForwardSearch(std::move(req));
-        return TRUE;
+        return cds ? HandleCopyData(*cds) : FALSE;
     }
 
     case WM_COMMAND:
@@ -2629,15 +3178,27 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         if (LOWORD(wParam) >= IDC_MRU_PAIR_FIRST &&
             LOWORD(wParam) < IDC_MRU_PAIR_FIRST + kMruMaxEntries) {
-            OpenMruPair(LOWORD(wParam) - IDC_MRU_PAIR_FIRST);
+            OpenMruSession(LOWORD(wParam) - IDC_MRU_PAIR_FIRST);
             return 0;
         }
         switch (LOWORD(wParam)) {
         case IDC_OPEN_LEFT:
-            OpenDocumentDialog(false);
+            OpenDocumentDialog(kSlotLeft);
             return 0;
         case IDC_OPEN_RIGHT:
-            OpenDocumentDialog(true);
+            OpenDocumentDialog(kSlotRight);
+            return 0;
+        case IDC_OPEN_CENTER:
+            // The primary way into three-pane mode; the dialog itself switches
+            // the layout, and only after a file was picked (a cancelled picker
+            // must not rearrange the window).
+            OpenDocumentDialog(kSlotCenter);
+            return 0;
+        case IDC_PANES_TWO:
+            SetPaneCount(2);
+            return 0;
+        case IDC_PANES_THREE:
+            SetPaneCount(3);
             return 0;
         case IDC_CLOSE_DOC: {
             // Only when a pane really has focus: FocusedPane() falls back to
@@ -2645,36 +3206,61 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             // a reflexive Ctrl+W typed in the find bar must not close - and
             // wipe the saved session of - a document nobody aimed at.
             const HWND focus = GetFocus();
-            if (focus != m_left->Hwnd() && focus != m_right->Hwnd())
+            const int slot = SlotOfPane(FocusedPane());
+            if (slot < 0 || Pane(slot)->Hwnd() != focus)
                 return 0;
-            PaneWindow* pane = FocusedPane();
+            PaneWindow* pane = Pane(slot);
             // A deliberate close must not resurrect on the next launch: the
             // SaveSession fallback protects panes that never finished
             // opening, not ones the user closed. A no-op close (already
             // empty pane) must NOT wipe it, though: it may still hold a
             // session document that never got to open.
             if (pane->HasPersistableDocument())
-                (pane == m_right.get() ? m_fallbackRight : m_fallbackLeft) = PaneSettings{};
+                m_fallback[static_cast<size_t>(slot)] = PaneSettings{};
             pane->CloseDocument(); // DocumentOpened refreshes status/outline/UI
             return 0;
         }
         case IDC_CLOSE_SESSION: {
             // Menu-only (no accelerator), so unlike Ctrl+W it needs no focus
-            // guard: the user aimed at both panes explicitly. Same rule on the
-            // fallbacks - a deliberate close must not resurrect on the next
-            // launch - and each CloseDocument fires DocumentOpened, which
-            // clears the sync map and refreshes status, outline and command UI.
-            if (m_left->HasPersistableDocument())
-                m_fallbackLeft = PaneSettings{};
-            if (m_right->HasPersistableDocument())
-                m_fallbackRight = PaneSettings{};
-            m_left->CloseDocument();
-            m_right->CloseDocument();
+            // guard: the user aimed at the whole session explicitly. Each
+            // CloseDocument fires DocumentOpened, which clears the sync map
+            // and refreshes status, outline and command UI. The fallbacks are
+            // wiped for EVERY slot, active or parked, persistable or not -
+            // deliberately broader than Ctrl+W's guarded wipe: a document
+            // whose open was skipped (missing file at restore or grow time)
+            // or a parked centre would otherwise survive the explicit close
+            // and resurrect through SaveSession or SetPaneCount's grow
+            // restore once its file or share reappears.
+            for (int slot = 0; slot < kPaneSlots; ++slot) {
+                m_fallback[static_cast<size_t>(slot)] = PaneSettings{};
+                if (SlotOn(slot))
+                    Pane(slot)->CloseDocument();
+            }
+            // The ARRANGEMENT is part of the session, so ending one returns to
+            // the configured default. Safe after the closes and not before:
+            // CloseDocument clears the path synchronously, so the centre pane
+            // has nothing left for SetPaneCount to park in the fallback.
+            SetPaneCount(m_defaults.paneCount);
             return 0;
         }
-        case IDC_FOCUS_NEXT_PANE:
-            SetFocus(GetFocus() == m_left->Hwnd() ? m_right->Hwnd() : m_left->Hwnd());
+        case IDC_FOCUS_NEXT_PANE: {
+            // Cycle in visual order, wrapping; from anything that is not a
+            // pane (find box, outline tree) this lands on the leftmost, as the
+            // two-pane toggle did.
+            const HWND focus = GetFocus();
+            int cur = -1;
+            for (int slot = 0; slot < kPaneSlots; ++slot)
+                if (SlotOn(slot) && Pane(slot)->Hwnd() == focus)
+                    cur = slot;
+            for (int step = 1; step <= kPaneSlots; ++step) {
+                const int slot = (cur + step) % kPaneSlots;
+                if (SlotOn(slot)) {
+                    SetFocus(Pane(slot)->Hwnd());
+                    break;
+                }
+            }
             return 0;
+        }
         case IDC_TOGGLE_SCROLL_SYNC:
             m_sync->SetScrollSync(!m_sync->ScrollSync());
             UpdateTitle();
@@ -2747,7 +3333,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             } else if (m_outlineTree && GetFocus() == m_outlineTree) {
                 // Hiding a focused window does not move keyboard focus: the
                 // invisible tree would keep eating arrow keys and navigating.
-                SetFocus((m_outlinePane ? m_outlinePane : m_left.get())->Hwnd());
+                SetFocus((m_outlinePane ? m_outlinePane : Pane(kSlotLeft))->Hwnd());
             }
             Layout();
             UpdateCommandUi();
@@ -2776,19 +3362,17 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             FocusedPane()->ApplyZoomRatio(1.0f / 1.25f);
             UpdateCommandUi();
             return 0;
-        // With zoom sync on, the three preset commands drive BOTH panes: the
-        // ratio routing would otherwise land the sibling at target*anchor
-        // (100% only on one side) or leave its fit mode untouched. Silent
+        // With zoom sync on, the three preset commands drive EVERY pane: the
+        // ratio routing would otherwise land the siblings at target*anchor
+        // (100% only on one side) or leave their fit mode untouched. Silent
         // scope: the paired absolute writes must not echo through the ratio
         // path mid-flight. Fits re-capture the ratio anchor by themselves
         // (FitZoomChanged is handled even inside the silent scope); the
-        // manual 100% pair needs the explicit resync.
+        // manual 100% pass needs the explicit resync.
         case IDC_ZOOM_ACTUAL:
             if (m_sync->ZoomSync()) {
-                m_sync->ApplySilently([this] {
-                    m_left->SetManualZoom(1.0f);
-                    m_right->SetManualZoom(1.0f);
-                });
+                m_sync->ApplySilently(
+                    [this] { ForEachPane([](PaneWindow& p) { p.SetManualZoom(1.0f); }); });
                 m_sync->ResyncZoomAnchor();
             } else {
                 FocusedPane()->SetManualZoom(1.0f);
@@ -2798,8 +3382,8 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_FIT_WIDTH:
             if (m_sync->ZoomSync()) {
                 m_sync->ApplySilently([this] {
-                    m_left->SetZoomMode(PaneWindow::ZoomMode::FitWidth);
-                    m_right->SetZoomMode(PaneWindow::ZoomMode::FitWidth);
+                    ForEachPane(
+                        [](PaneWindow& p) { p.SetZoomMode(PaneWindow::ZoomMode::FitWidth); });
                 });
             } else {
                 FocusedPane()->SetZoomMode(PaneWindow::ZoomMode::FitWidth);
@@ -2809,8 +3393,8 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_FIT_PAGE:
             if (m_sync->ZoomSync()) {
                 m_sync->ApplySilently([this] {
-                    m_left->SetZoomMode(PaneWindow::ZoomMode::FitPage);
-                    m_right->SetZoomMode(PaneWindow::ZoomMode::FitPage);
+                    ForEachPane(
+                        [](PaneWindow& p) { p.SetZoomMode(PaneWindow::ZoomMode::FitPage); });
                 });
             } else {
                 FocusedPane()->SetZoomMode(PaneWindow::ZoomMode::FitPage);
@@ -2830,7 +3414,10 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             ShowOptionsDialog();
             return 0;
         case IDC_SWAP_PANES:
-            SwapPanes();
+            SwapPanes(false);
+            return 0;
+        case IDC_SWAP_PANES_BACK:
+            SwapPanes(true); // identical to F8 with two panes
             return 0;
         case IDC_FULLSCREEN:
             ToggleFullScreen();
@@ -2924,7 +3511,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         // Snapshot the focused child before deactivation completes; GetFocus()
         // still identifies it here (WM_KILLFOCUS comes later). Any descendant
         // counts: panes, the outline tree, the find box.
-        if (LOWORD(wParam) == WA_INACTIVE && m_left) {
+        if (LOWORD(wParam) == WA_INACTIVE && Pane(kSlotLeft)) {
             const HWND focus = GetFocus();
             if (focus && IsChild(m_hwnd, focus))
                 m_lastPaneFocus = focus;
@@ -2938,10 +3525,11 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         // have been hidden meanwhile). Never during teardown: bouncing focus
         // onto a dying child re-enters DestroyWindow's focus handling and the
         // app never exits.
-        if (!m_destroying && m_left && m_left->Hwnd() && IsWindow(m_left->Hwnd())) {
+        if (!m_destroying && Pane(kSlotLeft) && Pane(kSlotLeft)->Hwnd() &&
+            IsWindow(Pane(kSlotLeft)->Hwnd())) {
             const bool restorable = m_lastPaneFocus && IsWindow(m_lastPaneFocus) &&
                                     IsWindowVisible(m_lastPaneFocus);
-            SetFocus(restorable ? m_lastPaneFocus : m_left->Hwnd());
+            SetFocus(restorable ? m_lastPaneFocus : Pane(kSlotLeft)->Hwnd());
             return 0;
         }
         break;
@@ -3037,21 +3625,6 @@ void MainWindow::Layout() {
     }
     if (m_status)
         ShowWindow(m_status, statusOn ? SW_SHOW : SW_HIDE);
-    // Floating full-screen escape hatch: only when the real full-screen
-    // button is NOT on screen (the kept toolbar must also be visible per
-    // View > Toolbar, or its band is hidden inside the shown rebar).
-    if (m_fullscreen && !(m_fsShowToolbar && m_toolbarVisible)) {
-        EnsureFsBar();
-        if (m_fsBar) {
-            SIZE sz{};
-            SendMessageW(m_fsBar, TB_GETMAXSIZE, 0, reinterpret_cast<LPARAM>(&sz));
-            const int margin = MulDiv(8, m_dpi, 96);
-            SetWindowPos(m_fsBar, HWND_TOP, static_cast<int>(rc.right) - sz.cx - margin, margin,
-                         sz.cx, sz.cy, SWP_SHOWWINDOW);
-        }
-    } else if (m_fsBar) {
-        ShowWindow(m_fsBar, SW_HIDE);
-    }
     int top = 0;
     int bottom = rc.bottom;
     if (rebarOn) {
@@ -3069,23 +3642,113 @@ void MainWindow::Layout() {
         RECT bar;
         GetWindowRect(m_status, &bar);
         bottom -= bar.bottom - bar.top;
-        // Seven parts mirroring the pane geometry: left half = left pane
-        // (page, zoom), sync summary CENTERED straddling the midline, right
-        // half = right pane; two borderless fillers absorb the slack (the
-        // last one also hosts the size grip).
+    }
+    // Floating full-screen escape hatch: only when the real full-screen
+    // button is NOT on screen (the kept toolbar must also be visible per
+    // View > Toolbar, or its band is hidden inside the shown rebar).
+    // Positioned only NOW, below the measured rebar: with "keep toolbar"
+    // enabled but View > Toolbar off, the rebar stays visible for its menu
+    // band and a top-anchored button would overlap it.
+    if (m_fullscreen && !(m_fsShowToolbar && m_toolbarVisible)) {
+        EnsureFsBar();
+        if (m_fsBar) {
+            SIZE sz{};
+            SendMessageW(m_fsBar, TB_GETMAXSIZE, 0, reinterpret_cast<LPARAM>(&sz));
+            const int margin = MulDiv(8, m_dpi, 96);
+            SetWindowPos(m_fsBar, HWND_TOP, static_cast<int>(rc.right) - sz.cx - margin,
+                         top + margin, sz.cx, sz.cy, SWP_SHOWWINDOW);
+        }
+    } else if (m_fsBar) {
+        ShowWindow(m_fsBar, SW_HIDE);
+    }
+    // Parts are set at the END of the layout, once the splitter positions are
+    // known: with three panes the cells are anchored to them.
+    const auto layoutStatusParts = [&] {
+        // Configured whenever the CONTROL exists, visible or not: a hidden
+        // bar keeps its default single part otherwise, UpdateStatusBar's
+        // writes to parts 1..N fail silently while the cache records them,
+        // and showing the bar later (or switching pane count while hidden)
+        // surfaces blank or stale cells that the change guard never rewrites.
+        if (!m_status)
+            return;
+        // Parts mirror the pane geometry. TWO panes (unchanged): left half =
+        // left pane (page, zoom), sync summary CENTERED straddling the
+        // midline, right half = right pane; two borderless fillers absorb the
+        // slack (the last one also hosts the size grip). THREE panes: page and
+        // zoom under each pane, and the sync summary moves to the end - the
+        // midline it used to straddle is now covered by the centre pane.
         const int pageW = MulDiv(170, m_dpi, 96);
         const int zoomW = MulDiv(60, m_dpi, 96);
         const int syncW = MulDiv(190, m_dpi, 96); // fits "Sync: scroll+zoom · 12 pts"
-        int parts[7];
-        parts[0] = pageW;
-        parts[1] = parts[0] + zoomW;
-        parts[2] = std::max(parts[1], static_cast<int>(rc.right) / 2 - syncW / 2); // filler
-        parts[3] = parts[2] + syncW; // sync, astride the midline
-        parts[4] = parts[3] + pageW;
-        parts[5] = parts[4] + zoomW;
-        parts[6] = -1; // filler under the grip
-        SendMessageW(m_status, SB_SETPARTS, std::size(parts), reinterpret_cast<LPARAM>(parts));
-    }
+        if (m_paneCount == 2) {
+            int parts[7];
+            parts[0] = pageW;
+            parts[1] = parts[0] + zoomW;
+            parts[2] = std::max(parts[1], static_cast<int>(rc.right) / 2 - syncW / 2); // filler
+            parts[3] = parts[2] + syncW; // sync, astride the midline
+            parts[4] = parts[3] + pageW;
+            parts[5] = parts[4] + zoomW;
+            parts[6] = -1; // filler under the grip
+            SendMessageW(m_status, SB_SETPARTS, std::size(parts),
+                         reinterpret_cast<LPARAM>(parts));
+        } else {
+            // The cells prefer sitting under their panes, but never at the
+            // cost of pushing the trailing fixed-width group (right page,
+            // zoom, sync summary - also the transient-message cell) past the
+            // client edge: at the default window width the pane-anchored
+            // scheme would clip the sync summary entirely. On narrow windows
+            // the anchors give way LEFT (cells drift left of "their" pane),
+            // and below the full-scheme width the cell widths themselves
+            // COMPRESS proportionally, floored so the page number, a "100%"
+            // and the sync mode stay readable: a 700-DIP three-pane window
+            // earns clipped-but-present cells, never a sync summary parked
+            // past the client edge. The sync cell absorbs the rounding so the
+            // compressed scheme ends exactly at the grip.
+            const int grip = GetSystemMetricsForDpi(SM_CXVSCROLL, m_dpi);
+            const int avail = static_cast<int>(rc.right) - grip;
+            const int full = 3 * (pageW + zoomW) + syncW;
+            int pgW = pageW;
+            int zmW = zoomW;
+            int syW = syncW;
+            if (avail > 0 && avail < full) {
+                pgW = std::max(MulDiv(96, m_dpi, 96), pageW * avail / full);
+                zmW = std::max(MulDiv(44, m_dpi, 96), zoomW * avail / full);
+                syW = std::max(MulDiv(110, m_dpi, 96), avail - 3 * (pgW + zmW));
+                // Those floors add up to 530 DIP, and below that they have to
+                // give way as well or the trailing endpoint lands PAST the
+                // client edge, taking the sync summary off screen. An ordinary
+                // window cannot get there (the three-pane minimum track is
+                // 646 DIP) but FULL SCREEN bypasses that clamp: 1024 px at
+                // 200% leaves 512 DIP. The sync summary is the last cell to
+                // lose width; page and zoom shrink toward nothing under it, in
+                // proportion, and the arithmetic below is then bounded by
+                // avail whichever way the fillers fall.
+                if (3 * (pgW + zmW) + syW > avail) {
+                    syW = std::min(syW, avail);
+                    const int rest = (avail - syW) / 3;
+                    pgW = rest * pageW / (pageW + zoomW);
+                    zmW = rest - pgW;
+                }
+            }
+            const int tail = pgW + zmW + syW + grip;
+            int parts[10];
+            parts[0] = pgW;
+            parts[1] = parts[0] + zmW;
+            parts[2] = std::max(parts[1], // filler up to the centre pane
+                                std::min(m_splitterX[0],
+                                         static_cast<int>(rc.right) - pgW - zmW - tail));
+            parts[3] = parts[2] + pgW;
+            parts[4] = parts[3] + zmW;
+            parts[5] = std::max(parts[4], // filler up to the right pane
+                                std::min(m_splitterX[1], static_cast<int>(rc.right) - tail));
+            parts[6] = parts[5] + pgW;
+            parts[7] = parts[6] + zmW;
+            parts[8] = parts[7] + syW;
+            parts[9] = -1; // filler under the grip
+            SendMessageW(m_status, SB_SETPARTS, std::size(parts),
+                         reinterpret_cast<LPARAM>(parts));
+        }
+    };
     m_contentTop = top;
     m_contentBottom = bottom;
 
@@ -3093,18 +3756,22 @@ void MainWindow::Layout() {
     const int splitterW = MulDiv(kSplitterDip, m_dpi, 96);
     const int minPane = MulDiv(kMinPaneDip, m_dpi, 96);
     if (m_outlineVisible) {
-        // User-resizable width, clamped so both panes keep their minimum.
+        // User-resizable width, clamped so every pane keeps its minimum (the
+        // sidebar's own divider counts as one more splitter).
         const int minSidebar = MulDiv(120, m_dpi, 96);
-        const int maxSidebar =
-            std::max(minSidebar, static_cast<int>(rc.right) - 2 * minPane - 2 * splitterW);
+        const int maxSidebar = std::max(minSidebar, static_cast<int>(rc.right) -
+                                                        m_paneCount * minPane -
+                                                        m_paneCount * splitterW);
         m_sidebarPx = std::clamp(MulDiv(m_outlineWidthDip, m_dpi, 96), minSidebar, maxSidebar);
     } else {
         m_sidebarPx = 0;
     }
     const int x0 = m_sidebarPx + (m_outlineVisible ? splitterW : 0);
     const int w = rc.right - x0;
-    if (w <= 0 || h <= 0 || !m_left || !m_left->Hwnd())
+    if (w <= 0 || h <= 0 || !Pane(kSlotLeft) || !Pane(kSlotLeft)->Hwnd()) {
+        layoutStatusParts(); // a degenerate size must still leave valid parts
         return;
+    }
 
     if (m_outlineTree) {
         if (m_outlineVisible)
@@ -3112,19 +3779,18 @@ void MainWindow::Layout() {
         ShowWindow(m_outlineTree, m_outlineVisible ? SW_SHOW : SW_HIDE);
     }
 
-    int leftW = static_cast<int>(static_cast<float>(w - splitterW) * m_splitRatio + 0.5f);
-    if (w - splitterW >= 2 * minPane)
-        leftW = std::clamp(leftW, minPane, w - splitterW - minPane);
-    else
-        leftW = (w - splitterW) / 2;
-    m_splitterX = x0 + leftW;
-
-    HDWP dwp = BeginDeferWindowPos(2);
-    dwp = DeferWindowPos(dwp, m_left->Hwnd(), nullptr, x0, top, leftW, h,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
-    dwp = DeferWindowPos(dwp, m_right->Hwnd(), nullptr, x0 + leftW + splitterW, top,
-                         w - leftW - splitterW, h, SWP_NOZORDER | SWP_NOACTIVATE);
+    const PerPane<int> paneW = ComputePaneWidths(x0, w);
+    HDWP dwp = BeginDeferWindowPos(kPaneSlots);
+    int x = x0;
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        if (!SlotOn(slot))
+            continue;
+        dwp = DeferWindowPos(dwp, Pane(slot)->Hwnd(), nullptr, x, top,
+                             paneW[static_cast<size_t>(slot)], h, SWP_NOZORDER | SWP_NOACTIVATE);
+        x += paneW[static_cast<size_t>(slot)] + splitterW;
+    }
     EndDeferWindowPos(dwp);
+    layoutStatusParts(); // needs the splitter positions ComputePaneWidths just wrote
     LayoutFindBar();
     UpdateStatusBar();
     InvalidateRect(m_hwnd, nullptr, TRUE); // repaint the splitter band
@@ -3181,7 +3847,7 @@ void MainWindow::UpdateOutlineSidebar(PaneWindow* pane) {
     if (!m_outlineTree)
         return;
     if (!pane)
-        pane = m_outlinePane ? m_outlinePane : m_left.get();
+        pane = m_outlinePane ? m_outlinePane : Pane(kSlotLeft);
     m_outlinePane = pane;
     if (!m_outlineVisible)
         return;
@@ -3230,36 +3896,97 @@ void MainWindow::LayoutFindBar() {
         return;
     RECT rc;
     GetClientRect(m_hwnd, &rc);
-    const int barW = MulDiv(340, m_dpi, 96);
     const int barH = MulDiv(34, m_dpi, 96);
     const int pad = MulDiv(6, m_dpi, 96);
-    int paneRight = m_findTarget == m_left.get() ? m_splitterX : rc.right;
-    // In full screen the floating exit button owns the top-right corner, right
-    // where the right pane's find bar lands: shift the bar left so the one
-    // mouse affordance for leaving full screen stays reachable.
-    if (m_findTarget != m_left.get() && m_fsBar && IsWindowVisible(m_fsBar)) {
+    // The target pane's own edges, in client coordinates: for the leftmost
+    // pane the right edge is the splitter, for the rightmost the client edge.
+    int paneLeft = 0;
+    int paneRight = rc.right;
+    if (m_findTarget && m_findTarget->Hwnd()) {
+        RECT pane;
+        GetWindowRect(m_findTarget->Hwnd(), &pane);
+        MapWindowPoints(nullptr, m_hwnd, reinterpret_cast<POINT*>(&pane), 2);
+        paneLeft = pane.left;
+        paneRight = pane.right;
+    }
+    // In full screen the floating exit button can own the top-right corner,
+    // right where the rightmost pane's find bar lands: shift the bar left so
+    // the one mouse affordance for leaving full screen stays reachable -
+    // unless the pane is too narrow to host both side by side, in which case
+    // the bar slips BELOW the button instead of spilling into the neighbour
+    // pane (full screen bypasses the minimum-track clamp, so panes can be
+    // tiny). The reservation applies only when the two rectangles would
+    // actually collide vertically: with the menu rebar kept on screen the
+    // button sits below it and may not share the bar's band at all.
+    int barY = m_contentTop + pad;
+    if (paneRight >= rc.right && m_fsBar && IsWindowVisible(m_fsBar)) {
         RECT fs;
         GetWindowRect(m_fsBar, &fs);
-        paneRight -= (fs.right - fs.left) + MulDiv(8, m_dpi, 96);
+        MapWindowPoints(nullptr, m_hwnd, reinterpret_cast<POINT*>(&fs), 2);
+        if (fs.bottom > barY && fs.top < barY + barH) {
+            const int reserve = (fs.right - fs.left) + MulDiv(8, m_dpi, 96);
+            if (paneRight - reserve - paneLeft - 2 * pad >= MulDiv(88, m_dpi, 96))
+                paneRight -= reserve;
+            else
+                barY = fs.bottom + pad;
+        }
     }
-    const int x = std::max(0, paneRight - barW - pad);
-    SetWindowPos(m_findBar, HWND_TOP, x, m_contentTop + pad, barW, barH, SWP_NOACTIVATE);
+    // Sized to the TARGET pane, not a fixed width: three panes plus the
+    // outline leave ~268-DIP panes at the default window, where a 340-DIP
+    // overlay would blanket the neighbour's content. Below the full 210-DIP
+    // scheme (3 x 26 buttons, 64 count, 40-px edit minimum, gaps) the bar
+    // sheds pieces instead of crossing the pane boundary: the match counter
+    // first, then the prev/next buttons (F3 and Shift+F3 keep both
+    // directions reachable) - down to close + edit, which still fit the
+    // 120-DIP pane minimum.
+    const int fullW = MulDiv(210, m_dpi, 96);
+    const int noCountW = MulDiv(142, m_dpi, 96);
+    // Below the close button plus a usable edit box (26 + 40 + three 4-DIP
+    // gaps) the two would have to OVERLAP, so the button goes as well: Esc
+    // still closes the bar, and Ctrl+F is what opened it.
+    const int noCloseW = MulDiv(78, m_dpi, 96);
+    // Never wider than the pane itself, with NO absolute floor under that cap:
+    // a floor larger than the pane is by definition an overhang into the
+    // neighbour, and full-screen pane widths bypass the minimum-track clamp
+    // that would otherwise keep panes sane. What the bar does at extreme
+    // widths is shed controls, not stop shrinking.
+    const int avail = paneRight - paneLeft - 2 * pad;
+    const int barW = std::max(1, std::min(avail, MulDiv(340, m_dpi, 96)));
+    // Clamped to the pane's LEFT edge, not to zero: the bar overhangs the
+    // pane's own area, never the neighbour.
+    const int x = std::max(paneLeft, paneRight - barW - pad);
+    SetWindowPos(m_findBar, HWND_TOP, x, barY, barW, barH, SWP_NOACTIVATE);
 
     const int gap = MulDiv(4, m_dpi, 96);
     const int btn = MulDiv(26, m_dpi, 96);
     const int countW = MulDiv(64, m_dpi, 96);
     const int innerH = barH - 2 * gap;
+    const bool showCount = barW >= fullW;
+    const bool showNav = barW >= noCountW;
+    const bool showClose = barW >= noCloseW;
+    ShowWindow(m_findCount, showCount ? SW_SHOW : SW_HIDE);
+    ShowWindow(m_findPrev, showNav ? SW_SHOW : SW_HIDE);
+    ShowWindow(m_findNext, showNav ? SW_SHOW : SW_HIDE);
+    ShowWindow(m_findClose, showClose ? SW_SHOW : SW_HIDE);
     int right = barW - gap;
-    MoveWindow(m_findClose, right - btn, gap, btn, innerH, TRUE);
-    right -= btn + gap;
-    MoveWindow(m_findNext, right - btn, gap, btn, innerH, TRUE);
-    right -= btn + gap;
-    MoveWindow(m_findPrev, right - btn, gap, btn, innerH, TRUE);
-    right -= btn + gap;
-    MoveWindow(m_findCount, right - countW, gap + MulDiv(4, m_dpi, 96), countW,
-               innerH - MulDiv(4, m_dpi, 96), TRUE);
-    right -= countW + gap;
-    MoveWindow(m_findEdit, gap, gap, std::max(40, right - gap), innerH, TRUE);
+    if (showClose) {
+        MoveWindow(m_findClose, right - btn, gap, btn, innerH, TRUE);
+        right -= btn + gap;
+    }
+    if (showNav) {
+        MoveWindow(m_findNext, right - btn, gap, btn, innerH, TRUE);
+        right -= btn + gap;
+        MoveWindow(m_findPrev, right - btn, gap, btn, innerH, TRUE);
+        right -= btn + gap;
+    }
+    if (showCount) {
+        MoveWindow(m_findCount, right - countW, gap + MulDiv(4, m_dpi, 96), countW,
+                   innerH - MulDiv(4, m_dpi, 96), TRUE);
+        right -= countW + gap;
+    }
+    // Whatever is left, down to a sliver: a fixed minimum here is what used to
+    // push the edit box UNDER the close button at the narrowest widths.
+    MoveWindow(m_findEdit, gap, gap, std::max(1, right - gap), innerH, TRUE);
 }
 
 void MainWindow::ShowFindBar() {
@@ -3269,11 +3996,10 @@ void MainWindow::ShowFindBar() {
     // inside the find box must reselect the query, not silently move the
     // search (and wipe its highlights) to the default left pane.
     const HWND focus = GetFocus();
-    PaneWindow* target = m_findTarget ? m_findTarget : m_left.get();
-    if (focus == m_left->Hwnd())
-        target = m_left.get();
-    else if (focus == m_right->Hwnd())
-        target = m_right.get();
+    PaneWindow* target = m_findTarget ? m_findTarget : Pane(kSlotLeft);
+    for (int slot = 0; slot < kPaneSlots; ++slot)
+        if (SlotOn(slot) && Pane(slot)->Hwnd() == focus)
+            target = Pane(slot);
     if (m_findTarget && m_findTarget != target)
         m_findTarget->ClearSearch(); // highlights move with the bar
     m_findTarget = target;
@@ -3298,9 +4024,74 @@ void MainWindow::CloseFindBar() {
     }
 }
 
-RECT MainWindow::SplitterRect() const {
+RECT MainWindow::SplitterRect(int index) const {
     const int splitterW = MulDiv(kSplitterDip, m_dpi, 96);
-    return {m_splitterX, m_contentTop, m_splitterX + splitterW, m_contentBottom};
+    const int x = m_splitterX[static_cast<size_t>(index)];
+    return {x, m_contentTop, x + splitterW, m_contentBottom};
+}
+
+int MainWindow::SyncStatusPart() const {
+    // Two panes: the cell straddling the midline. Three: the cell after the
+    // right pane's zoom (see the part scheme in Layout).
+    return m_paneCount == 2 ? 3 : 8;
+}
+
+PerPane<int> MainWindow::ComputePaneWidths(int x0, int width) {
+    const int splitterW = MulDiv(kSplitterDip, m_dpi, 96);
+    const int minPane = MulDiv(kMinPaneDip, m_dpi, 96);
+    const int usable = width - ActiveSplitters() * splitterW; // pane pixels only
+    PerPane<int> out{};
+    if (usable <= 0)
+        return out;
+    PerPane<float> share{};
+    if (m_paneCount == 2) {
+        share[kSlotLeft] = m_splitRatio;
+        share[kSlotRight] = 1.0f - m_splitRatio;
+    } else {
+        share[kSlotLeft] = m_splitRatio3Left;
+        share[kSlotCenter] = m_splitRatio3Center;
+        share[kSlotRight] = 1.0f - m_splitRatio3Left - m_splitRatio3Center;
+    }
+    int used = 0;
+    int assigned = 0;
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        if (!SlotOn(slot))
+            continue;
+        ++assigned;
+        const size_t i = static_cast<size_t>(slot);
+        if (assigned == m_paneCount) {
+            out[i] = usable - used; // absorbs the rounding of all the others
+        } else if (usable < m_paneCount * minPane) {
+            out[i] = usable / m_paneCount; // too narrow for the minimums: equal shares
+        } else {
+            // Reserve every LATER pane's minimum, so the last one below can
+            // never be squeezed under it by rounding.
+            const int room = usable - used - (m_paneCount - assigned) * minPane;
+            out[i] = std::clamp(static_cast<int>(share[i] * static_cast<float>(usable) + 0.5f),
+                                minPane, room);
+        }
+        used += out[i];
+    }
+    int x = x0;
+    int splitter = 0;
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        if (!SlotOn(slot))
+            continue;
+        x += out[static_cast<size_t>(slot)];
+        if (splitter < ActiveSplitters())
+            m_splitterX[static_cast<size_t>(splitter++)] = x;
+        x += splitterW;
+    }
+    return out;
+}
+
+void MainWindow::ResetSplitRatios() {
+    if (m_paneCount == 2) {
+        m_splitRatio = 0.5f;
+    } else {
+        m_splitRatio3Left = 1.0f / 3.0f;
+        m_splitRatio3Center = 1.0f / 3.0f;
+    }
 }
 
 RECT MainWindow::OutlineDividerRect() const {
@@ -3310,17 +4101,45 @@ RECT MainWindow::OutlineDividerRect() const {
     return {m_sidebarPx, m_contentTop, m_sidebarPx + splitterW, m_contentBottom};
 }
 
-void MainWindow::SetSplitRatioFromX(int x) {
+void MainWindow::SetSplitRatioFromX(int index, int x) {
     RECT rc;
     GetClientRect(m_hwnd, &rc);
     const int splitterW = MulDiv(kSplitterDip, m_dpi, 96);
+    const int minPane = MulDiv(kMinPaneDip, m_dpi, 96);
     // Live sidebar geometry (the outline divider shifts the pane strip).
     const int x0 = m_sidebarPx + (m_outlineVisible ? splitterW : 0);
-    const int usable = rc.right - x0 - splitterW;
+    const int usable = rc.right - x0 - ActiveSplitters() * splitterW;
     if (usable <= 0)
         return;
-    const float ratio = static_cast<float>(x - x0 - splitterW / 2) / static_cast<float>(usable);
-    m_splitRatio = std::clamp(ratio, 0.1f, 0.9f);
+    if (m_paneCount == 2) {
+        const float ratio =
+            static_cast<float>(x - x0 - splitterW / 2) / static_cast<float>(usable);
+        m_splitRatio = std::clamp(ratio, 0.1f, 0.9f);
+        return;
+    }
+    // Three panes: a splitter resizes ONLY its two neighbours, so the drag
+    // moves one cumulative boundary and leaves the other where it is.
+    // The boundaries come from the RENDERED geometry, not the stored ratios:
+    // ComputePaneWidths clamps panes to the minimum without writing the clamp
+    // back, so after a narrow resize the stored ratios can disagree with what
+    // is on screen and the first mousemove would snap BOTH dividers to the
+    // stale values. m_splitterX is what Layout just drew; the write-back
+    // below normalizes the stored ratios to it as a side effect.
+    float cum[kPaneSlots - 1];
+    for (int i = 0; i < kPaneSlots - 1; ++i)
+        cum[i] =
+            static_cast<float>(m_splitterX[static_cast<size_t>(i)] - x0 - i * splitterW) /
+            static_cast<float>(usable);
+    const float minShare = static_cast<float>(minPane) / static_cast<float>(usable);
+    const float lo = (index == 0 ? 0.0f : cum[0]) + minShare;
+    const float hi = (index == 0 ? cum[1] : 1.0f) - minShare;
+    if (lo >= hi)
+        return; // no room to move this boundary
+    const float target =
+        static_cast<float>(x - x0 - index * splitterW - splitterW / 2) / static_cast<float>(usable);
+    cum[index] = std::clamp(target, lo, hi);
+    m_splitRatio3Left = cum[0];
+    m_splitRatio3Center = cum[1] - cum[0];
 }
 
 void MainWindow::SetOutlineWidthFromX(int x) {
@@ -3358,7 +4177,7 @@ void MainWindow::FitOutlineToContent() {
     Layout();
 }
 
-void MainWindow::OpenDocumentDialog(bool rightPane) {
+void MainWindow::OpenDocumentDialog(int slot) {
     wchar_t buffer[MAX_PATH] = L"";
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
@@ -3366,10 +4185,18 @@ void MainWindow::OpenDocumentDialog(bool rightPane) {
     ofn.lpstrFilter = Str(StrId::OpenDlgFilter);
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = MAX_PATH;
-    ofn.lpstrTitle = Str(rightPane ? StrId::OpenDlgTitleRight : StrId::OpenDlgTitleLeft);
+    ofn.lpstrTitle = Str(kSlotOpenDlgTitle[slot]);
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
-    if (GetOpenFileNameW(&ofn))
-        (rightPane ? m_right : m_left)->OpenDocument(buffer);
+    if (!GetOpenFileNameW(&ofn))
+        return;
+    // Open Centre from two-pane mode: asking for the centre document IS asking
+    // for the layout that can show it - but only once a file is actually
+    // chosen. The picker runs first so a cancel leaves the arrangement (and
+    // the parked centre session) untouched.
+    if (!SlotOn(slot))
+        SetPaneCount(3);
+    if (Pane(slot))
+        Pane(slot)->OpenDocument(buffer);
 }
 
 bool MainWindow::IsSystemDark() {
@@ -3390,9 +4217,8 @@ void MainWindow::UpdateTheme() {
     if (m_bgBrush)
         DeleteObject(m_bgBrush);
     m_bgBrush = CreateSolidBrush(m_dark ? RGB(43, 43, 43) : RGB(229, 229, 229));
-    if (m_left) {
-        m_left->SetDarkMode(m_dark);
-        m_right->SetDarkMode(m_dark);
+    if (Pane(kSlotLeft)) {
+        ForEachPane([this](PaneWindow& p) { p.SetDarkMode(m_dark); });
     }
     InvalidateRect(m_hwnd, nullptr, TRUE);
 }

@@ -2,8 +2,19 @@
 # ON, 1:1 traversal, flippable paged gaps, toggle round-trip), swap mirroring,
 # generation from numbered bookmarks (skip + monotonicity filter), waiting at
 # segment boundaries with gaps OFF, manual points, clear-restores-plain-anchor,
-# zero-match feedback, pane header options. Phase order matters: phase 0 asserts the fresh-sandbox
-# defaults, phases 1..2 explicitly toggle the gaps off.
+# zero-match feedback, pane header options, the three-pane mode (phase 8:
+# CLI activation, three-way sync, N-way bookmark join, 3<->2 transitions with
+# park/reopen and both saved-map restores, F8 rotation, subset sync around an
+# empty centre), the XML WM_COPYDATA handoff (phase 9: a real second
+# -open-center instance hands over to the running one), the auto-reload join
+# guard (phase 10), the status-part schema of a HIDDEN status bar (phase 11)
+# and the settings-persistence failure paths (phase 12: an injected save
+# failure must leave the file byte-identical, and the cleanup must touch only
+# the app's own temp names and only when they cannot belong to a save in
+# flight). Phase order matters: phase 0 asserts the fresh-sandbox defaults,
+# phases 1..2 explicitly toggle the gaps off, phase 8 reuses the manual a2|c
+# map phase 6 saved. What a phase needs from the persisted state it FORCES
+# (ini edit or command) and asserts, rather than inheriting it silently.
 #
 # CLAUDE.md testing rules: DPI-aware thread FIRST (the dev monitor is 175% and
 # PowerShell is DPI-unaware), PSV_SETTINGS_DIR sandbox (never touch the user's
@@ -17,6 +28,11 @@
 param([string]$Config = 'Debug')
 
 $ErrorActionPreference = 'Stop'
+# A command id that is not in the constants block below reads as $null, PowerShell
+# coerces it to 0 for Send-Command's [int] and WM_COMMAND 0 does NOTHING: the
+# phase then "passes" without ever running its command. Strict mode turns that
+# silent hole into an error at the point of use.
+Set-StrictMode -Version Latest
 
 Add-Type -Namespace Win32 -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern IntPtr SetThreadDpiAwarenessContext(IntPtr ctx);
@@ -34,6 +50,14 @@ Add-Type -Namespace Win32 -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint tid, ref GUITHREADINFO gui);
 [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+// Volume capability, so the ACL characterization can be skipped on a filesystem
+// that does not persist ACLs instead of failing for an environmental reason.
+// The mount point comes from GetVolumePathName, not from a lexical path root:
+// that one returns "\\server\share" without the trailing backslash the query
+// requires, and on a mounted volume it names the wrong volume entirely.
+[DllImport("kernel32.dll", CharSet=CharSet.Unicode, EntryPoint="GetVolumePathNameW", SetLastError=true)] public static extern bool GetVolumePathNameW(string fileName, System.Text.StringBuilder mountPoint, uint bufferLength);
+[DllImport("kernel32.dll", CharSet=CharSet.Unicode, EntryPoint="GetVolumeInformationW", SetLastError=true)] public static extern bool GetVolumeInformationW(string root, System.Text.StringBuilder volName, uint volNameSize, out uint serial, out uint maxComponent, out uint flags, System.Text.StringBuilder fsName, uint fsNameSize);
 [StructLayout(LayoutKind.Sequential)] public struct SCROLLINFO { public uint cbSize, fMask; public int nMin, nMax; public uint nPage; public int nPos, nTrackPos; }
 [StructLayout(LayoutKind.Sequential)] public struct RECT { public int l, t, r, b; }
 [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO { public uint cbSize, flags; public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret; public RECT rcCaret; }
@@ -45,20 +69,30 @@ Add-Type -Namespace Win32 -Name Native -MemberDefinition @'
 $WM_COMMAND = 0x0111
 $WM_SETTEXT = 0x000C
 $WM_GETTEXT = 0x000D
+$WM_KEYDOWN = 0x0100
+$VK_END = 0x23
 $SB_GETTEXTLENGTHW = 0x040C
+$SB_GETPARTS = 0x0406
+$FILE_PERSISTENT_ACLS = 0x00000008
 $IDC_FOCUS_NEXT_PANE = 1003
 $IDC_TOGGLE_SCROLL_SYNC = 1004
 $IDC_TOGGLE_ZOOM_SYNC = 1005
+$IDC_TOGGLE_STATUSBAR = 1014
 $IDC_ZOOM_ACTUAL = 1017
+$IDC_FIT_PAGE = 1019
 $IDC_SCROLL_CONTINUOUS = 1025
 $IDC_SCROLL_PAGED = 1026
+$IDC_CLOSE_DOC = 1027
 $IDC_GOTO_PAGE = 1028
 $IDC_SWAP_PANES = 1029
+$IDC_SWAP_PANES_BACK = 1077
 $IDC_OPTIONS = 1049
 $IDC_ADD_SYNC_POINT = 1051
 $IDC_SYNC_FROM_BOOKMARKS = 1052
 $IDC_CLEAR_SYNC_POINTS = 1054
 $IDC_TOGGLE_ALIGNMENT_GAPS = 1055
+$IDC_PANES_TWO = 1075
+$IDC_PANES_THREE = 1076
 $IDOK = 1
 $SB_VERT = 1
 $SIF_ALL = 0x17
@@ -73,6 +107,7 @@ $lenScroll = 'Sync: scroll'.Length                            # 12
 $lenBoth = 'Sync: scroll+zoom'.Length                         # 17
 $lenScroll3Pts = "Sync: scroll $mid 3 pts".Length             # 20
 $lenScroll2Pts = "Sync: scroll $mid 2 pts".Length             # 20
+$lenScroll1Pt = "Sync: scroll $mid 1 pts".Length              # 20
 $lenGenerated3 = 'Sync points from bookmarks: 3'.Length       # 29
 $lenNoMatch = 'Sync points: no matching numbered bookmarks'.Length # 43
 
@@ -85,7 +120,8 @@ $pdfB = Join-Path $root 'testdata\sync-b.pdf'
 $pdfC = Join-Path $root 'testdata\sync-c.pdf'
 $pdfD = Join-Path $root 'testdata\sync-d.pdf'
 $pdfE = Join-Path $root 'testdata\sync-e.pdf'
-foreach ($f in $pdfA, $pdfA2, $pdfB, $pdfC, $pdfD, $pdfE) {
+$pdfTB = Join-Path $root 'testdata\test-b.pdf' # 3 Letter pages: phase 10's replacement
+foreach ($f in $pdfA, $pdfA2, $pdfB, $pdfC, $pdfD, $pdfE, $pdfTB) {
     if (-not (Test-Path $f)) { throw "missing $f (run scripts\make-test-pdfs.ps1)" }
 }
 
@@ -125,9 +161,16 @@ function Get-VScroll([IntPtr]$pane) {
     [void][Win32.Native]::GetScrollInfo($pane, $SB_VERT, [ref]$si)
     $si
 }
-function Get-StatusLen([IntPtr]$status) {
-    [int]([Win32.Native]::SendMessageW($status, $SB_GETTEXTLENGTHW, [IntPtr]3,
+function Get-StatusLen([IntPtr]$status, [int]$part = 3) {
+    # The sync summary lives in part 3 with two panes, part 8 with three
+    # (SyncStatusPart in MainWindow.cpp).
+    [int]([Win32.Native]::SendMessageW($status, $SB_GETTEXTLENGTHW, [IntPtr]$part,
                                        [IntPtr]::Zero).ToInt64() -band 0xFFFF)
+}
+function Get-StatusParts([IntPtr]$status) {
+    # 7 parts with two panes, 10 with three; 1 means the control never got a
+    # schema at all (what a hidden bar used to keep).
+    [int][Win32.Native]::SendMessageW($status, $SB_GETPARTS, [IntPtr]::Zero, [IntPtr]::Zero)
 }
 function Get-FocusHwnd([IntPtr]$main) {
     $procId = [uint32]0
@@ -143,7 +186,9 @@ function Focus-Pane($v, [IntPtr]$pane) {
                                            [IntPtr]$IDC_FOCUS_NEXT_PANE, [IntPtr]::Zero)
         [void](Poll { (Get-FocusHwnd $v.Main) -eq $pane } 1500)
     }
-    if ((Get-FocusHwnd $v.Main) -ne $pane) { throw 'could not focus the requested pane' }
+    if ((Get-FocusHwnd $v.Main) -ne $pane) {
+        throw "could not focus the requested pane (focus=$(Get-FocusHwnd $v.Main), want=$pane)"
+    }
 }
 function Invoke-GotoPage($v, [IntPtr]$pane, [int]$page1) {
     Focus-Pane $v $pane
@@ -194,8 +239,13 @@ function Send-Command($v, [int]$id) {
     [void][Win32.Native]::PostMessageW($v.Main, $WM_COMMAND, [IntPtr]$id, [IntPtr]::Zero)
 }
 
-function Start-Viewer([string]$leftPdf, [string]$rightPdf) {
-    $proc = Start-Process -FilePath $exe -ArgumentList "`"$leftPdf`"", "`"$rightPdf`"" -PassThru
+function Start-Viewer([string]$leftPdf, [string]$rightPdf, [string]$centerPdf = '') {
+    # The positional CLI order is Beyond Compare's left right [center]
+    # (kCliSlotOrder in main.cpp), deliberately NOT the visual order: a third
+    # file lands in the centre pane and switches the three-pane mode on.
+    $argList = @("`"$leftPdf`"", "`"$rightPdf`"")
+    if ($centerPdf -ne '') { $argList += "`"$centerPdf`"" }
+    $proc = Start-Process -FilePath $exe -ArgumentList $argList -PassThru
     if (-not (Poll { [Win32.Native]::FindWindowByClass('PsvMainWindow', [IntPtr]::Zero) -ne [IntPtr]::Zero } 15000)) {
         throw 'main window did not appear'
     }
@@ -204,8 +254,12 @@ function Start-Viewer([string]$leftPdf, [string]$rightPdf) {
     # FindWindow can win the race against WM_CREATE: poll until the children
     # actually exist.
     $childrenReady = Poll {
+        # Pane child ids are kPaneChildIdBase + PaneSlot (PaneSlots.h): the
+        # slots are left, center, right in visual order, so the right pane is
+        # 102 and 101 is the centre pane, present only in three-pane mode.
         $v.Left = [Win32.Native]::GetDlgItem($main, 100)
-        $v.Right = [Win32.Native]::GetDlgItem($main, 101)
+        $v.Center = [Win32.Native]::GetDlgItem($main, 101)
+        $v.Right = [Win32.Native]::GetDlgItem($main, 102)
         $v.Status = [Win32.Native]::FindWindowExByClass($main, [IntPtr]::Zero,
                                                         'msctls_statusbar32', [IntPtr]::Zero)
         $rebar = [Win32.Native]::FindWindowExByClass($main, [IntPtr]::Zero, 'ReBarWindow32',
@@ -213,6 +267,7 @@ function Start-Viewer([string]$leftPdf, [string]$rightPdf) {
         $v.PageBox = if ($rebar -ne [IntPtr]::Zero) { [Win32.Native]::GetDlgItem($rebar, 2001) }
                      else { [IntPtr]::Zero }
         ($v.Left -ne [IntPtr]::Zero) -and ($v.Right -ne [IntPtr]::Zero) -and
+            ($centerPdf -eq '' -or $v.Center -ne [IntPtr]::Zero) -and
             ($v.Status -ne [IntPtr]::Zero) -and ($v.PageBox -ne [IntPtr]::Zero)
     } 10000
     if (-not $childrenReady) { throw 'main window children not found' }
@@ -223,7 +278,13 @@ function Start-Viewer([string]$leftPdf, [string]$rightPdf) {
         $si2 = New-Object Win32.Native+SCROLLINFO
         $si2.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($si2); $si2.fMask = $SIF_ALL
         $r = [Win32.Native]::GetScrollInfo($v.Right, $SB_VERT, [ref]$si2) -and $si2.nMax -gt 0
-        $l -and $r
+        $c = $true
+        if ($centerPdf -ne '') {
+            $si3 = New-Object Win32.Native+SCROLLINFO
+            $si3.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($si3); $si3.fMask = $SIF_ALL
+            $c = [Win32.Native]::GetScrollInfo($v.Center, $SB_VERT, [ref]$si3) -and $si3.nMax -gt 0
+        }
+        $l -and $r -and $c
     } 15000
     if (-not $ready) { throw 'panes did not finish opening (no scroll range)' }
     return $v
@@ -237,17 +298,17 @@ function Stop-Viewer($v) {
 # phase starts from a known state. The four base texts have distinct lengths;
 # with a live map the "· N pts" suffix shifts them all by the same amount
 # (pass the expected point count, single-digit).
-function Reset-SyncLocks($v, [int]$pts = 0) {
+function Reset-SyncLocks($v, [int]$pts = 0, [int]$part = 3) {
     $sfx = if ($pts -gt 0) { " $mid $pts pts".Length } else { 0 }
-    if ((Get-StatusLen $v.Status) -in ($lenScroll + $sfx), ($lenBoth + $sfx)) {
+    if ((Get-StatusLen $v.Status $part) -in ($lenScroll + $sfx), ($lenBoth + $sfx)) {
         Send-Command $v $IDC_TOGGLE_SCROLL_SYNC
-        [void](Poll { (Get-StatusLen $v.Status) -in ($lenOff + $sfx), ($lenZoom + $sfx) } 5000)
+        [void](Poll { (Get-StatusLen $v.Status $part) -in ($lenOff + $sfx), ($lenZoom + $sfx) } 5000)
     }
-    if ((Get-StatusLen $v.Status) -eq ($lenZoom + $sfx)) {
+    if ((Get-StatusLen $v.Status $part) -eq ($lenZoom + $sfx)) {
         Send-Command $v $IDC_TOGGLE_ZOOM_SYNC
-        [void](Poll { (Get-StatusLen $v.Status) -eq ($lenOff + $sfx) } 5000)
+        [void](Poll { (Get-StatusLen $v.Status $part) -eq ($lenOff + $sfx) } 5000)
     }
-    if ((Get-StatusLen $v.Status) -ne ($lenOff + $sfx)) {
+    if ((Get-StatusLen $v.Status $part) -ne ($lenOff + $sfx)) {
         throw 'could not normalize the sync locks'
     }
 }
@@ -497,8 +558,10 @@ try {
     if (-not (Poll { -not [Win32.Native]::IsWindow($opt) } 5000)) { throw 'options did not close' }
     Stop-Viewer $v
     $ini = Get-Content (Join-Path $scratch 'settings.ini') -Raw
-    Assert ($ini -match 'showAnchors=0') 'settings.ini persisted showAnchors=0'
-    Assert ($ini -match 'showTicks=0') 'settings.ini persisted showTicks=0'
+    # Anchored per line: an unanchored key= match can also land inside a
+    # LONGER key (fsStatusbar contains statusbar) and read as a false green.
+    Assert ($ini -match '(?m)^showAnchors=0\r?$') 'settings.ini persisted showAnchors=0'
+    Assert ($ini -match '(?m)^showTicks=0\r?$') 'settings.ini persisted showTicks=0'
 
     # ---------------------------------------------------------------- phase 5
     # Extended matching (sync-d | sync-e): deep keys (2.2.1) on distinct
@@ -609,7 +672,7 @@ try {
         "header OFF grows the document viewport (nPage was $pageHeaderOn with the strip)"
     Stop-Viewer $v
     $ini7 = Get-Content (Join-Path $scratch 'settings.ini') -Raw
-    Assert ($ini7 -match 'header=0') 'settings.ini persisted header=0'
+    Assert ($ini7 -match '(?m)^header=0\r?$') 'settings.ini persisted header=0'
 
     # Reopen (header now off) and turn header + path ON: the reverse round-trip.
     $v = Start-Viewer $pdfA $pdfC
@@ -633,8 +696,528 @@ try {
     if (-not (Poll { -not [Win32.Native]::IsWindow($opt) } 5000)) { throw 'options did not close on reopen (phase 7)' }
     Stop-Viewer $v
     $ini7b = Get-Content (Join-Path $scratch 'settings.ini') -Raw
-    Assert ($ini7b -match 'header=1') 'settings.ini persisted header=1 (reverse round-trip)'
-    Assert ($ini7b -match 'headerPath=1') 'settings.ini persisted headerPath=1'
+    Assert ($ini7b -match '(?m)^header=1\r?$') 'settings.ini persisted header=1 (reverse round-trip)'
+    Assert ($ini7b -match '(?m)^headerPath=1\r?$') 'settings.ini persisted headerPath=1'
+
+    # ---------------------------------------------------------------- phase 8
+    # Three-pane mode end to end: CLI activation (positional left right CENTER
+    # order), three-way plain-anchor sync, the N-way bookmark join (a smaller
+    # intersection, never a distortion), a manual trio point, the 3->2->3
+    # transitions (the shrink restores the surviving pair's remembered map -
+    # phase 6's a2|c points - WITHOUT any reopen; the grow reopens the parked
+    # centre and brings the trio's own map back through it, and must NOT drag
+    # the loaded panes: the reopening pane joins sync only at DocumentOpened,
+    # its restore echo swallowed), the F8 rotation (each pane adopts its
+    # predecessor in visual order, the map survives permuted), and subset sync
+    # (an EMPTY centre must not suspend the loaded panes' pairing). Depends on
+    # phase 6 having saved the a2|c manual map. The sync cell is part 8 with
+    # three panes, part 3 with two.
+    Write-Host 'phase 8: three-pane mode (sync-a2 | sync-b centre | sync-c)'
+    # The gaps toggle command is state-blind and this phase must not depend on
+    # how many times earlier phases happened to flip it (phase 0 ends with the
+    # gaps ON, phase 1 turns them OFF): force the persisted flag itself while
+    # no viewer is running.
+    $ini8 = Join-Path $scratch 'settings.ini'
+    $ini8Text = (Get-Content $ini8 -Raw) -replace '(?m)^showGaps=1\r?$', 'showGaps=0'
+    Set-Content $ini8 -Value $ini8Text -Encoding Unicode
+    if ((Get-Content $ini8 -Raw) -notmatch '(?m)^showGaps=0\r?$') {
+        throw 'could not force showGaps=0 in the sandbox ini'
+    }
+    $v = Start-Viewer $pdfA2 $pdfC $pdfB   # visual order: a2 | b | c
+    Assert ($v.Center -ne [IntPtr]::Zero) 'centre pane child (id 101) exists'
+    Reset-SyncLocks $v 0 8
+    Send-Command $v $IDC_TOGGLE_SCROLL_SYNC
+    if (-not (Poll { (Get-StatusLen $v.Status 8) -eq $lenScroll } 5000)) {
+        throw 'could not enable scroll sync in three-pane mode'
+    }
+    $c0 = (Get-VScroll $v.Center).nPos
+    $r0 = (Get-VScroll $v.Right).nPos
+    Invoke-GotoPage $v $v.Left 3
+    Assert (Poll { (Get-VScroll $v.Center).nPos -gt $c0 } 5000) 'centre follows the left leader'
+    Assert (Poll { (Get-VScroll $v.Right).nPos -gt $r0 } 5000) 'right follows the left leader'
+
+    # N-way join: a2 and c share no numbered keys with b (or each other), so
+    # the trio generates nothing where a|b alone had 3 points.
+    Send-Command $v $IDC_SYNC_FROM_BOOKMARKS
+    Assert (Poll { (Get-StatusLen $v.Status 8) -eq $lenNoMatch } 5000) `
+        'three-way bookmark join: no key present in ALL three outlines'
+    if (-not (Poll { (Get-StatusLen $v.Status 8) -eq $lenScroll } 8000)) {
+        throw 'the zero-match transient did not expire'
+    }
+    # One manual trio point with a DELIBERATELY asymmetric tuple: sync off so
+    # each pane is positioned independently (left p4, centre p3, right p2 =
+    # 0-based (3,2,1)), then captured; remembered under the a2|b|c key and
+    # restored by the grow below. The mapped drives after the reverse
+    # rotation prove the COORDINATES survive, not just the point count.
+    Reset-SyncLocks $v 0 8
+    Invoke-GotoPage $v $v.Left 4
+    Invoke-GotoPage $v $v.Center 3
+    Invoke-GotoPage $v $v.Right 2
+    Send-Command $v $IDC_ADD_SYNC_POINT
+    $lenOff1Pt = "Sync: off $mid 1 pts".Length
+    Assert (Poll { (Get-StatusLen $v.Status 8) -eq $lenOff1Pt } 8000) `
+        'manual trio point placed (asymmetric tuple 4:3:2)'
+    Send-Command $v $IDC_TOGGLE_SCROLL_SYNC
+    if (-not (Poll { (Get-StatusLen $v.Status 8) -eq $lenScroll1Pt } 5000)) {
+        throw 'could not re-enable scroll sync after placing the tuple'
+    }
+
+    # Manual 100% zoom in every pane for the rest of the phase (the gaps are
+    # already OFF via the forced flag above): gap slots and fit-zoom
+    # recomputes would legitimately move nPos across the mode switches and
+    # rotations below, while the assertions need positions that only an
+    # (unwanted) sync drive could change.
+    foreach ($pane in $v.Left, $v.Center, $v.Right) {
+        Focus-Pane $v $pane
+        Send-Command $v $IDC_ZOOM_ACTUAL
+    }
+    Start-Sleep -Milliseconds 600
+    # Park the centre with a NONZERO offset: the grow below must restore it,
+    # and that restore's scroll echo is exactly what the controller's join
+    # guard has to swallow (the pane holds a document mid-restore but must
+    # not lead until its DocumentOpened lands).
+    Invoke-GotoPage $v $v.Center 2
+
+    # Shrink: the centre (sync-b) parks, and the surviving pair a2|c gets its
+    # phase-6 manual map back IMMEDIATELY - no reopen fires on a shrink.
+    Send-Command $v $IDC_PANES_TWO
+    Assert (Poll { [Win32.Native]::GetDlgItem($v.Main, 101) -eq [IntPtr]::Zero } 5000) `
+        'two panes: centre child destroyed'
+    Assert (Poll { (Get-StatusLen $v.Status) -eq $lenScroll2Pts } 5000) `
+        'shrink restored the remembered a2|c manual map without a reopen'
+    Invoke-GotoPage $v $v.Left 5
+    Assert-PaneAt $v $v.Right '2' 'the restored pair map drives right (5 -> 2, as phase 6)'
+
+    # Grow: the parked centre reopens (restoring its nonzero offset) and the
+    # trio's remembered map (the manual point above) comes back through that
+    # reopen. The loaded panes must NOT move: pre-join, the reopening pane's
+    # restore echo used to drive them through a never-captured anchor.
+    $lPre = (Get-VScroll $v.Left).nPos
+    Send-Command $v $IDC_PANES_THREE
+    $centerBack = Poll {
+        $v.Center = [Win32.Native]::GetDlgItem($v.Main, 101)
+        if ($v.Center -eq [IntPtr]::Zero) { return $false }
+        (Get-VScroll $v.Center).nMax -gt 0
+    } 10000
+    Assert $centerBack 'three panes again: the parked centre document reopened'
+    Assert (Poll { (Get-StatusLen $v.Status 8) -eq $lenScroll1Pt } 8000) `
+        'the trio map restored through the centre reopen'
+    Assert ((Get-VScroll $v.Center).nPos -gt 0) 'the centre came back at its parked offset'
+    Start-Sleep -Milliseconds 400 # any (buggy) restore echo has landed by now
+    # The LEADER pins the regression: pre-join, the reopening centre's restore
+    # echo drove every pane toward its parked offset through a never-captured
+    # anchor (left would jump ~3 pages here). The RIGHT legitimately moves:
+    # the restored trio map is authoritative, so the first leader echo
+    # reabsorbs the follower onto it - asserting it still would re-test the
+    # map, not the join guard. Tolerance covers h-scrollbar flips (viewport
+    # height) and page->pixel re-quantization through the resize echoes.
+    $lDrift = [math]::Abs((Get-VScroll $v.Left).nPos - $lPre)
+    Assert ($lDrift -le 16) `
+        "the reopen did not drag the leader pane (join regression; drift l=$lDrift)"
+
+    # Rotation: each pane adopts its PREDECESSOR in visual order (left content
+    # moves to centre, centre to right, right wraps to left), so the scroll
+    # ranges rotate with the documents (Manual zoom rides each snapshot
+    # exactly; a fit zoom would recompute per pane width and break the strict
+    # equality).
+    $lMax = (Get-VScroll $v.Left).nMax
+    $cMax = (Get-VScroll $v.Center).nMax
+    $rMax = (Get-VScroll $v.Right).nMax
+    Send-Command $v $IDC_SWAP_PANES
+    Assert (Poll {
+        (Get-VScroll $v.Center).nMax -eq $lMax -and
+        (Get-VScroll $v.Right).nMax -eq $cMax -and
+        (Get-VScroll $v.Left).nMax -eq $rMax
+    } 10000) 'F8 rotates the documents (left -> centre -> right)'
+    Assert (Poll { (Get-StatusLen $v.Status 8) -eq $lenScroll1Pt } 8000) `
+        'the point map survives the rotation, permuted'
+    # The FORWARD tuple must be checked before rotating back, or paired
+    # permutation errors would cancel across the round trip. Forward =
+    # (1,3,2) 0-based: a left leader on its point page drives centre +2
+    # pages and right +1.
+    Invoke-GotoPage $v $v.Left 2
+    Assert-PaneAt $v $v.Center '4' 'forward tuple drives the centre by its permuted delta'
+    Assert-PaneAt $v $v.Right '3' 'forward tuple drives the right by its permuted delta'
+    # And back: Shift+F8 is the inverse permutation (each pane adopts its
+    # successor), so the ranges return to the pre-rotation triple.
+    Send-Command $v $IDC_SWAP_PANES_BACK
+    Assert (Poll {
+        (Get-VScroll $v.Left).nMax -eq $lMax -and
+        (Get-VScroll $v.Center).nMax -eq $cMax -and
+        (Get-VScroll $v.Right).nMax -eq $rMax
+    } 10000) 'Shift+F8 rotates back (each pane adopts its successor)'
+    Assert (Poll { (Get-StatusLen $v.Status 8) -eq $lenScroll1Pt } 8000) `
+        'the map survives the reverse rotation too'
+    # Coordinate check, not just the count: with the tuple back at (3,2,1)
+    # 0-based, a left leader below the point extrapolates its deltas - left
+    # p3 puts the centre one page back (p2) and the right two back (p1).
+    Invoke-GotoPage $v $v.Left 3
+    Assert-PaneAt $v $v.Center '2' 'restored tuple drives the centre by its own delta'
+    Assert-PaneAt $v $v.Right '1' 'restored tuple drives the right by its own delta'
+
+    # Subset sync: close the centre document (the map dies with it) and the
+    # left leader must STILL drive the right follower around the empty centre.
+    Focus-Pane $v $v.Center
+    Send-Command $v $IDC_CLOSE_DOC
+    Assert (Poll { (Get-VScroll $v.Center).nMax -eq 0 } 5000) 'centre document closed'
+    [void](Poll { (Get-StatusLen $v.Status 8) -eq $lenScroll } 5000) # map died with the doc
+    # Re-zero the pair delta first: the asymmetric tuple left the follower
+    # two pages behind the leader, and a follower already clamped at its top
+    # cannot show movement.
+    Send-Command $v $IDC_TOGGLE_SCROLL_SYNC
+    [void](Poll { (Get-StatusLen $v.Status 8) -eq $lenOff } 5000)
+    Invoke-GotoPage $v $v.Left 1
+    Invoke-GotoPage $v $v.Right 1
+    Send-Command $v $IDC_TOGGLE_SCROLL_SYNC
+    [void](Poll { (Get-StatusLen $v.Status 8) -eq $lenScroll } 5000)
+    $rBase = (Get-VScroll $v.Right).nPos
+    Invoke-GotoPage $v $v.Left 2
+    Assert (Poll { (Get-VScroll $v.Right).nPos -gt $rBase } 5000) `
+        'sync keeps driving the loaded panes around the empty centre (subset sync)'
+    Stop-Viewer $v
+
+    # ---------------------------------------------------------------- phase 9
+    # XML WM_COPYDATA handoff, cross-process for real: a second instance runs
+    # -open-center against the running one (util/IpcXml, XmlLite payload),
+    # exits 0 without ever showing a window, and the running instance switches
+    # to three panes with the document in the centre - which also covers the
+    # inactive-slot activation path end to end.
+    Write-Host 'phase 9: -open-center handoff to the running instance (XML IPC)'
+    $v = Start-Viewer $pdfA $pdfB
+    # Phase 8 persisted a three-pane arrangement; drop back to two so the
+    # handoff exercises the mode switch too.
+    if ([Win32.Native]::GetDlgItem($v.Main, 101) -ne [IntPtr]::Zero) {
+        Send-Command $v $IDC_PANES_TWO
+        if (-not (Poll { [Win32.Native]::GetDlgItem($v.Main, 101) -eq [IntPtr]::Zero } 5000)) {
+            throw 'could not return to two panes before the handoff'
+        }
+    }
+    # A COPY under an XML-hostile, non-ASCII filename: '&', an apostrophe and
+    # a diacritic must round-trip through the writer's escaping and the
+    # parser, or the handoff fails and the centre never opens. The source is
+    # the 12-page sync-d: its page count is unique among the open documents,
+    # which is what the identity check below pins.
+    $nasty = Join-Path $docs "hand&off 'ü.pdf"
+    Copy-Item $pdfD $nasty
+    $second = Start-Process -FilePath $exe -ArgumentList '-open-center', "`"$nasty`"" -PassThru
+    if (-not $second.WaitForExit(15000)) { $second.Kill(); throw 'verb instance did not exit' }
+    Assert ($second.ExitCode -eq 0) "verb instance exit code 0 (got $($second.ExitCode))"
+    Assert ((@(Get-Process PdfSideViewer -ErrorAction SilentlyContinue)).Count -eq 1) `
+        'no second window: the handoff reused the running instance'
+    $centerOpened = Poll {
+        # Refresh the stored handle: the pre-handoff normalization DESTROYED
+        # the startup centre, and the verb created a brand-new HWND.
+        $v.Center = [Win32.Native]::GetDlgItem($v.Main, 101)
+        if ($v.Center -eq [IntPtr]::Zero) { return $false }
+        (Get-VScroll $v.Center).nMax -gt 0
+    } 10000
+    Assert $centerOpened 'the verb landed: three panes with the document open in the centre'
+    # Identity, not merely "some scrollable document": END jumps to the last
+    # page, and only the handed-off 12-page fixture ends on page 12 (the
+    # neighbours hold 6-page documents).
+    Focus-Pane $v $v.Center
+    [void][Win32.Native]::PostMessageW($v.Center, $WM_KEYDOWN, [IntPtr]$VK_END, [IntPtr]::Zero)
+    Assert-PaneAt $v $v.Center '12' 'identity pinned: the handed-off document is the 12-page fixture'
+    Stop-Viewer $v
+
+    # --------------------------------------------------------------- phase 10
+    # Auto-reload must not move the SIBLING: a reopening pane leaves the
+    # controller's joined set at DocumentOpening, so its view-restore echo
+    # cannot lead through anchors captured for the previous document. Plain
+    # anchor, no map, and deliberately NO goto between the reload and the
+    # assertion (a goto would legitimize any displacement). The replacement is
+    # the 3-page LETTER test-b over a 6-page A4 parked at page 5 in FIT PAGE:
+    # the restored position must clamp (page box '3' = the OBSERVABLE
+    # completion signal) AND the different page geometry forces the fit
+    # relayout to change scale, so the restore's final reconstruction cannot
+    # be idempotent - the pre-join echo NECESSARILY fires and would drag the
+    # follower ~2 pages, making the exact-equality assert discriminating
+    # (same-geometry sync-c could reconstruct the identical offsets and emit
+    # nothing even pre-fix).
+    Write-Host 'phase 10: auto-reload leaves the sibling parked (join guard on reopen)'
+    $workR = Join-Path $docs 'reload-join.pdf'
+    Copy-Item $pdfA $workR
+    $v = Start-Viewer $workR $pdfB
+    # Phase 9 persisted a three-pane arrangement; this phase is two-pane.
+    if ([Win32.Native]::GetDlgItem($v.Main, 101) -ne [IntPtr]::Zero) {
+        Send-Command $v $IDC_PANES_TWO
+        if (-not (Poll { [Win32.Native]::GetDlgItem($v.Main, 101) -eq [IntPtr]::Zero } 5000)) {
+            throw 'could not return to two panes before the reload phase'
+        }
+    }
+    Reset-SyncLocks $v
+    Send-Command $v $IDC_TOGGLE_SCROLL_SYNC
+    if (-not (Poll { (Get-StatusLen $v.Status) -eq $lenScroll } 5000)) {
+        throw 'could not enable scroll sync in the reload phase'
+    }
+    Focus-Pane $v $v.Left
+    Send-Command $v $IDC_FIT_PAGE    # fit mode is what makes the relayout rescale
+    Start-Sleep -Milliseconds 300
+    Invoke-GotoPage $v $v.Left 5
+    Start-Sleep -Milliseconds 300
+    $rPark = (Get-VScroll $v.Right).nPos
+    Focus-Pane $v $v.Left            # the page box mirrors the focused pane
+    Copy-Item $pdfTB $workR -Force   # the watcher debounces, probes, reloads
+    Assert (Poll { (Get-PageBoxText $v) -eq '3' } 20000) `
+        'reload completed: the restored position clamped into the 3-page replacement'
+    Start-Sleep -Milliseconds 400    # any (buggy) restore echo has landed by now
+    Assert ((Get-VScroll $v.Right).nPos -eq $rPark) `
+        'the reload restore did not drive the sibling (the leader moved ~2 pages)'
+    Stop-Viewer $v
+
+    # --------------------------------------------------------------- phase 11
+    # The status-part schema must be configured while the bar is HIDDEN too:
+    # starting with statusbar=0 leaves the control at its default single part
+    # otherwise, every multi-part write fails while the cache records it, and
+    # showing the bar later surfaces blank cells the change guard never
+    # rewrites.
+    Write-Host 'phase 11: status parts are configured while the bar is hidden'
+    $ini11 = Join-Path $scratch 'settings.ini'
+    # ANCHORED: -replace is case-insensitive and unanchored, so a plain
+    # 'statusbar=1' would also rewrite fsStatusbar=1 (the full-screen option) -
+    # and a missed edit would leave the bar VISIBLE, quietly turning the whole
+    # phase into a no-op. Both the edit and the language the expected lengths
+    # assume are asserted before the viewer starts.
+    $ini11Text = (Get-Content $ini11 -Raw) -replace '(?m)^statusbar=1\r?$', 'statusbar=0'
+    Set-Content $ini11 -Value $ini11Text -Encoding Unicode
+    $ini11After = Get-Content $ini11 -Raw
+    Assert (($ini11After -match '(?m)^statusbar=0\r?$') -and
+            ($ini11After -notmatch '(?m)^statusbar=1\r?$') -and
+            ($ini11After -match '(?m)^language=en\r?$')) `
+        'the sandbox ini starts hidden and English (the lengths asserted below)'
+    # A pair the suite never opened together (a|e): no remembered sync points,
+    # so the expected cell is exactly "Sync: scroll" with no pts suffix.
+    $v = Start-Viewer $pdfA $pdfE
+    # Two panes explicitly: the sync cell INDEX depends on the arrangement
+    # (SyncStatusPart), and phase 9 left a three-pane session behind.
+    if ([Win32.Native]::GetDlgItem($v.Main, 101) -ne [IntPtr]::Zero) {
+        Send-Command $v $IDC_PANES_TWO
+        if (-not (Poll { [Win32.Native]::GetDlgItem($v.Main, 101) -eq [IntPtr]::Zero } 5000)) {
+            throw 'could not return to two panes before the status-bar phase'
+        }
+    }
+    Assert (-not [Win32.Native]::IsWindowVisible($v.Status)) `
+        'the bar really starts hidden (the phase would be vacuous otherwise)'
+    Assert ((Get-StatusParts $v.Status) -eq 7) `
+        "the two-pane part schema exists while hidden (got $(Get-StatusParts $v.Status))"
+    # The state change that used to be swallowed happens HERE, with the bar
+    # still hidden: pre-fix the multi-part write failed while the cache
+    # recorded it, so the cell stayed blank forever after.
+    Reset-SyncLocks $v
+    Send-Command $v $IDC_TOGGLE_SCROLL_SYNC
+    Assert (Poll { (Get-StatusLen $v.Status) -eq $lenScroll } 5000) `
+        'the sync cell is written while the bar is hidden'
+    Send-Command $v $IDC_TOGGLE_STATUSBAR # show the bar for the first time
+    Assert (Poll { [Win32.Native]::IsWindowVisible($v.Status) } 5000) `
+        'the toggle command actually shows the bar'
+    Assert (Poll { (Get-StatusLen $v.Status) -eq $lenScroll } 5000) `
+        'the sync cell is populated on first show'
+    Stop-Viewer $v
+
+    # --------------------------------------------------------------- phase 12
+    # Injected save failure. Building the file aside and swapping it in exists
+    # so that a save which CANNOT be promoted leaves the previous coherent
+    # settings untouched - never truncated, never half-written, and with no
+    # sibling left behind. A read-only settings.ini fails the swap (the file
+    # cannot be deleted or replaced) while the temp write itself still
+    # succeeds, which is exactly the interesting path.
+    Write-Host 'phase 12: settings persistence under failure (save, cleanup)'
+    $ini12 = Join-Path $scratch 'settings.ini'
+    $before12 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($ini12))
+    # NOT -Filter: that is FindFirstFile matching, where a trailing '.*' also
+    # matches the bare name, so 'settings.ini.*' counts settings.ini itself.
+    # (The app's own sweep pattern ends in a literal .tmp and its grammar check
+    # runs on the long name, so it cannot hit the file it protects.)
+    $siblings12 = { @(Get-ChildItem -LiteralPath $scratch -File |
+            Where-Object { $_.Name -like 'settings.ini.*' } |
+            ForEach-Object { $_.Name }) }
+    Set-ItemProperty -LiteralPath $ini12 -Name IsReadOnly -Value $true
+    try {
+        $v = Start-Viewer $pdfA $pdfC
+        Send-Command $v $IDC_TOGGLE_SCROLL_SYNC # a change worth persisting
+        Start-Sleep -Milliseconds 400
+        Stop-Viewer $v                          # SaveSession runs (and fails) here
+        $after12 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($ini12))
+        Assert ($after12 -eq $before12) `
+            'the unwritable settings file is byte-identical after the failed save'
+        # @() again around the call: an empty result unrolls to $null in the
+        # pipeline, and $null.Count is an error under strict mode.
+        $left12 = @(& $siblings12)
+        Assert ($left12.Count -eq 0) `
+            "no temp sibling left behind by the failed save (found: $($left12 -join ', '))"
+    } finally {
+        Set-ItemProperty -LiteralPath $ini12 -Name IsReadOnly -Value $false
+    }
+    # The very same run WITHOUT the injection must rewrite the file - otherwise
+    # "byte-identical" above would also pass on an app that never saves at all.
+    # Cleanup grammar, checked in the same run: only the app's own artifact
+    # names are removable, and a FOREIGN one only once it is too old to belong
+    # to a save still in flight (the settings lock is best-effort, so another
+    # writer can be between closing its finished temp and promoting it).
+    # Planted around one clean run: the only removable name is
+    # <settings.ini>.<pid>.<counter>.tmp in canonical decimal spelling with a
+    # counter the writer can actually produce (0..63), and a FOREIGN one only
+    # once it is too old to belong to a save still in flight.
+    $keep12 = [ordered]@{
+        'settings.ini.999998.0.tmp'      = 'fresh: could be a save in flight'
+        'settings.ini.manual.bak'        = 'not the artifact grammar at all'
+        'settings.ini.007.0.tmp'         = 'leading zeros: not a name this app writes'
+        'settings.ini.999997.64.tmp'     = 'counter past the writer range'
+        'settings.ini.0.0.tmp'           = 'pid 0 is the idle process, never a writer'
+        'settings.ini.4294967296.0.tmp'  = 'one past the DWORD range (not the digit-count guard)'
+    }
+    # Aged and grammatical, including both accepted boundaries: swept.
+    $sweep12 = @('settings.ini.999999.0.tmp', 'settings.ini.999996.63.tmp',
+        'settings.ini.4294967295.0.tmp')
+    foreach ($name in @($sweep12) + @($keep12.Keys)) {
+        $p = Join-Path $scratch $name
+        Set-Content $p -Value 'leftover' -Encoding Unicode
+        # Aged, except the one whose freshness is the point.
+        if ($name -ne 'settings.ini.999998.0.tmp') {
+            (Get-Item -LiteralPath $p).LastWriteTime = (Get-Date).AddHours(-2)
+        }
+    }
+    # Declared security model: the settings DIRECTORY is the boundary. A save
+    # promotes a freshly created temp by rename, so per-file protection added
+    # by hand does NOT survive it. Pinned here as a CHARACTERIZATION test: the
+    # day someone moves the promotion back to an ACL-preserving call, this
+    # fails and the trade-off gets re-decided on purpose instead of by drift.
+    # The SID, not the account NAME: translating a SID to a name can throw on
+    # an unmappable identity (disconnected domain), and that would abort the
+    # suite for an environmental reason instead of taking the skip path below.
+    $me12 = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    # A sentinel the scratch DIRECTORY hands down to files created AFTER it,
+    # so the assertions below can prove the saved file really inherited from
+    # the directory: "no explicit ACEs left" alone would also pass on a
+    # token-default DACL. The principal is the NULL SID (S-1-0-0), which no
+    # token ever matches - so the ACE grants nothing to anybody - and which
+    # holds no other ACE here, so it cannot merge into one (an ACE for the
+    # current user would; and note inheritance also adds the Synchronize bit,
+    # which is why identity, not rights, is what gets matched).
+    # NOT checked as absent beforehand: writing a container's ACL propagates
+    # its inheritable ACEs to EXISTING children too, so the current
+    # settings.ini gets it immediately. What proves the promoted file is a new
+    # object is the explicit ACE below disappearing across the save.
+    $sentinelSid12 = New-Object Security.Principal.SecurityIdentifier('S-1-0-0')
+    $hasSentinel12 = {
+        param([string]$path)
+        @((Get-Acl -LiteralPath $path).GetAccessRules($true, $true,
+                [Security.Principal.SecurityIdentifier]) |
+            Where-Object { $_.IsInherited -and $_.IdentityReference.Value -eq 'S-1-0-0' }).Count -gt 0
+    }
+    # CAPABILITY detection, kept apart from the fixture itself: the volume is
+    # asked whether it persists ACLs at all (%TEMP% can sit on FAT32/exFAT or a
+    # redirected location that does not), and only THAT skips the block. A
+    # try/catch around the fixture would instead report a future bug in it -
+    # wrong overload, malformed ACL, unexpected denial - as "no ACL support"
+    # and leave the suite green.
+    # THREE outcomes, kept apart: a failed query throws (it is a defect or an
+    # environment nobody expected, and swallowing it would report "no ACL
+    # support" and skip green), a successful query without the flag skips, and
+    # only a successful query WITH the flag runs the fixture.
+    $explicitBefore12 = @()
+    $volFlags12 = [uint32]0
+    $volSerial12 = [uint32]0
+    $volMaxComp12 = [uint32]0
+    $volName12 = New-Object System.Text.StringBuilder 260
+    $fsName12 = New-Object System.Text.StringBuilder 260
+    $mount12 = New-Object System.Text.StringBuilder 260
+    if (-not [Win32.Native]::GetVolumePathNameW($scratch, $mount12, 260)) {
+        throw "GetVolumePathName failed for $scratch (Win32 $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+    }
+    if (-not [Win32.Native]::GetVolumeInformationW($mount12.ToString(), $volName12, 260,
+            [ref]$volSerial12, [ref]$volMaxComp12, [ref]$volFlags12, $fsName12, 260)) {
+        throw "GetVolumeInformation failed for $($mount12.ToString()) (Win32 $([Runtime.InteropServices.Marshal]::GetLastWin32Error()))"
+    }
+    $aclOk12 = ($volFlags12 -band $FILE_PERSISTENT_ACLS) -ne 0
+    if (-not $aclOk12) {
+        Write-Host "  skip: ACL characterization ($($fsName12.ToString()) does not persist ACLs)" `
+            -ForegroundColor Yellow
+    } else {
+        $dirAcl12 = Get-Acl -LiteralPath $scratch
+        $dirAcl12.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+                    $sentinelSid12, 'ReadAttributes', 'ObjectInherit', 'None', 'Allow')))
+        Set-Acl -LiteralPath $scratch -AclObject $dirAcl12
+        $acl12 = Get-Acl -LiteralPath $ini12
+        $acl12.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+                    $me12, 'FullControl', 'Allow')))
+        Set-Acl -LiteralPath $ini12 -AclObject $acl12
+        $explicitBefore12 = @((Get-Acl -LiteralPath $ini12).Access |
+                Where-Object { -not $_.IsInherited })
+    }
+    $v = Start-Viewer $pdfA $pdfC
+    # A temp carrying the LIVE process id must be swept whatever its age: that
+    # is the "ours on sight" half of the rule, which ageing alone never covers.
+    $ownTmp12 = Join-Path $scratch "settings.ini.$($v.Proc.Id).7.tmp"
+    Set-Content $ownTmp12 -Value 'leftover' -Encoding Unicode
+    Send-Command $v $IDC_TOGGLE_SCROLL_SYNC
+    Start-Sleep -Milliseconds 400
+    Stop-Viewer $v
+    Assert (([Convert]::ToBase64String([IO.File]::ReadAllBytes($ini12))) -ne $before12) `
+        'the same run without the injection DOES rewrite the file (the check discriminates)'
+    Assert (-not (Test-Path -LiteralPath $ownTmp12)) `
+        "this process's own temp is swept regardless of age"
+    foreach ($name in $sweep12) {
+        Assert (-not (Test-Path -LiteralPath (Join-Path $scratch $name))) `
+            "swept: $name (stale and grammatical)"
+    }
+    foreach ($name in $keep12.Keys) {
+        Assert (Test-Path -LiteralPath (Join-Path $scratch $name)) `
+            "kept: $name ($($keep12[$name]))"
+    }
+    if ($aclOk12) {
+        $explicitAfter12 = @((Get-Acl -LiteralPath $ini12).Access |
+                Where-Object { -not $_.IsInherited })
+        Assert ($explicitBefore12.Count -gt 0) 'the fixture really put an explicit ACE on the file'
+        Assert ($explicitAfter12.Count -eq 0) `
+            'a saved file keeps no explicit ACE of its own (declared security model)'
+        Assert (& $hasSentinel12 $ini12) `
+            "and does carry the directory's inheritable ACE, not a token-default DACL"
+    }
+    Assert ((Get-Content $ini12 -Raw).Length -gt 0) 'and is still readable by its owner'
+
+    # The sweep's early return, which every check above leaves untested because
+    # they all run with settings.ini PRESENT: an aged, grammatical temp (so
+    # ordinarily sweepable) must survive the save that runs while the canonical
+    # file is missing, since it can be the only complete copy left.
+    # TWO candidates, both VALID settings files carrying an observable
+    # non-default (statusbar=0), not junk: with junk, an implementation that DID
+    # adopt one would still fall back to defaults and every file-existence
+    # assertion would pass anyway. One is AGED and one is FRESH, because the
+    # documented policy is unconditional - no temp is ever adopted - and an
+    # implementation that adopted only fresh ones would pass an aged-only test.
+    $rescueAged12 = Join-Path $scratch 'settings.ini.999995.0.tmp'
+    $rescueFresh12 = Join-Path $scratch 'settings.ini.999994.0.tmp'
+    foreach ($p in $rescueAged12, $rescueFresh12) {
+        ((Get-Content $ini12 -Raw) -replace '(?m)^statusbar=1\r?$', 'statusbar=0') |
+            Set-Content $p -Encoding Unicode
+        if ((Get-Content $p -Raw) -notmatch '(?m)^statusbar=0\r?$') {
+            throw "the rescue fixture $p did not get its observable non-default value"
+        }
+    }
+    (Get-Item -LiteralPath $rescueAged12).LastWriteTime = (Get-Date).AddHours(-2)
+    # Retried, per the suite's own rule: a scanner holding a handle turns the
+    # delete into delete-pending, and the launch below would race it.
+    for ($i = 0; $i -lt 10 -and (Test-Path -LiteralPath $ini12); $i++) {
+        try { Remove-Item -LiteralPath $ini12 -Force -ErrorAction Stop }
+        catch { Start-Sleep -Milliseconds 300 }
+    }
+    if (Test-Path -LiteralPath $ini12) { throw 'could not remove settings.ini for the rescue phase' }
+    $v = Start-Viewer $pdfA $pdfC
+    Assert ([Win32.Native]::IsWindowVisible($v.Status)) `
+        'NEITHER retained temp is adopted, fresh or aged: the window starts from defaults'
+    Stop-Viewer $v                   # and this save recreates settings.ini
+    Assert ((Test-Path -LiteralPath $rescueAged12) -and (Test-Path -LiteralPath $rescueFresh12)) `
+        'both temps survive the save that runs while settings.ini is absent'
+    # And the protection ends exactly there: forensic residue, not a recovery
+    # slot. With the canonical file back the ordinary rules apply again, which
+    # for two FOREIGN temps means the aged one goes and the fresh one stays.
+    $v = Start-Viewer $pdfA $pdfC
+    Stop-Viewer $v
+    Assert (-not (Test-Path -LiteralPath $rescueAged12)) `
+        'the aged one is swept by the next save, once the canonical file exists again'
+    Assert (Test-Path -LiteralPath $rescueFresh12) `
+        'and the fresh one still is not (it could be a save in flight)'
 } finally {
     Get-Process PdfSideViewer -ErrorAction SilentlyContinue | ForEach-Object {
         [void]$_.CloseMainWindow()

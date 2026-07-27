@@ -1,5 +1,6 @@
 #pragma once
 
+#include "PaneSlots.h"
 #include "framework.h"
 
 #include <vector>
@@ -7,26 +8,28 @@
 // Both MRU lists cap at 9 so every menu entry gets a 1..9 digit mnemonic.
 inline constexpr size_t kMruMaxEntries = 9;
 
-// A left+right document pair that was open together (order matters).
-struct MruPair {
-    std::wstring left;
-    std::wstring right;
+// The documents that were open together, by slot (kSlotKeys). An empty entry
+// means that slot was not in use, so a two-pane session simply leaves the
+// centre empty and an old two-key settings.ini still loads.
+struct MruSession {
+    PerPane<std::wstring> path;
 };
 
-// Per-pair sync-point memory ([sync-points], most recent first, kMruMaxEntries
-// cap). Only MANUAL points are stored ("l:r;l:r;..." 0-based page pairs, pure
-// numbers: no escaping, no buffer-length worries); generated points re-derive
-// from the bookmarks at restore time when hadAuto is set.
+// Per-session sync-point memory ([sync-points], most recent first,
+// kMruMaxEntries cap), keyed by the same per-slot paths. Only MANUAL points are
+// stored, one 0-based page per ACTIVE slot joined by ':' ("l:r;l:r;..." with
+// two panes, "l:c:r;..." with three, pure numbers: no escaping, no buffer
+// worries); generated points re-derive from the bookmarks at restore time when
+// hadAuto is set.
 struct SavedSyncPoints {
-    std::wstring left;
-    std::wstring right;
+    PerPane<std::wstring> path;
     std::wstring manual;
     bool hadAuto = false;
 };
 
-// Session persistence: %APPDATA%\PdfSideViewer\settings.ini, UTF-16 (the file
-// is created with a BOM so the WritePrivateProfile* APIs store Unicode paths
-// losslessly). INI over JSON: native Win32 read/write, nothing to parse.
+// Session persistence: %APPDATA%\PdfSideViewer\settings.ini, UTF-16LE with a
+// BOM so Unicode paths round-trip. INI over JSON: the file stays hand-editable
+// and the format is a dozen lines of code at each end.
 struct PaneSettings {
     std::wstring path; // empty = pane was empty
     float zoom = 1.0f;
@@ -65,6 +68,9 @@ struct AppSettings {
     // default). Parsed leniently: anything malformed keeps the default row.
     std::wstring rebarBands;
     // Defaults for fresh documents and non-restored launches ([defaults]).
+    // defPaneCount is what a launch WITHOUT session restore starts with; the
+    // [window] paneCount above is the last session's own arrangement.
+    int defPaneCount = 2;
     int defScrollMode = 0; // PaneWindow::ScrollMode (0 continuous, 1 paged)
     int defZoomMode = 2;   // PaneWindow::ZoomMode (0 manual, 1 fit width, 2 fit page)
     bool defScrollSync = true;
@@ -74,12 +80,50 @@ struct AppSettings {
     // %l = 1-based line. A "://" marks a URI (ShellExecute), anything else is
     // a command line. Default targets VS Code's protocol handler.
     std::wstring synctexInverse = L"vscode://file/%f:%l";
-    std::vector<std::wstring> mruFiles; // most recent first
-    std::vector<MruPair> mruPairs;      // most recent first
+    std::vector<std::wstring> mruFiles;  // most recent first
+    std::vector<MruSession> mruSessions; // most recent first
     std::vector<SavedSyncPoints> syncPoints; // most recent first
-    PaneSettings left;
-    PaneSettings right;
+    // Number of pane slots in use: 2 (left+right, the default) or 3, which
+    // activates the centre pane. Drives which slots the per-slot load/save
+    // below walks, so a two-pane settings.ini never grows a [center] section.
+    int paneCount = 2;
+    // Three-pane shares of the pane strip, kept apart from splitRatio (the
+    // two-pane one) so switching modes never reinterprets the other's value.
+    float splitRatio3Left = 1.0f / 3.0f;
+    float splitRatio3Center = 1.0f / 3.0f;
+    // Per-slot session, stored in the [left]/[center]/[right] sections
+    // (kSlotKeys). Every section is READ regardless of paneCount (a parked
+    // [center] seeds the fallback of a two-pane session); a section is WRITTEN
+    // when its slot is active or its path non-empty, and deleted otherwise, so
+    // a pristine two-pane settings.ini never grows a [center] section.
+    PerPane<PaneSettings> panes;
 
+    // Reads the whole file through ONE handle and parses it in memory: what
+    // Load returns is always a single coherent snapshot, never a mixture of
+    // two versions of the file.
     static AppSettings Load();
-    void Save() const;
+    // Whole-file write to a uniquely named temp sibling, checked byte counts,
+    // then ONE same-volume rename over the target: false = nothing was
+    // promoted and the previous coherent file is untouched under its own name.
+    // On the local volume the profile lives on, that rename has no partial
+    // state, so settings.ini always resolves to one whole version of itself.
+    // If a redirected or third-party provider ever broke that, the complete
+    // new file is KEPT beside it under its temp name and is not adopted
+    // automatically: that case degrades to a manual rename, not to silent
+    // recovery of a file that a crash might have truncated. The temp is
+    // protected from cleanup only WHILE settings.ini is missing; once any run
+    // recreates it, the residue is stale like any other.
+    // The replacement carries the DIRECTORY's inherited security, never the
+    // old file's own: the settings directory is the declared boundary (see
+    // Settings.cpp), so per-file DACLs and per-file EFS do not survive a save.
+    bool Save() const;
 };
+
+// Directory holding settings.ini (honors the PSV_SETTINGS_DIR test override,
+// and fails closed when it is set but unusable); empty on failure. Also hosts
+// the settings writer lock.
+std::wstring SettingsDirectory();
+// Canonical per-user directory for locks over resources that are NOT the
+// settings file: independent of PSV_SETTINGS_DIR and of the environment
+// entirely, so every copy of the app run by one user meets on the same file.
+std::wstring UserLockDirectory();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DxResources.h"
+#include "PaneSlots.h"
 #include "PaneWindow.h"
 #include "framework.h"
 #include "util/Settings.h"
@@ -78,41 +79,33 @@ enum CommandId : WORD {
     IDC_LANG_SWEDISH = 1072,
     // Appended after the language group (which must stay contiguous), not
     // next to IDC_CLOSE_DOC: the enum order is free, the ids are not.
-    IDC_CLOSE_SESSION = 1073, // closes BOTH documents
+    IDC_CLOSE_SESSION = 1073, // closes EVERY open document
+    IDC_OPEN_CENTER = 1074,   // Ctrl+Shift+M (M = middle; Ctrl+Alt+letter is
+                              // AltGr territory); switches to three panes
+    // Contiguous: CheckMenuRadioItem spans the pane-count radio group.
+    IDC_PANES_TWO = 1075,
+    IDC_PANES_THREE = 1076,
+    IDC_SWAP_PANES_BACK = 1077, // Shift+F8: reverse rotation (accelerator-only,
+                                // same as F8 with two panes)
     // Control ids live in a separate >= 2000 space so they can never collide
     // with command dispatch: 2001 page box, 2100+ Options dialog, 2201 goto
     // dialog, 2300+ the menu-band toolbar and its buttons (MenuBand.h), 2400+
     // the sync-points dialog.
 };
 
-// SyncTeX forward search request, exchanged between processes via
-// WM_COPYDATA: the sender is a short-lived second instance spawned by the
-// editor (LaTeX Workshop). Payload = ForwardSearchBlob followed by the tex
-// then pdf characters, no NUL terminators. Arrives from arbitrary processes:
-// the receiver validates sizes exactly.
+// SyncTeX forward search request, exchanged between processes over the XML
+// WM_COPYDATA protocol (util/IpcXml.h): the sender is a short-lived second
+// instance spawned by the editor (LaTeX Workshop).
 struct ForwardSearchRequest {
     std::wstring tex;
     int line = 0; // 1-based
     std::wstring pdf;
 };
 
-constexpr ULONG_PTR kCdForwardSearch = 0x50535646; // 'PSVF'
-constexpr ULONG_PTR kCdOpenDocument = 0x50535644;  // 'PSVD' (-open-left/-open-right handoff)
+// Pane child ids, addressed by the E2E scripts through GetDlgItem.
+inline constexpr int kPaneChildIdBase = 100;
 
-#pragma pack(push, 1)
-struct ForwardSearchBlob {
-    uint32_t line;   // 1-based
-    uint32_t texLen; // wchar_t count
-    uint32_t pdfLen; // wchar_t count
-};
-// Explorer-verb handoff payload: blob followed by pathLen wchar_t, no NUL.
-struct OpenDocumentBlob {
-    uint32_t side;    // 0 = left pane, 1 = right
-    uint32_t pathLen; // wchar_t count
-};
-#pragma pack(pop)
-
-// Top-level frame: two PaneWindows separated by a draggable splitter.
+// Top-level frame: the active PaneWindows separated by draggable splitters.
 class MainWindow {
 public:
     static constexpr PCWSTR kClassName = L"PsvMainWindow";
@@ -120,7 +113,8 @@ public:
 
     ~MainWindow();
 
-    bool Create(HINSTANCE hinst, int nCmdShow, std::wstring leftFile, std::wstring rightFile,
+    // files is indexed by PaneSlot: an empty entry leaves that pane empty.
+    bool Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> files,
                 std::optional<ForwardSearchRequest> forward = std::nullopt);
     HWND Hwnd() const { return m_hwnd; }
 
@@ -138,12 +132,22 @@ private:
     LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
 
     void Layout();
-    RECT SplitterRect() const;
+    // Splitters are indexed 0..ActiveSplitters()-1, left to right: splitter i
+    // sits between the i-th and (i+1)-th ACTIVE pane.
+    int ActiveSplitters() const { return m_paneCount - 1; }
+    RECT SplitterRect(int index) const;
     RECT OutlineDividerRect() const;
-    void SetSplitRatioFromX(int x);
+    void SetSplitRatioFromX(int index, int x);
+    void ResetSplitRatios(); // equal shares (splitter double-click)
+    // Applies the per-mode pane shares to the strip [x0, x0+width), writing the
+    // splitter positions; returns the width of each active pane by slot.
+    PerPane<int> ComputePaneWidths(int x0, int width);
+    void SetPaneCount(int count);   // creates/destroys the centre pane
+    void ConfigurePane(int slot);   // handlers + options, shared by Create and the mode switch
+    int SyncStatusPart() const;     // index of the status part holding the sync summary
     void SetOutlineWidthFromX(int x);
     void FitOutlineToContent();
-    void OpenDocumentDialog(bool rightPane);
+    void OpenDocumentDialog(int slot);
     void UpdateTheme();
     void UpdateTitle();
     PaneWindow* FocusedPane() const;
@@ -171,12 +175,15 @@ private:
     void TryRestoreSavedPoints();  // reinstall a remembered map when a pair opens
     void ShowSyncPointsDialog();
     static INT_PTR CALLBACK SyncPointsDlgProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam);
-    BOOL HandleOpenDocumentCopyData(const COPYDATASTRUCT& cds);
+    BOOL HandleCopyData(const COPYDATASTRUCT& cds); // the XML IPC receiver (util/IpcXml.h)
     void RebuildMruMenus();
     void RecordMruFile(const std::wstring& path);
-    void RecordMruPair(const std::wstring& left, const std::wstring& right);
+    void RecordMruSession(); // the documents currently open together
     void OpenMruFile(size_t index);
-    void OpenMruPair(size_t index);
+    void OpenMruSession(size_t index);
+    // Paths of the active panes, and (optionally) which slots they are; empty
+    // when any active pane has no document.
+    MruSession CurrentSession(std::vector<int>* slots = nullptr) const;
     void CreateToolbar(HINSTANCE hinst);
     void RebuildToolbarIcons();
     void RebuildToolbarInBand();       // recreate the toolbar inside its rebar band
@@ -188,7 +195,7 @@ private:
     void ToggleFullScreen();
     void SwitchLanguage(Lang lang);
     void ApplyScrollMode(PaneWindow::ScrollMode mode);
-    void SwapPanes();
+    void SwapPanes(bool reverse); // rotation of the active slots; reverse = Shift+F8
     void RouteForwardSearch(ForwardSearchRequest req);
     void LaunchInverseSearch(const SyncTexIndex::InverseHit& hit);
     void ShowStatusMessage(StrId id);
@@ -203,9 +210,29 @@ private:
     void UpdateOutlineSidebar(PaneWindow* pane);
     static bool IsSystemDark();
 
+    // Panes live in FIXED slots (PaneSlots.h); only the active ones exist.
+    // Every "do it to all panes" walk is `for slot ... if (SlotOn(slot))`,
+    // which visits them in visual order.
+    int m_paneCount = 2;
+    bool SlotOn(int slot) const { return SlotActive(slot, m_paneCount); }
+    PaneWindow* Pane(int slot) const { return m_panes[static_cast<size_t>(slot)].get(); }
+    int SlotOfPane(const PaneWindow* pane) const {
+        for (int s = 0; s < kPaneSlots; ++s)
+            if (Pane(s) == pane)
+                return s;
+        return -1;
+    }
+    bool AllPanesHaveDocuments() const;      // every active pane holds a document
+    bool AllPanesHaveOutlines() const;       // ... and none of the outlines is empty
+    // Visits the active panes in visual order.
+    template <typename F> void ForEachPane(F&& fn) const {
+        for (int s = 0; s < kPaneSlots; ++s)
+            if (SlotOn(s) && Pane(s))
+                fn(*Pane(s));
+    }
+
     DxResources m_dx;
-    std::unique_ptr<PaneWindow> m_left;
-    std::unique_ptr<PaneWindow> m_right;
+    PerPane<std::unique_ptr<PaneWindow>> m_panes;
     std::unique_ptr<SyncController> m_sync;
     HWND m_hwnd = nullptr;
     HWND m_lastPaneFocus = nullptr; // pane holding focus when the frame deactivates
@@ -213,16 +240,21 @@ private:
     // Submenus of the File popup, repopulated in place by RebuildMruMenus;
     // owned (and destroyed) by the menu bar they hang under.
     HMENU m_mruFilesMenu = nullptr;
-    HMENU m_mruPairsMenu = nullptr;
-    std::vector<std::wstring> m_mruFiles; // most recent first
-    std::vector<MruPair> m_mruPairs;      // most recent first
-    // Per-pair sync-point memory ([sync-points]): manual points serialized,
+    HMENU m_mruSessionsMenu = nullptr;
+    std::vector<std::wstring> m_mruFiles;  // most recent first
+    std::vector<MruSession> m_mruSessions; // most recent first
+    // Per-session sync-point memory ([sync-points]): manual points serialized,
     // generated ones re-derived from the bookmarks via the hadAuto flag.
     std::vector<SavedSyncPoints> m_savedPoints;
     HWND m_rebar = nullptr; // hosts the menu band, the command toolbar, the page box
     MenuBand m_menuBand;
     HWND m_toolbar = nullptr;
     HWND m_pageBox = nullptr;             // editable current-page box (rebar band 2)
+    // Pane callbacks live here, not as locals of Create: a pane created later
+    // (the mode switch) has to be wired with the very same handlers.
+    PaneWindow::ViewChangedHandler m_onViewChanged;
+    PaneWindow::InverseSearchHandler m_onInverseSearch;
+    PaneWindow::SearchStatusHandler m_onSearchStatus;
     PaneWindow* m_activePane = nullptr;   // last pane that had focus (page box target;
                                           // FocusedPane() falls back to left while the
                                           // box itself owns the focus)
@@ -262,30 +294,30 @@ private:
     // Vertical band left for the panes between the toolbar and the status bar.
     int m_contentTop = 0;
     int m_contentBottom = 0;
-    std::wstring m_statusText[7]; // last SB_SETTEXT per part: skip no-op repaints
+    // Last SB_SETTEXT per part (skip no-op repaints). Sized by the pane count:
+    // 7 parts with two panes, 10 with three.
+    std::vector<std::wstring> m_statusText;
 
     // Last DocumentOpened path per pane: an unchanged path = auto-reload, the
     // cue to re-derive the bookmark sync points from the fresh outline.
-    std::wstring m_lastDocLeft;
-    std::wstring m_lastDocRight;
+    PerPane<std::wstring> m_lastDoc;
     bool m_showAlignmentGaps = true; // "Show Alignment Gaps" toggle ([sync] showGaps)
     bool m_showAnchors = true;       // Options: anchor glyphs ([sync] showAnchors)
     bool m_showTicks = true;         // Options: scrollbar tick strip ([sync] showTicks)
     bool m_showHeader = true;        // Options: per-pane header strip ([window] header)
     bool m_headerShowPath = false;   // Options: header shows the path ([window] headerPath)
     uint64_t m_gapsEpoch = 0;        // bumped per ApplyAlignmentGaps; stamps both panes
-    // Sync map parked across a pane swap: mirrored (left/right exchanged per
-    // point; the coordinates co-increase, so the order survives), captured
-    // BEFORE the reopen storm (each swap side fires DocumentOpened, clearing
-    // the live map), reinstalled when BOTH panes settled on the two expected
-    // swapped paths. Consumed on install; discarded on any mismatch (failed
-    // open, close, interleaved open of another file, a second swap).
+    // Sync map parked across a pane swap: permuted per point (the swap is a
+    // rotation of the active slots, and since the coordinates co-increase the
+    // order survives), captured BEFORE the reopen storm (each swapped pane
+    // fires DocumentOpened, clearing the live map), reinstalled when EVERY
+    // active pane settled on its expected swapped path. Consumed on install;
+    // discarded on any mismatch (failed open, close, interleaved open of
+    // another file, a second swap).
     struct ParkedSwapMap {
         bool pending = false;
-        bool leftSettled = false;
-        bool rightSettled = false;
-        std::wstring expectLeft;
-        std::wstring expectRight;
+        PerPane<bool> settled{};
+        PerPane<std::wstring> expect;
         std::vector<SyncPoint> points;
     };
     ParkedSwapMap m_swapMap;
@@ -295,17 +327,24 @@ private:
     // request landing mid-reload).
     std::wstring m_synctexInverse;
     std::optional<ForwardSearchRequest> m_parkedForward;
-    float m_splitRatio = 0.5f;
-    int m_splitterX = 0; // left edge of the splitter band, client px
-    // Two draggable dividers share the mouse handlers: the pane splitter and
-    // the outline sidebar divider.
+    // Pane shares of the strip. The two-pane and three-pane splits are stored
+    // SEPARATELY on purpose: reusing one value would drag a 50/50 two-pane
+    // split into the three-pane layout as 50/33/17 on the first switch.
+    float m_splitRatio = 0.5f;                      // two panes: left share
+    float m_splitRatio3Left = 1.0f / 3.0f;          // three panes: left share
+    float m_splitRatio3Center = 1.0f / 3.0f;        // three panes: centre share
+    PerPane<int> m_splitterX{}; // left edge of splitter i, client px
+    // Draggable dividers share the mouse handlers: the pane splitters and the
+    // outline sidebar divider.
     enum class DragTarget { None, PaneSplitter, OutlineDivider };
     DragTarget m_drag = DragTarget::None;
+    int m_dragSplitter = 0; // which splitter DragTarget::PaneSplitter refers to
     int m_outlineWidthDip = 260; // persisted; the divider drag updates it
     int m_sidebarPx = 0;         // outline width in device px, as laid out (0 = hidden)
     bool m_restoreSession = true;
     int m_wheelLines = 0; // continuous-scroll lines per wheel notch; 0 = system
     struct Defaults {
+        int paneCount = 2; // what a launch WITHOUT session restore starts with
         PaneWindow::ScrollMode scrollMode = PaneWindow::ScrollMode::Continuous;
         PaneWindow::ZoomMode zoomMode = PaneWindow::ZoomMode::FitPage;
         bool scrollSync = true;
@@ -317,8 +356,7 @@ private:
     // Last known good pane sessions (DPI-rescaled at load): SaveSession falls
     // back to these for panes that never fully opened, so closing while a
     // document is opening/unreachable does not wipe it from settings.ini.
-    PaneSettings m_fallbackLeft;
-    PaneSettings m_fallbackRight;
+    PerPane<PaneSettings> m_fallback;
 
     // Find bar (overlay child hosting the standard controls)
     HWND m_findBar = nullptr;

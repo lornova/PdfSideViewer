@@ -13,6 +13,10 @@ bool SameName(const std::wstring& name, const wchar_t* other, DWORD otherBytes) 
 
 void FileWatcher::Watch(HWND notify, UINT msg, const std::wstring& filePath) {
     Stop();
+    // FIRST, before any early return: even a FAILED (re)watch must invalidate
+    // the previous watch's already-posted notifications, or a stale post
+    // would still match the current generation and reload the new document.
+    ++m_generation;
 
     wchar_t full[1024];
     const DWORD n = GetFullPathNameW(filePath.c_str(), ARRAYSIZE(full), full, nullptr);
@@ -29,7 +33,7 @@ void FileWatcher::Watch(HWND notify, UINT msg, const std::wstring& filePath) {
     if (!m_stopEvent)
         return;
     m_thread = std::thread(&FileWatcher::ThreadProc, this, absolute.substr(0, sep),
-                           absolute.substr(sep + 1));
+                           absolute.substr(sep + 1), m_generation);
 }
 
 void FileWatcher::Stop() {
@@ -43,7 +47,7 @@ void FileWatcher::Stop() {
     }
 }
 
-void FileWatcher::ThreadProc(std::wstring dir, std::wstring fileName) {
+void FileWatcher::ThreadProc(std::wstring dir, std::wstring fileName, UINT generation) {
     // Watching the DIRECTORY, not the file: LaTeX toolchains delete, recreate
     // and rename their output, and a handle to the file itself would go stale
     // on the first such cycle.
@@ -104,7 +108,7 @@ void FileWatcher::ThreadProc(std::wstring dir, std::wstring fileName) {
             }
         }
         if (changed)
-            PostMessageW(m_notify, m_msg, 0, 0);
+            PostMessageW(m_notify, m_msg, generation, 0);
     }
 
     CloseHandle(ioEvent);

@@ -19,13 +19,19 @@ std::optional<std::vector<int>> ParseOutlineNumbering(const std::wstring& title,
 // "1.2.3" display form of a parsed key (used as the sync-point label).
 std::wstring FormatOutlineNumbering(const std::vector<int>& key);
 
-// Pairs of outline indices (left, right) that appear in BOTH outlines, either
-// by numeric key ("1.2 Title") or by canonical title (unnumbered sections,
-// with common front/back matter names matched across Italian, English, German,
-// French and Hungarian; title pairs additionally require the SAME outline
-// depth, so a top-level section never anchors to a nested homonym). First
-// occurrence per key and per side wins; the result follows the left outline's
-// document order.
-std::vector<std::pair<int, int>> MatchOutlineNumberings(
-    const std::vector<Document::OutlineItem>& left,
-    const std::vector<Document::OutlineItem>& right);
+// Rows of outline indices, one column per input outline, for every key that
+// appears in ALL of them - either a numeric key ("1.2 Title") or a canonical
+// title (unnumbered sections, with common front/back matter names matched
+// across the fourteen UI languages; title matches additionally require the
+// SAME outline depth, so a top-level section never anchors to a nested
+// homonym). First occurrence per key and per outline wins; the result follows
+// the FIRST outline's document order.
+//
+// This is a JOIN on a document-independent key, so more outlines simply means
+// a smaller intersection, not a different algorithm; with two outlines the
+// result is identical to the pairwise version this replaces. Requiring every
+// outline to carry the key is what keeps the tuples usable as hard anchors: a
+// row with a missing coordinate could satisfy neither the strictly-increasing
+// invariant nor the alignment-gap arithmetic.
+std::vector<std::vector<int>> MatchOutlineNumberings(
+    const std::vector<const std::vector<Document::OutlineItem>*>& outlines);

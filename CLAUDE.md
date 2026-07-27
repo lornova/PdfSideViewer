@@ -83,7 +83,9 @@ Render / TextPage / Links / Search) with urgent jobs pushed to the front. Result
 heap-allocated structs posted to the pane HWND via `WM_PSV_*` (receiver takes ownership).
 Selection/link hit-testing and search highlighting run UI-side on plain-C++ models extracted by the
 worker, never on fz objects. Each pane also owns a `util/FileWatcher` thread (auto-reload) watching
-the document's parent directory and posting `WM_PSV_FILE_CHANGED` (no payload, outside the drain
+the document's parent directory and posting `WM_PSV_FILE_CHANGED` (wParam = the watch GENERATION,
+bumped per Watch: a post from the previous watch of the same HWND must not read as a change to the
+new document, and joining the old thread cannot retract it; no heap payload, outside the drain
 range); debounce, deny-write stability probe and the reload itself (via the view-preserving
 `OpenDocumentWithView`) are UI-side.
 
@@ -97,26 +99,92 @@ fit from the client width feeds back into scrollbar visibility and recurses WM_S
 Sync (`view/SyncController.*`) is the product's reason to exist (PDF Architect fails exactly here):
 never degrade it to pixel offsets, and test changes with different page formats and different zoom
 levels per pane. Positions are exchanged in page units (pageIndex + fraction at viewport center),
-never pixels; the pairing is a delta anchor captured at lock time, optionally generalized by a list
-of WinMerge-style sync points (WHOLE-page pairs, strictly increasing in both coordinates; empty map
+never pixels; the pairing is per-slot delta anchors captured at lock time, relative to the
+reference slot (the first JOINED pane: one whose DocumentOpened the controller has processed - a
+restoring pane holds a document but must not anchor, follow or lead until its view settles) and
+confined to the joined subset, so an empty pane never suspends the loaded panes' sync; the
+anchors are optionally generalized by a list of WinMerge-style sync points (WHOLE-page
+tuples, one page per slot, strictly increasing in EVERY active coordinate; empty map
 = bit-identical plain-anchor behavior; Alt and re-lock recapture ONLY while the map is empty; map
 cleared on every DocumentOpened, auto points re-derived by MainWindow after a same-path reload,
-mirrored across Swap Panes via a parked map). With alignment gaps ON (default, `[sync] showGaps`)
+permuted across Swap Panes via a parked map). With alignment gaps ON (default, `[sync] showGaps`)
 the layouts gain WinMerge-style empty gap slots and sync is IDENTITY on virtual SLOT coordinates
 (the follower scrolls through its gaps); gaps OFF = piecewise-constant integer delta with the
 follower waiting at section ends. PageLayout is slot-based (slot = real page or gap; fit inputs and
 every render/goto/counter consumer stay real-page; persisted scroll offsets are normalized to the
 no-gap space). Every map mutation fires SyncController's map-changed callback; MainWindow rebuilds
-gaps + markers for both panes inside ApplySilently (reentrancy). Auto-generation matches
-hierarchical numeric bookmark keys via `util/OutlineNumbering`.
+gaps + markers for every pane inside ApplySilently (reentrancy); each segment contributes
+max(interior) slots to ALL panes, with the gap silhouettes borrowed from the pane that supplied that
+maximum. Auto-generation matches hierarchical numeric bookmark keys via `util/OutlineNumbering`.
+
+**Pane slots** (`PaneSlots.h`): the frame owns a FIXED array of three slots in visual order
+(`kSlotLeft`, `kSlotCenter`, `kSlotRight`) of which only some are ACTIVE. `m_paneCount` is 2 by
+default (active set {left, right}, centre pane never created) and 3 in the optional three-pane
+mode (`[window] paneCount`, View ▸ Panes, or implicitly from File ▸ Open Centre and from a third
+command-line argument). `SetPaneCount` creates/destroys the centre pane, wires it through the same
+`ConfigurePane` used at startup, and CLEARS the sync map: a point tuple carrying a stale centre
+coordinate would break the all-coordinates monotonicity the gap arithmetic relies on. ORDER is
+load-bearing (a Codex review caught the use-after-free): clear the map FIRST (the empty-map
+recapture walks the controller's CURRENT set, so every pane in it must still be alive), install
+the new set in SyncController, and only THEN destroy the centre pane. Shrinking parks the centre
+session in its fallback and clears `m_lastDoc[center]`; growing REOPENS the park (which also
+re-restores the trio's remembered sync points via the pathChanged flow), Close Session wipes it,
+and it survives restarts because [center] is always read, written while it holds a path, and
+deleted as a section otherwise. Slot indices never move
+when the count changes, which is what keeps the settings sections (`[left]`/`[center]`/`[right]`,
+`kSlotKeys`), the sync-point tuples and the per-slot session/fallback state meaningful across a mode
+switch. Walk panes with `for (slot...) if (SlotOn(slot))` (visual order) or `ForEachPane`; never
+assume two. Everything that names a pane is a PaneSlot: the `-open-*` verbs (an inactive slot
+switches the mode ON, so a verb always lands) and the pane child ids
+(`kPaneChildIdBase + slot`, so left 100, center 101, right 102 - the E2E scripts address them by
+`GetDlgItem`). Second-instance handoffs (Explorer verbs AND forward search) travel as ONE
+versioned XML payload over WM_COPYDATA (`util/IpcXml.*`, dwData 'PSVX', XmlLite on both ends: OS
+component, no COM init, DTD prohibited plus a depth cap on hostile input): the slot is the WORD
+`left`/`center`/`right` (= `kSlotKeys`), never an integer, and an unknown version/command is
+simply UNHANDLED, so the sender cold-starts and a mixed-version handoff degrades to a new window
+instead of mis-slotting. Structural checks (shape, caps, closed vocabulary) live in
+`IpcXml::Parse`; SEMANTIC checks (rooted paths, line range, active-set slot) stay in
+`MainWindow::HandleCopyData`. The ONE exception is the command line's POSITIONAL order, which is Beyond Compare's
+`left right [center]` and therefore needs `kCliSlotOrder` in main.cpp; nothing else may reuse that
+order. The two-pane and three-pane splits are stored SEPARATELY (`splitRatio` vs
+`splitRatio3Left`/`splitRatio3Center`): one shared value would drag a 50/50 split into the
+three-pane layout as 50/33/17 on the first switch. `MatchOutlineNumberings` takes N outlines and returns rows of indices for the
+keys present in ALL of them (a join on a canonical key, so more documents just means a smaller
+intersection; with two it is identical to the pairwise version it replaced). The MRU (`[mru-pairs]`, still that
+section name) and the sync-point memory (`[sync-points]`) are both keyed by the PER-SLOT paths
+(`kSlotKeys`): the centre key is optional, so an entry written before the three-pane mode still
+loads, an empty slot is deleted rather than blanked, and a session's pane count comes back with it.
+Manual points serialize one page per ACTIVE slot ("l:r" or "l:c:r"), and an entry whose arity does
+not match the current arrangement is dropped on restore instead of being misread. `PaneWindow` destroys its own HWND in its destructor (a pane can now die
+while the frame lives on) and clears `m_hwnd` on WM_NCDESTROY.
 
 MainWindow owns the frame, menu bar (incl. MRU submenus: recent files + recent left/right pairs,
 recorded centrally on DocumentOpened, persisted in `[mru-files]`/`[mru-pairs]`), toolbar (Segoe MDL2
 glyph imagelist, `util/GlyphIcons.*`), status bar (page/zoom per pane + sync state), splitter, find
 bar, outline sidebar, fullscreen (F11/Alt+Enter; hides the chrome without touching the persisted
 flags; SaveSession must use the pre-fullscreen placement), session persistence
-(`%APPDATA%\PdfSideViewer\settings.ini`, INI over `WritePrivateProfile*` with a UTF-16 BOM and a
-named mutex), and routes pane `ViewEvent`s to SyncController, the outline, the status bar and the
+(`%APPDATA%\PdfSideViewer\settings.ini`, own UTF-16 INI reader/writer, not the
+`GetPrivateProfile*` APIs: Save serializes the WHOLE file in memory, writes it to a uniquely named
+temp sibling with checked byte counts and swaps it in with ONE same-volume rename
+(`MoveFileExW(REPLACE_EXISTING|WRITE_THROUGH)`, NOT `ReplaceFileW`: that one carries the target's
+ACL/attributes onto the replacement, worthless for a file that inherits the same ACL from the
+profile directory, and buys two documented PARTIAL failure states in which the canonical name is
+deleted or renamed; a rename has none, so no backup and no startup recovery are needed - and if a
+provider ever left the canonical name missing, the complete temp is kept for a MANUAL rename,
+never adopted automatically (a crash-truncated temp is indistinguishable from a whole one) and
+only until some run recreates settings.ini: forensic residue, not a recovery slot;
+declared security model: the settings DIRECTORY is the boundary, so a per-file DACL or EFS state
+does NOT survive a save, and since `[synctex] inverse` is trusted input that reaches
+ShellExecute/CreateProcess, whoever can write the directory can run code as the user - which is
+why an ELEVATED instance refuses inverse search outright and the manifest pins asInvoker),
+cleanup deletes only
+`settings.ini.<pid>.<counter>.tmp` in canonical spelling, ours on sight and a foreign one only
+after an hour, and Load reads the whole file through ONE handle - dozens of independent profile reads are individually coherent but can
+straddle a concurrent swap, and the hybrid would be re-persisted; writers serialize best-effort
+via a lock file, `util/ScopedFileLock.h`, chosen over a named mutex: profile ACL, crosses RDP
+sessions, no predictable kernel name to pre-create; semantics stay last-close-wins, and a
+DOWNGRADE round-trip drops keys the older build does not know), and routes pane
+`ViewEvent`s to SyncController, the outline, the status bar and the
 menu/toolbar checked state (`UpdateCommandUi`).
 
 ## Invariants that came from real bugs (see also docs/DESIGN.md)
@@ -174,5 +242,8 @@ menu/toolbar checked state (`UpdateCommandUi`).
   dialog, 2201 goto dialog, 2300+ menu band, 2400+ sync points dialog) so they can never collide
   with command dispatch.
 - Session settings are versionless: add keys with safe defaults, never repurpose existing ones.
-  `[defaults]` holds the new-document defaults (scroll mode, zoom mode, sync locks), applied when
-  session restore is off and to every fresh OpenDocument.
+  `[defaults]` holds the new-document defaults (pane count, scroll mode, zoom mode, sync locks),
+  applied when session restore is off and to every fresh OpenDocument. `[defaults] paneCount` and
+  `[window] paneCount` are NOT the same thing: the first is what a launch without session restore
+  starts with (and what File ▸ Close Session returns to, in both directions), the second is the
+  arrangement the last session happened to have.

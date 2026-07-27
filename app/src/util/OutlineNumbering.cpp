@@ -599,56 +599,91 @@ std::wstring FormatOutlineNumbering(const std::vector<int>& key) {
     return text;
 }
 
-std::vector<std::pair<int, int>> MatchOutlineNumberings(
-    const std::vector<Document::OutlineItem>& left,
-    const std::vector<Document::OutlineItem>& right) {
-    // Two channels, first occurrence wins per key and per side: numbered
-    // titles pair by numeric key; unnumbered ones pair by canonical title key
+std::vector<std::vector<int>> MatchOutlineNumberings(
+    const std::vector<const std::vector<Document::OutlineItem>*>& outlines) {
+    // Two channels, first occurrence wins per key and per outline: numbered
+    // titles join by numeric key; unnumbered ones join by canonical title key
     // ("Sommario", "Indice analitico", or a cross-language class id such as
     // "Indice"/"Contents" -> "toc") AT THE SAME OUTLINE DEPTH. Numeric keys
     // carry their own hierarchy ("1.2" can only equal "1.2"), but canonical
     // titles do not: without the depth guard a top-level "Introduzione" can
-    // pair with a chapter's nested unnumbered "Introduction" and, if the pair
+    // pair with a chapter's nested unnumbered "Introduction" and, if the match
     // happens to stay monotonic, become an authoritative anchor that drags a
     // whole segment to unrelated pages. Real translations share the outline
     // structure, so requiring equal depth costs nothing. Appendix sub-items
     // ("A Foo"/"B Bar" under an "Appendici"/"Appendices"/"Függelékek"
     // heading) join the numeric channel via their language-neutral letter.
-    // Out-of-order accidental pairs die in the monotonicity filter downstream.
-    const std::vector<bool> rightAppendix = AppendixChildFlags(right);
-    const std::vector<bool> leftAppendix = AppendixChildFlags(left);
+    // Out-of-order accidental matches die in the monotonicity filter
+    // downstream.
+    std::vector<std::vector<int>> matches;
+    if (outlines.size() < 2)
+        return matches;
+    for (const auto* outline : outlines)
+        if (!outline || outline->empty())
+            return matches; // one empty outline empties the intersection
+
     const auto depthOf = [](const Document::OutlineItem& item) {
         return item.depth < 0 ? 0 : item.depth; // same clamp as AppendixChildFlags
     };
-    std::map<std::vector<int>, int> rightByKey;
-    std::map<std::pair<int, std::wstring>, int> rightByTitle;
-    for (size_t i = 0; i < right.size(); ++i) {
-        if (auto key = ParseOutlineNumbering(right[i].title, rightAppendix[i])) {
-            rightByKey.emplace(std::move(*key), static_cast<int>(i));
-        } else if (std::wstring t = CanonicalTitleKey(right[i].title); !t.empty()) {
-            rightByTitle.emplace(std::pair{depthOf(right[i]), std::move(t)},
-                                 static_cast<int>(i));
+    std::vector<std::vector<bool>> appendix;
+    appendix.reserve(outlines.size());
+    for (const auto* outline : outlines)
+        appendix.push_back(AppendixChildFlags(*outline));
+
+    // Lookup tables for every outline BUT the first, which is walked in
+    // document order below and gives the result its ordering.
+    struct Lookup {
+        std::map<std::vector<int>, int> byKey;
+        std::map<std::pair<int, std::wstring>, int> byTitle;
+    };
+    std::vector<Lookup> lookup(outlines.size());
+    for (size_t n = 1; n < outlines.size(); ++n) {
+        const auto& items = *outlines[n];
+        for (size_t i = 0; i < items.size(); ++i) {
+            if (auto key = ParseOutlineNumbering(items[i].title, appendix[n][i]))
+                lookup[n].byKey.emplace(std::move(*key), static_cast<int>(i));
+            else if (std::wstring t = CanonicalTitleKey(items[i].title); !t.empty())
+                lookup[n].byTitle.emplace(std::pair{depthOf(items[i]), std::move(t)},
+                                          static_cast<int>(i));
         }
     }
-    std::vector<std::pair<int, int>> matches;
-    std::set<std::vector<int>> leftSeen;
-    std::set<std::pair<int, std::wstring>> leftSeenTitles;
-    for (size_t i = 0; i < left.size(); ++i) {
-        if (auto key = ParseOutlineNumbering(left[i].title, leftAppendix[i])) {
-            const auto it = rightByKey.find(*key);
-            if (it == rightByKey.end())
+
+    const auto& first = *outlines[0];
+    std::set<std::vector<int>> seenKeys;
+    std::set<std::pair<int, std::wstring>> seenTitles;
+    std::vector<int> row(outlines.size(), 0);
+    for (size_t i = 0; i < first.size(); ++i) {
+        if (auto key = ParseOutlineNumbering(first[i].title, appendix[0][i])) {
+            bool inAll = true;
+            for (size_t n = 1; n < outlines.size() && inAll; ++n) {
+                const auto it = lookup[n].byKey.find(*key);
+                if (it == lookup[n].byKey.end())
+                    inAll = false;
+                else
+                    row[n] = it->second;
+            }
+            if (!inAll)
+                continue; // absent from one outline: no anchor to place
+            if (!seenKeys.insert(std::move(*key)).second)
+                continue; // duplicate key in the first outline: first wins
+            row[0] = static_cast<int>(i);
+            matches.push_back(row);
+        } else if (std::wstring t = CanonicalTitleKey(first[i].title); !t.empty()) {
+            std::pair<int, std::wstring> dt{depthOf(first[i]), std::move(t)};
+            bool inAll = true;
+            for (size_t n = 1; n < outlines.size() && inAll; ++n) {
+                const auto it = lookup[n].byTitle.find(dt);
+                if (it == lookup[n].byTitle.end())
+                    inAll = false;
+                else
+                    row[n] = it->second;
+            }
+            if (!inAll)
                 continue;
-            if (!leftSeen.insert(std::move(*key)).second)
-                continue; // duplicate key on the left: first occurrence wins
-            matches.emplace_back(static_cast<int>(i), it->second);
-        } else if (std::wstring t = CanonicalTitleKey(left[i].title); !t.empty()) {
-            std::pair<int, std::wstring> dt{depthOf(left[i]), std::move(t)};
-            const auto it = rightByTitle.find(dt);
-            if (it == rightByTitle.end())
+            if (!seenTitles.insert(std::move(dt)).second)
                 continue;
-            if (!leftSeenTitles.insert(std::move(dt)).second)
-                continue;
-            matches.emplace_back(static_cast<int>(i), it->second);
+            row[0] = static_cast<int>(i);
+            matches.push_back(row);
         }
     }
     return matches;

@@ -1,9 +1,10 @@
 # PdfSideViewer — Design Document
 
-*Status: approved design, pre-implementation. Last updated: 2026-07-09.*
+*Status: approved design, pre-implementation. Last updated: 2026-07-26.*
 
 A fast, fully native Windows 10/11 desktop application whose sole purpose is to display **two PDF
-documents side by side** in one window, with optional synchronized scrolling and zooming.
+documents side by side** in one window (three in the optional three-pane mode), with optional
+synchronized scrolling and zooming.
 Open source, released under the GPLv3 (see [Licensing](#3-licensing)).
 
 No .NET, no WPF/WinForms, no cross-platform toolkits. Pure Win32 + Direct2D, C++20, MSVC.
@@ -37,11 +38,13 @@ current state of the art, not just matches it.
 ### Goals
 
 - Instant startup, minimal memory footprint, crisp rendering at any DPI and zoom.
-- Two independent panes, each a full PDF viewer: continuous vertical layout, smooth scroll,
-  zoom-to-cursor, text search with highlights, text selection, clickable links.
+- Two independent panes (three in the optional three-pane mode), each a full PDF viewer:
+  continuous vertical layout, smooth scroll, zoom-to-cursor, text search with highlights, text
+  selection, clickable links.
 - Synchronized scrolling with a user-controlled offset (the key differentiator), plus optional
   synchronized zoom.
-- Open two files from the command line, drag & drop, or per-pane open buttons; restore last session.
+- Open up to three files from the command line, drag & drop, or per-pane open buttons; restore
+  last session.
 
 ### Non-goals (v1)
 
@@ -54,7 +57,7 @@ current state of the art, not just matches it.
 ## 2. Technology choices
 
 | Area | Choice | Rejected alternatives |
-|---|---|---|
+| --- | --- | --- |
 | PDF engine | **MuPDF 1.28.x**, statically linked | PDFium (equal speed, slightly lower fidelity; permissive license not needed here); Windows.Data.Pdf (raster-only: no text layer, search, selection, links, outline) |
 | UI / rendering | **Pure Win32 + Direct2D** on a DXGI flip-model swapchain | WinUI 3 (no PDF control, heavy runtime, startup/memory penalties Microsoft is still remediating; buys nothing for an app that is essentially two custom canvases) |
 | Language / toolchain | C++20, MSVC v143, Visual Studio 2022, x64 (ARM64 later) | — |
@@ -115,9 +118,9 @@ used by only one thread at a time; a completed `fz_display_list` is immutable an
 from several threads simultaneously; multi-threaded use requires a `fz_locks_context` supplied at
 base-context creation.
 
-```
-UI thread                     Pane worker (x2, one per document)         Render pool (shared, 2..4)
-─────────                     ──────────────────────────────────         ──────────────────────────
+```text
+UI thread                     Pane worker (one per document)             Render pool (shared, 2..4)
+─────────                     ──────────────────────────────             ──────────────────────────
 Win32 message loop            owns fz_document exclusively               fz_clone_context each
 never calls MuPDF             load page → fz_display_list                fz_run_display_list
 draws cached ID2D1Bitmaps     stext page, links, outline, search         → fz_pixmap (BGRA)
@@ -129,7 +132,7 @@ posts RenderRequests          (all document-touching calls)              fz_cook
   `fz_register_document_handlers` once at startup.
 - **Per pane**: one worker thread owns the `fz_document` and everything derived from it (page
   loading, display-list recording, `fz_stext_page` extraction, link/outline loading, search).
-  The two panes never contend except on the shared store locks.
+  The panes never contend except on the shared store locks.
 - **Render pool**: rasterizes display lists into pixmaps on cloned contexts. Every render carries a
   `fz_cookie`; scrolling or zooming past a pending request sets `cookie->abort`.
 - Results are handed to the UI thread via `PostMessage` + a lock-free handoff slot; the UI thread
@@ -142,19 +145,52 @@ optimization step once tiles land (M2), not a prerequisite.
 
 ### 4.2 Components
 
-```
+```text
 MainWindow (frame, menu bar, toolbar, status bar, accelerators, find bar, fullscreen)
- ├── Splitter (draggable vertical divider, double-click = 50/50)
- ├── PaneWindow (left)  ──┐   child HWND: input, scrollbars, D2D target
- ├── PaneWindow (right) ──┤
- │     each owns:         │
+ ├── Splitters (one draggable vertical divider per pane boundary, double-click = equal shares)
+ ├── PaneWindow (left)   ──┐   child HWND: input, scrollbars, D2D target
+ ├── PaneWindow (centre) ──┤   optional, three-pane mode only (see pane slots below)
+ ├── PaneWindow (right)  ──┤
+ │     each owns:          │
  │     Document          engine wrapper: open/auth, page count/sizes, display lists, stext
  │     PageLayout        prefix-sum page offsets in virtual space, per zoom/rotation
  │     ViewState         scroll offset, zoom (incl. fit-width/fit-page), rotation
- ├── RenderCache (shared) bitmap cache + request queue, serves both panes
- ├── SyncController      mediates the two ViewStates
+ ├── RenderCache (shared) bitmap cache + request queue, serves every pane
+ ├── SyncController      mediates the active panes' ViewStates
  └── SearchController    per-pane search state, background whole-doc scan
 ```
+
+**Pane slots** (`PaneSlots.h`): the frame owns a FIXED array of three pane slots in visual order
+(`kSlotLeft`, `kSlotCenter`, `kSlotRight`), of which only a subset is ACTIVE: the two-pane
+default is the active set {left, right} (the centre pane is never created), and the optional
+three-pane mode (`[window] paneCount`, View ▸ Panes, File ▸ Open Centre, a third command-line
+file, a three-document Recent Sessions entry or a three-file drop) activates all three. Slot
+indices never move when the count changes, which is what keeps everything keyed by slot
+meaningful across a mode switch with no remapping or migration: the settings sections
+(`[left]`/`[center]`/`[right]`, `kSlotKeys`), the sync-point tuples, the per-slot
+session/fallback state, the pane child ids (`kPaneChildIdBase + slot`, so left 100, centre 101,
+right 102 — the E2E scripts address panes via `GetDlgItem`) and the `-open-*` verb payloads (the
+slot travels as the word `left`/`center`/`right` in the XML IPC payload, see 4.4). The ONE
+exception is the command line's POSITIONAL order, which is Beyond Compare's `left right
+[center]` and therefore needs `kCliSlotOrder` in main.cpp; nothing else may reuse that order.
+Code walks the panes with "for each slot, if active" (visual order) and never assumes two.
+`SetPaneCount` creates/destroys the centre pane, wiring it through the same `ConfigurePane` used
+at startup, and its ORDER is load-bearing (a use-after-free was caught in review): clear the
+sync map FIRST — emptying a non-empty map recaptures the plain anchors by walking the
+controller's CURRENT pane set, so every pane in it must still be alive — then install the new
+set in `SyncController`, and only THEN destroy the centre pane (`PaneWindow` tears its own HWND
+down in its destructor and clears the handle on `WM_NCDESTROY`: a pane can die while the frame
+lives on). Shrinking parks the centre session in its per-slot fallback and clears the centre's
+last-opened path; growing REOPENS the park, and the `DocumentOpened` this fires also re-restores
+the trio's remembered sync points through the path-changed flow. The park survives restarts
+because the `[center]` section is always read, written while it holds a path, and deleted as a
+section otherwise; File ▸ Close Session wipes the session fallbacks of ALL three slots
+unconditionally (a parked or never-opened document must not resurrect) and returns the
+arrangement to the configured default (`[defaults] paneCount` — deliberately distinct from
+`[window] paneCount`, which is the arrangement the last session happened to have). The two-pane
+and three-pane splits are stored SEPARATELY (`splitRatio` vs
+`splitRatio3Left`/`splitRatio3Center`): one shared value would drag a 50/50 split into the
+three-pane layout as 50/33/17 on the first switch.
 
 **UI chrome** (all programmatic, no dialog/menu/rebar resources): everything above the panes
 lives in ONE `ReBarWindow32` row with three locked bands (no grippers, fixed order): band 0 is
@@ -170,8 +206,8 @@ resize and wrap bands onto extra rows; order/width/breaks persist as `[window] r
 also carries IE's three toolbar TEXT OPTIONS verbatim ("Show text labels" below the icons,
 "Selective text on right", "No text labels"; persisted as `[window] toolbarText` 1/2/0):
 below = a plain toolbar with per-button strings, selective = `TBSTYLE_LIST` +
-`TBSTYLE_EX_MIXEDBUTTONS` with `BTNS_SHOWTEXT` only on the primary actions (open left/right,
-from bookmarks, swap) - exactly IE's mechanics. `TBSTYLE_LIST` cannot be flipped on a live
+`TBSTYLE_EX_MIXEDBUTTONS` with `BTNS_SHOWTEXT` only on the primary actions (open
+left/centre/right, from bookmarks, swap) - exactly IE's mechanics. `TBSTYLE_LIST` cannot be flipped on a live
 toolbar, so a mode (or language) change recreates the toolbar and re-childs the band in place
 (`RebuildToolbarInBand`, by `RBBIM_ID`); the icon-only 24px button pin applies only in mode 0
 (labels size their own buttons via `BTNS_AUTOSIZE` + `TB_SETMAXTEXTROWS`). Defaults: locked,
@@ -187,16 +223,19 @@ and paints nothing beneath them) provides the exit. The menu band clips
 into its own chevron popup listing the hidden top-level menus. Ownership split: MainWindow owns the `HMENU` (built by
 `BuildMenuBar`, NEVER attached to the window) and every `WM_COMMAND`; MenuBand owns
 presentation and the modal tracking loop (`TrackPopupMenuEx` WITHOUT `TPM_RETURNCMD`, so the
-popups post ordinary `WM_COMMAND`s and the dispatch is untouched). The status bar has SEVEN
-parts mirroring the pane geometry: left-pane page/zoom on the left half, right-pane page/zoom
-anchored to the right half, the sync summary centered astride the midline, two borderless
-fillers absorbing the slack; page parts show the PDF /PageLabels label when it differs from
+popups post ordinary `WM_COMMAND`s and the dispatch is untouched). The status bar mirrors the
+pane geometry: with two panes, SEVEN parts — left-pane page/zoom on the left half, right-pane
+page/zoom anchored to the right half, the sync summary centered astride the midline, two
+borderless fillers absorbing the slack; with three panes, page/zoom cells under each pane,
+anchored at the splitter positions, and the sync summary after the right pane's cells (the
+midline it used to straddle is covered by the centre pane). Page parts show the PDF
+/PageLabels label when it differs from
 the ordinal ("ix (9/314)"), via the single `PaneWindow::FormatPageText` formatter shared with
 the scrollbar-drag tooltip and the go-to flows. `MainWindow::Layout()` reserves the rebar
 height (`RB_GETBARHEIGHT`) on top and the status band at the bottom, then partitions the
 remaining strip among the width-adjustable outline sidebar (persisted DIP width, own drag
 divider; double-click best-fits the width to the widest expanded item so the tree loses its
-horizontal scrollbar), panes and splitter. Modal dialogs (Go to Page, Options) are
+horizontal scrollbar), panes and splitters. Modal dialogs (Go to Page, Options) are
 built as in-memory `DLGTEMPLATE`s (`util/DialogTemplate.*`) for `DialogBoxIndirectParamW` — no
 .rc resources, free modality/Tab/Esc. Every user-visible string goes through `util/Strings.*`
 (an X-list keyed by `StrId` with English (en-GB), Italian, German, French, Hungarian,
@@ -207,19 +246,25 @@ switch rebuilds the `HMENU` and retitles the band).
 Full screen (F11 / Alt+Enter, Esc exits) strips `WS_OVERLAPPEDWINDOW` and hides the WHOLE
 rebar plus the status bar without touching their persisted visibility flags ("View > Toolbar"
 only hides bands 1-2; the menu band always stays). Explorer integration (optional, Options or
-`-register-shell`): two static verbs under `HKCU\...\SystemFileAssociations\.pdf\shell`
+`-register-shell`): three static verbs under `HKCU\...\SystemFileAssociations\.pdf\shell`
 (`MUIVerb`, `MultiSelectModel=Single`) — a location that by documented design never
-participates in default-handler resolution; `-open-left/-open-right` reuse a running instance
-through the same `WM_COPYDATA` channel as forward search (op 'PSVD', strictly validated).
+participates in default-handler resolution; `-open-left/-open-right/-open-center` reuse a
+running instance through the same `WM_COPYDATA` channel as forward search (see the XML IPC
+protocol under SyncTeX below; the slot travels as the word `left`/`center`/`right`, and a verb
+aimed at an inactive slot switches three-pane mode on, so it always lands).
 
 **MRU**: File carries two submenus, Recent Files (single documents, opened into the focused
-pane) and Recent Pairs (left+right sessions, order preserved). Both cap at 9 entries with 1..9
-digit mnemonics and persist in `[mru-files]` / `[mru-pairs]`. Recording happens at ONE point,
-the central `DocumentOpened` handler, so every open path (dialog, MRU itself, drag & drop,
-command line, session restore) feeds the lists; paths are absolutized at record time
-(command lines may be relative) and deduplicated case-insensitively. A pair is recorded whenever
-an open completes while the sibling pane also holds a document. Clicking an entry whose file no
-longer exists removes it and reports the missing path.
+pane) and Recent Sessions (the documents that were open together — two or three, keyed by the
+per-slot paths, order preserved; the centre key is optional, so an entry written before the
+three-pane mode still loads, and a three-document entry brings its layout with it: opening it
+switches three-pane mode on, because the pane count is part of what was open together). Both cap
+at 9 entries with 1..9 digit mnemonics and persist in `[mru-files]` / `[mru-pairs]` (the section
+keeps its two-pane-era name). Recording happens at ONE point, the central `DocumentOpened`
+handler, so every open path (dialog, MRU itself, drag & drop, command line, session restore)
+feeds the lists; paths are absolutized at record time (command lines may be relative) and
+deduplicated case-insensitively. A session is recorded whenever an open completes while EVERY
+active pane holds a document. Clicking an entry whose file no longer exists removes it and
+reports the missing path.
 
 **SyncTeX**: `engine/SyncTex.*` wraps the reference parser vendored under `thirdparty/synctex`
 (TRACKED in git, unlike `vendor/`; MIT-style license, see its README for the pinned tag). The
@@ -232,16 +277,36 @@ directly (`visible_v` is the BASELINE: top = v−height, bottom = v+depth). Inve
 Ctrl+click (`WM_LBUTTONUP` click branch, before link logic) → `PagePointAt` →
 `synctex_edit_query` → a configurable launch template (`[synctex] inverse`, default the
 `vscode://file/%f:%l` URI). Forward search arrives as `-forward-search TEX LINE PDF`: a second
-short-lived instance finds the running window and hands the request over via `WM_COPYDATA`
-(op 'PSVF', strictly validated: exact size, length caps, copy-before-use), which MainWindow
-routes to the pane holding that PDF (focused pane wins a tie; the PDF is opened on demand) and
-the pane centers and flashes the target boxes green for 1.5 s (`kSyncFlashTimer`). Requests for
-documents still opening park in `m_parkedForward` and replay on `DocumentOpened`.
+short-lived instance finds the running window and hands the request over via `WM_COPYDATA`,
+which MainWindow routes to the pane holding that PDF (focused pane wins a tie; the PDF is opened
+on demand) and the pane centers and flashes the target boxes green for 1.5 s
+(`kSyncFlashTimer`). Requests for documents still opening park in `m_parkedForward` and replay
+on `DocumentOpened`.
+
+Every second-instance handoff (the Explorer verbs and forward search alike) shares ONE
+`WM_COPYDATA` protocol (`util/IpcXml.*`, `dwData` 'PSVX'): a small versioned UTF-16 XML
+document, `<psv v="1"><open slot="center" path="…"/></psv>` or
+`<psv v="1"><forward tex="…" line="123" pdf="…"/></psv>`, built and parsed with XmlLite (an OS
+component since Vista: native, no COM initialization, DTD processing prohibited, plus a depth
+cap — the payload arrives from arbitrary processes). The slot is a WORD from the closed
+`left`/`center`/`right` vocabulary (= `kSlotKeys`), never an integer that a renumbered enum
+could reinterpret; unknown versions, commands or malformed documents are simply UNHANDLED, so
+the sender's timeout check fails and it falls back to a cold start — a mixed-version handoff
+degrades to a new window. `IpcXml::Parse` owns the structural checks (well-formedness, length
+caps, closed vocabulary, digits-only line numbers); the receiver
+(`MainWindow::HandleCopyData`) keeps the semantic ones (rooted absolute paths, line range,
+inactive-slot activation). Delivery is AT-LEAST-ONCE: a handoff that times out cold-starts a
+new window even though the hung receiver may still serve the original request later — the
+occasional duplicate is accepted over deduplication machinery. Default UIPI is the channel's
+authorization boundary (no `ChangeWindowMessageFilterEx` exception): an ELEVATED viewer simply
+never receives handoffs from medium-integrity senders, which then cold-start.
 
 **Auto-reload**: each pane owns a `util/FileWatcher.*` — a thread that watches the open
 document's PARENT DIRECTORY (`ReadDirectoryChangesW`; a handle to the file itself would go stale
 across the delete/recreate/rename cycles LaTeX toolchains perform) and posts
-`WM_PSV_FILE_CHANGED` (outside the `WM_PSV_FIRST..LAST` drain range: no payload) when the
+`WM_PSV_FILE_CHANGED` (outside the `WM_PSV_FIRST..LAST` drain range: no heap payload; wParam
+carries the watch GENERATION, bumped per `Watch`, so a post from the previous watch of the same
+HWND is ignored instead of reloading the new document) when the
 watched name is touched. The pane debounces (500 ms after the last notification of a write
 burst), then probes stability with a deny-write `CreateFileW`: while the producer still holds
 the file (or a clean+rebuild window leaves no file at all) it retries on the same cadence
@@ -265,7 +330,7 @@ PDF's bottom-up coordinates), returning misses inside gaps. Relayout re-runs whe
 appearance shrinks the viewport (loop until stable, a real subtlety copied from SumatraPDF).
 Fit-width/fit-page are *virtual* zooms recomputed on every relayout.
 
-**Paged scroll mode** (View → Continuous Scrolling / Page-by-Page, Ctrl+4 / Ctrl+5; global for both
+**Paged scroll mode** (View → Continuous Scrolling / Page-by-Page, Ctrl+4 / Ctrl+5; global for all
 panes, persisted as `[window] scrollMode`): the continuous `PageLayout` stays untouched — the
 mode is a per-page clamp plus quantized navigation, never a rebuilt one-page layout (that would
 break `FirstVisible`, prefetch adjacency, `TotalHeight` scrollbars, fit estimation and the
@@ -335,29 +400,38 @@ from where the closest prior art (PDF Architect) fails:
   hardwired to 1-1, 2-2, ... The user must be able to re-synchronize at an arbitrary offset
   without reopening anything.
 - **R2 — format-independent sync**: sync must survive documents with different page formats,
-  mixed page sizes within a document, and different zoom levels in the two panes.
+  mixed page sizes within a document, and different zoom levels per pane.
 
 Design:
 
 - **Position model (satisfies R2)**: a pane's position is expressed in *page units*,
   `pos = pageIndex + fractionWithinPage`, sampled at the **window center** (`SyncCenterY`):
-  half the pane WINDOW's height, not the client's. The two panes' windows share top and
-  height, but their clients can differ by one horizontal scrollbar (only the overflowing pane
+  half the pane WINDOW's height, not the client's. The panes' windows share top and
+  height, but their clients can differ by one horizontal scrollbar (only an overflowing pane
   gets it), and client-center sampling misaligned identical pages ON SCREEN by half the bar
   whenever the outline sidebar pushed exactly one pane past the overflow threshold (a real
-  0.6 bug). Without a horizontal bar the two centers coincide. Every page counts as
+  0.6 bug). Without a horizontal bar the centers coincide. Every page counts as
   exactly 1.0 regardless of its physical size, so an A4 document stays page-aligned with a Letter
   or A5 one, and panes at different zoom levels stay aligned too. When page heights differ, the
-  two panes scroll at different pixel speeds by construction; that is what *keeps* them in sync.
+  panes scroll at different pixel speeds by construction; that is what *keeps* them in sync.
   Syncing raw pixel/scrollbar offsets (PDF Architect's apparent approach, and the source of its
   drift) is explicitly rejected.
-- **Default mode, delta-preserving sync (satisfies R1)**: when the user enables sync, capture
-  `anchor = posB − posA` in page units. Every scroll of one pane drives the other to preserve the
-  anchor. Users pre-scroll each pane to the sections they want aligned, then lock; unlocking,
-  adjusting one pane, and re-locking recaptures the anchor at any moment. This is exactly what
-  Acrobat/PDF-XChange users have been asking for and don't have.
+- **Default mode, delta-preserving sync (satisfies R1)**: when the user enables sync, capture a
+  per-slot delta anchor in page units, RELATIVE TO THE REFERENCE SLOT (the first JOINED pane): a
+  leader converts its position to reference units and every follower converts back out — with
+  two panes that is arithmetically the single `posB − posA` delta of the pre-slot design. Every
+  scroll of one pane drives the others to preserve the anchors. Users pre-scroll each pane to
+  the sections they want aligned, then lock; unlocking, adjusting one pane, and re-locking
+  recaptures the anchors at any moment. This is exactly what Acrobat/PDF-XChange users have been
+  asking for and don't have. Scroll and zoom sync operate on the JOINED subset of the active
+  panes: a pane joins only when its `DocumentOpened` has been PROCESSED by the controller, not
+  as soon as it holds a document — a (re)opening pane reports a document while its saved view is
+  still being restored, and the restore's own scroll echo must not drive the established panes
+  through a never-captured anchor. An empty third pane never suspends synchronization between
+  the loaded ones. Point-map operations, by contrast, require every active pane to hold a
+  document.
 - **Relative-fraction mode** (optional): `fraction = scrollY / (canvasHeight − viewportHeight)`
-  mirrored to the other pane; useful for grossly different documents, known to drift locally.
+  mirrored to the followers; useful for grossly different documents, known to drift locally.
 - **Temporary unlock**: holding a modifier (Alt; Shift is taken by horizontal wheel scroll)
   scrolls only the focused pane. While the sync-point map is EMPTY the anchor tracks each
   adjustment, so the alignment crafted under Alt is exactly what subsequent synced scrolls
@@ -366,12 +440,14 @@ Design:
   permanent fix is Alt-adjust followed by "Add Sync Point Here"), and re-enabling sync
   recaptures nothing.
 - **Reentrancy guard**: an `isSyncing` flag suppresses feedback loops when programmatically
-  scrolling the sibling.
-- **Zoom sync**: independent toggle; applies the same zoom command (ratio-preserving) to both.
-- **Sync points** (WinMerge-style, implemented): an ordered list of WHOLE-page pairs
-  (`SyncPoint{left, right}` in `SyncController`) turns the single anchor into a
+  scrolling the siblings.
+- **Zoom sync**: independent toggle; applies the same zoom command to every document-ready pane
+  (per-slot ratio anchors relative to the reference pane, driving absolute targets so clamping
+  at the zoom bounds self-heals instead of corrupting the relationship).
+- **Sync points** (WinMerge-style, implemented): an ordered list of WHOLE-page tuples
+  (`SyncPoint`, one page per active SLOT) turns the plain anchors into a
   piecewise-constant INTEGER delta. Alignment is per page: one page of one document is one page
-  of the other, like WinMerge's line map, never a fractional scroll offset (the within-page
+  of the others, like WinMerge's line map, never a fractional scroll offset (the within-page
   fraction transfers unchanged, an interpolated map would rubber-band the scroll speed instead).
   With alignment gaps OFF, between two points the follower is clamped just short of its next
   point, so it WAITS at the end
@@ -384,11 +460,11 @@ Design:
   DPI/zoom combinations (bug surfaced by 96-DPI RDP metrics).
   The two directions are not exact inverses at segment boundaries: the reentrancy guard stops
   the echo, and every scroll re-drives the follower from the leader's authoritative position.
-  Invariants: points strictly increase in BOTH coordinates; a newly added manual point wins
-  (conflicting points are removed); the map is cleared on every (re)open; emptying the map
+  Invariants: points strictly increase in EVERY active coordinate; a newly added manual point
+  wins (conflicting points are removed); the map is cleared on every (re)open; emptying the map
   recaptures the plain anchor at the current positions; the EMPTY map degenerates to the plain
   anchor, bit-identical to the modes above. Commands: Add Sync Point Here (Shift+F7, captures
-  the panes' current pages), Sync Points... (list/remove dialog), Clear Sync Points
+  every active pane's current page), Sync Points... (list/remove dialog), Clear Sync Points
   (Ctrl+Shift+F7).
 - **Bookmark generation**: "Sync Points from Bookmarks" parses a hierarchical key from each
   outline title (`util/OutlineNumbering`: multi-level prefix like "1.2.3", with an optional
@@ -432,33 +508,39 @@ Design:
   analytical index) are false friends kept in DIFFERENT classes on purpose (Portuguese
   and Spanish "Índice" side with the TOC, the back index being "Índice
   remissivo"/"Índice analítico"); unrecognized
-  titles fall back to their own text, so same-language exact pairs are unaffected. First
-  occurrence per key/title and per side wins, and one point is emitted per key present in
-  BOTH outlines; only the bookmark's target page matters (alignment is whole-page).
-  Candidates that violate double monotonicity (out-of-order bookmarks, and deep subsections
-  starting on their parent section's PAGE - two points on one page would conflict, the first
-  wins) are greedily dropped.
+  titles fall back to their own text, so same-language exact pairs are unaffected. The matcher
+  (`MatchOutlineNumberings`) takes N outlines and returns rows of indices for the keys present
+  in ALL of them — a join on the canonical, document-independent key, so more documents just
+  means a smaller intersection, and with two outlines it is identical to the pairwise version
+  it replaced; requiring every outline to carry the key is what keeps the tuples usable as hard
+  anchors (a row with a missing coordinate could satisfy neither the strictly-increasing
+  invariant nor the alignment-gap arithmetic). First occurrence per key/title and per outline
+  wins, and one point is emitted per key present in ALL outlines; only the bookmarks' target
+  pages matter (alignment is whole-page). Candidates that violate the all-coordinates
+  monotonicity (out-of-order bookmarks, and deep subsections starting on their parent section's
+  PAGE - two points on one page would conflict, the first wins) are greedily dropped.
   Generation replaces previously generated points, keeps manual ones (manual wins on conflict),
-  turns scroll sync on and realigns the follower once. After an auto-reload of the SAME path,
+  turns scroll sync on and realigns the followers once. After an auto-reload of the SAME path,
   MainWindow re-derives generated points from the fresh outline (the LaTeX rebuild loop must
   not lose the map on every compile); manual points are dropped there: they reference pages the
   rebuild may have moved arbitrarily. The regen cue is PARKED in the controller
   (`AutoRegenPending`), not derived from the map at the moment of the event: the map is already
-  cleared by the first `DocumentOpened` of a both-panes reload, and a failed intermediate
+  cleared by the first `DocumentOpened` of an all-panes reload, and a failed intermediate
   reload (broken half-written compile) fires `DocumentOpened` with no document - the parked cue
   rides both out and is cancelled only by a path change (open/close/swap) or an explicit clear.
 - **Alignment gaps** (WinMerge-style rendered holes; Sync ▸ Show Alignment Gaps, checked by
   default, persisted as `[sync] showGaps`): where one document has pages with no counterpart
-  inside a segment, the OTHER pane's layout gets empty gap slots just before its own point
-  page, each silhouetted like the missing counterpart page (its size in PDF points, rendered
+  inside a segment, the OTHER panes' layouts get empty gap slots just before their own point
+  pages, each silhouetted like the missing counterpart page (its size in PDF points, rendered
   at the local zoom, width capped at the real pages' width so `TotalWidth` stays
   gap-invariant); the pre-first-point segment gets gaps too (different-length preambles align
   from the top), the tail after the last point diverges freely. Each segment contributes
-  max(left, right) slots to both sides, so every point's two pages land on the same slot
+  max(interior) slots to ALL panes, with the gap silhouettes borrowed from the pane that
+  supplied that maximum, so every point's pages land on the same slot
   index - and with gaps enabled scroll sync becomes IDENTITY on virtual slot coordinates
   (`VirtualSyncPosition`/`ScrollToVirtualSyncPosition`): the follower scrolls THROUGH its gaps
   1:1 instead of waiting. Virtual sync is gated on a GAP EPOCH (a version MainWindow stamps on
-  both panes with every gap push; a (re)opened pane resets to 0): the reload restore dance
+  every pane with every gap push; a (re)opened pane resets to 0): the reload restore dance
   fires `Scrolled` after `SetPages` cleared the reloading pane's gaps but before
   `DocumentOpened` clears the map, and without the matching-epoch check that scroll would
   drive mismatched slot layouts; the real-page `MapTarget` fallback is layout-shape-invariant. Paged mode flips gap slots like blank pages (`m_currentSlot` is the
@@ -468,9 +550,9 @@ Design:
   every restore lands in a gapless layout (`SetPages` clears the gaps) and the later gap
   rebuild preserves the position in real-page units. The map-change reaction is a
   `SyncController` callback (`SetMapChangedHandler`) fired on EVERY map mutation including the
-  implicit `DocumentOpened` clear; MainWindow recomputes both panes' gaps and marker lists,
+  implicit `DocumentOpened` clear; MainWindow recomputes every pane's gaps and marker lists,
   wrapping the pane relayouts in `ApplySilently` (the controller's reentrancy guard) so the
-  gap-collapse scroll echoes never drive the sibling.
+  gap-collapse scroll echoes never drive the siblings.
 - **Sync-point markers**: an anchor glyph (U+2693, DirectWrite "Segoe UI Symbol", brush-tinted)
   beside each sync-point page's top-left corner (inside the corner over an alpha backing when
   the gutter is narrow), plus a tick strip along the right client edge (the native scrollbar
@@ -481,33 +563,41 @@ Design:
   would sink into the background). Markers show whenever a map exists, gaps toggle
   notwithstanding; each rendering has its own Options checkbox ([sync] showAnchors /
   showTicks, default on). Hovering an anchor shows a tracking tooltip with the point's
-  numbering key (or "manual"): strict double monotonicity guarantees at most one point per
-  page per side, so the tip is always a single entry. The Sync Points dialog uses a
+  numbering key (or "manual"): strict monotonicity in every coordinate guarantees at most one
+  point per page per pane, so the tip is always a single entry. The Sync Points dialog uses a
   report-mode ListView with column headers (#, Numbering, Pages, Origin; DialogTemplate
   gained a class-by-name AddControl overload because comctl32 classes have no
   DLGITEMTEMPLATE atom).
-- **Swap mirroring**: F8 preserves the map with left/right exchanged per point (the
-  coordinates co-increase, so the order survives). The mirrored map is parked in MainWindow
-  BEFORE the reopen storm (each swap side fires `DocumentOpened`, clearing the live map) and
-  reinstalled via `SyncController::RestorePoints` when BOTH panes settled on the two expected
-  swapped paths; any `DocumentOpened` with a different path (failed open, close, interleaved
-  open, a second swap) discards the park. `RestorePoints` touches neither the anchors, the
-  sync flags nor the parked regen; mirrored generated points re-arm reload regeneration
-  naturally via `HasAutoPoints`.
-- **Per-pair persistence** (`[sync-points]`, most recent first, kMruMaxEntries cap): only the
-  MANUAL points are stored, as pure numbers ("l:r;l:r;..." 0-based page pairs - no titles in
-  the file, no escaping, no INI buffer concerns); a `hadAuto` flag records that the pair also
-  carried a generated map. The entry is upserted at every USER map mutation (add, remove,
-  clear, generate, the reload regen, the swap-mirror install; an emptied map FORGETS the
-  pair) - never from the system's DocumentOpened clear, whose transient empty state must not
-  wipe the memory. Restore fires when a pane's path CHANGES and both panes are ready, only if
-  the live map is empty (the swap's reinstalled mirror and freshly placed points always win):
-  manual points are re-validated (range + double monotonicity - the pagination may have
-  changed, the file may be hand-edited) and reinstalled via `RestorePoints`, then `hadAuto`
-  re-generates from the FRESH outlines (manual wins on conflict), which is also why storing
-  the generated points themselves would be wrong. A same-path reload deliberately does NOT
-  restore: in-session manual points decay on reload by design, but the saved entry keeps them
-  for the next launch (the file is stable by then).
+- **Swap mirroring**: F8 is a ROTATION of the active slots — each pane adopts what its
+  predecessor in visual order held, so left content moves to centre, centre to right and right
+  wraps back to left; Shift+F8 rotates the other way (each pane adopts its successor, the
+  inverse permutation, applied identically to documents, expectations, point tuples and
+  fallbacks); with two panes both directions ARE the exchange, bit for bit. The map is
+  preserved with every point's coordinates permuted the same way (the coordinates co-increase,
+  so the order survives). The permuted map is parked in MainWindow BEFORE the reopen storm
+  (each swapped pane fires `DocumentOpened`, clearing the live map) and reinstalled via
+  `SyncController::RestorePoints` when EVERY active pane settled on its expected path; any
+  `DocumentOpened` with a different path (failed open, close, interleaved open, a second swap)
+  discards the park. `RestorePoints` touches neither the anchors, the sync flags nor the
+  parked regen; permuted generated points re-arm reload regeneration naturally via
+  `HasAutoPoints`.
+- **Per-session persistence** (`[sync-points]`, most recent first, kMruMaxEntries cap, keyed
+  by the per-slot paths with the centre key optional): only the MANUAL points are stored, as
+  pure numbers - one 0-based page per ACTIVE slot joined by ':' ("l:r;l:r;..." with two panes,
+  "l:c:r;..." with three; no titles in the file, no escaping, no INI buffer concerns), and an
+  entry whose arity does not match the current arrangement is dropped on restore instead of
+  being misread; a `hadAuto` flag records that the session also carried a generated map. The
+  entry is upserted at every USER map mutation (add, remove, clear, generate, the reload
+  regen, the swap-permutation install; an emptied map FORGETS the session) - never from the
+  system's DocumentOpened clear, whose transient empty state must not wipe the memory.
+  Restore fires when a pane's path CHANGES and every active pane is ready, only if the live
+  map is empty (the swap's reinstalled park and freshly placed points always win): manual
+  points are re-validated (range + strict all-coordinates monotonicity - the pagination may
+  have changed, the file may be hand-edited) and reinstalled via `RestorePoints`, then
+  `hadAuto` re-generates from the FRESH outlines (manual wins on conflict), which is also why
+  storing the generated points themselves would be wrong. A same-path reload deliberately does
+  NOT restore: in-session manual points decay on reload by design, but the saved entry keeps
+  them for the next launch (the file is stable by then).
 
 **Search** (per pane, find bar targets the focused pane):
 
@@ -537,9 +627,10 @@ Outline sidebar (`fz_load_outline`) is an M5 item.
   precision-touchpad two-finger scroll is naturally smooth. Handle `WM_MOUSEHWHEEL`.
 - **Ctrl+wheel zoom-to-cursor**: with cursor at viewport point `c`, scroll offset `s` (device px),
   zoom `z → z'`: `s' = (s + c)·(z'/z) − c`. Continuous factor from accumulated delta.
-- **Keyboard**: PgUp/PgDn/Home/End/arrows per pane; Tab switches focused pane; F3/Shift+F3 next/
-  previous match; Ctrl+F find; Ctrl+O / Ctrl+Shift+O open left/right; F7 toggle scroll sync;
-  Ctrl+F7 zoom sync.
+- **Keyboard**: PgUp/PgDn/Home/End/arrows per pane; Tab cycles the focused pane in visual order;
+  F3/Shift+F3 next/previous match; Ctrl+F find; Ctrl+O / Ctrl+Shift+O / Ctrl+Shift+M open
+  left/right/centre (the centre one switches three-pane mode on, like the menu-only View ▸ Panes
+  commands that pick the arrangement directly); F7 toggle scroll sync; Ctrl+F7 zoom sync.
 - **Touch**: `WM_GESTURE` (`GID_ZOOM` centered at gesture location, `GID_PAN` with inertia) covers
   touchscreens in v1. Precision-touchpad pinch requires **DirectManipulation** (touchpads emit
   neither WM_POINTER nor WM_GESTURE); planned v1.x, one viewport per pane HWND.
@@ -554,19 +645,78 @@ Outline sidebar (`fz_load_outline`) is an M5 item.
 - Dark title bar via `DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)`; page background aside,
   chrome colors follow the system light/dark setting. MuPDF-rendered dark mode (color inversion)
   is out of scope for v1.
-- Drag & drop: one file dropped on a pane opens there; two files fill both panes.
-- CLI: `PdfSideViewer.exe [left.pdf [right.pdf]]`.
+- Drag & drop: one file dropped on a pane opens there; extra files land in the OTHER panes in
+  visual order, and two extra files switch three-pane mode on first (three files always mean a
+  three-pane arrangement).
+- CLI: `PdfSideViewer.exe [left.pdf [right.pdf [center.pdf]]]` — Beyond Compare's positional
+  order (left, right, THEN center: `kCliSlotOrder` in main.cpp), deliberately not the visual
+  order; a third argument switches three-pane mode on.
 - Settings + last session (files, scroll positions, zoom, sync state, window placement) in
-  `%APPDATA%\PdfSideViewer\settings.ini` (UTF-16 with BOM so `WritePrivateProfile*` round-trips
-  Unicode paths; INI over JSON: native Win32 read/write, nothing to parse; writes serialized
-  across instances by a named mutex).
+  `%APPDATA%\PdfSideViewer\settings.ini` (UTF-16LE with BOM; INI over JSON so the file stays
+  hand-editable). The `GetPrivateProfile*`/`WritePrivateProfile*` APIs are NOT used: `Save`
+  serializes the whole file in memory, writes it to a uniquely named temp sibling
+  (`CREATE_NEW`, checked byte counts, `FlushFileBuffers`, checked close — a partial file must
+  never be promoted) and swaps it in atomically; `Load` reads the whole file through ONE handle
+  and parses it. Each profile call is coherent on its own, but dozens of them can straddle a
+  concurrent replacement and assemble a HYBRID snapshot, which the next save would then make
+  permanent. The swap is ONE `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)`
+  and deliberately **not** `ReplaceFileW`: that call exists to carry the target's security
+  descriptor, attributes and streams onto the replacement (see the security model below), and
+  in exchange it has two documented PARTIAL failure states
+  (`ERROR_UNABLE_TO_MOVE_REPLACEMENT`, `..._2`) that leave the canonical name deleted or
+  renamed to something else. A same-volume rename on the local NTFS volume the profile lives
+  on has no partial state: `settings.ini` resolves either to the old file or to the new one,
+  never to nothing, so there is no window for a backup sibling or a startup recovery to exist
+  for. (Source and target are always siblings and no cross-volume copy flag is passed; the API
+  itself promises replacement, not rollback or power-loss semantics on every third-party
+  provider. Should one ever leave the canonical name missing after a failed rename, the
+  complete temp is KEPT — the sweep stops entirely while `settings.ini` is absent — but is not
+  adopted automatically: a temp truncated by a crash is indistinguishable from a complete one
+  without a second file state to mark it, and half a settings file is worse than defaults, so
+  that case degrades to a manual rename. That protection lasts only while the canonical name is
+  missing: the first run to recreate `settings.ini`, defaults included, turns the temp back into
+  ordinary stale residue. It is a forensic artifact, not a recovery slot.) Cleanup is
+  correspondingly small: only `settings.ini.<pid>.<counter>.tmp` in canonical decimal spelling
+  with a counter the writer can produce, our own on sight and a foreign one only once it is an
+  hour old (a writer that could not take the lock may be between closing its finished temp and
+  renaming it). Worst case if that judgement is ever wrong: one save fails and the previous
+  file stays. Writers serialize best-effort through
+  a lock file (`util/ScopedFileLock.h`; profile-ACL'd, crosses RDP logon sessions, no predictable
+  kernel object name to pre-create), and an unserialized save is still safe: whole files win or
+  lose wholesale. The lock does not merge: two instances that loaded the same state are
+  last-close-wins, as they always were. Accepted trade-off: a downgrade round-trip drops keys the
+  older build does not know (versionless safe-default keys by contract).
+- **Security model for the settings file, declared:** the settings DIRECTORY is the boundary,
+  not the file. Every save promotes a freshly created temp, which carries the directory's
+  inherited DACL, so a per-file DACL or per-file EFS state set BY HAND does not survive a save.
+  This is a decision, with three reasons: the app never sets either one (both are external
+  actions on a file it rewrites on every exit); the policy deliberately trusts every principal
+  the directory lets create files, rather than attempting a finer per-file distinction (Windows
+  does keep `FILE_ADD_FILE`, the target's `DELETE` and the parent's `FILE_DELETE_CHILD`
+  separate); and Microsoft's own EFS guidance is to encrypt the FOLDER, precisely because
+  applications write files by renaming a temp over them. The
+  consequence is explicit: settings are TRUSTED input (`[synctex] inverse` becomes a command
+  line through `ShellExecuteW`/`CreateProcessW`), so whoever can write `settings.ini` can run
+  code as the user. Protecting the DIRECTORY works and is inherited by every replacement;
+  protecting only the file does not. Reverting to `ReplaceFileW` would restore per-file
+  preservation at the cost of its two partial-failure states, and is the one change that would
+  reopen that trade-off.
+- Lock IDENTITY follows the guarded RESOURCE: the settings lock sits next to `settings.ini`
+  (two copies pointed at different directories write different files and must not contend),
+  while the shell-verb lock lives in `UserLockDirectory()` — `%LOCALAPPDATA%\PdfSideViewer` via
+  the Known Folder API, immune to `PSV_SETTINGS_DIR` and to the `APPDATA` environment variable —
+  because the HKCU verbs are ONE resource per user wherever the settings happen to live. Local
+  rather than roaming app data because roaming is the one redirected on purpose; local app data
+  can be redirected too, so this reduces the odds of a network path under the lock without
+  removing them — and a synchronous `CreateFileW` on unreachable storage blocks for as long as
+  the redirector takes, whatever the lock's own timeout says.
 - Password-protected files: `fz_needs_password` / `fz_authenticate_password` with a retry prompt.
 
 ---
 
 ## 5. Repository layout and build
 
-```
+```text
 PdfSideViewer/
 ├── LICENSE                    GPLv3
 ├── README.md
@@ -581,6 +731,7 @@ PdfSideViewer/
 │       ├── main.cpp           wWinMain, message loop, accelerators
 │       ├── MainWindow.*       frame, menu/toolbar/status bar, splitter, find bar, fullscreen
 │       ├── PaneWindow.*       canvas child HWND, input, painting
+│       ├── PaneSlots.h        fixed pane-slot registry: visual order, active subset
 │       ├── DxResources.*      D3D11/D2D device, per-pane swapchain
 │       ├── engine/
 │       │   ├── MupdfLib.*     base fz_context, locks, handlers (singleton)
@@ -589,7 +740,7 @@ PdfSideViewer/
 │       ├── render/RenderCache.*
 │       ├── view/PageLayout.*  view/ViewState.*  view/SyncController.*
 │       ├── search/TextSearch.*
-│       └── util/              Settings (INI), Strings (i18n en/it), GlyphIcons (MDL2)
+│       └── util/              Settings (INI), Strings (14-language i18n), GlyphIcons (MDL2)
 └── vendor/
     └── mupdf/                 official 1.28.x source release (thirdparty included)
 ```
@@ -705,7 +856,7 @@ installed toolchain support it). Distribution: portable zip first; installer lat
 ## 6. Milestones
 
 | # | Deliverable | Contents |
-|---|---|---|
+| --- | --- | --- |
 | M0 | Skeleton | frame + splitter + two pane HWNDs, D2D flip-model swapchains, PMv2 DPI, dark title bar |
 | M1 | Single-pane viewer | MuPDF init, open document, continuous layout, whole-page renders on pane worker, scroll + zoom-to-cursor, stale-bitmap substitution |
 | M2 | Industrial rendering | RenderCache with budget/eviction/dedup/abort, tiling at high zoom, prefetch, both panes live |
@@ -718,7 +869,7 @@ Each milestone leaves the tree buildable and the app usable.
 ## 7. Risks and mitigations
 
 | Risk | Mitigation |
-|---|---|
+| --- | --- |
 | MuPDF VS projects target v142 | retarget to v143 is routine and documented; pin the MuPDF tag |
 | `fz_match_*` search API experimental | use stable `fz_search_*` in v1; revisit at the next MuPDF bump |
 | Memory blow-up on huge documents / deep zoom | shared 256 MB `fz_store` budget + byte-budgeted RenderCache + tiling + display lists instead of pixmaps as the durable cache |
@@ -739,12 +890,12 @@ git 2.54. Nothing additional to install.
 
 ## 9. Key references
 
-- MuPDF C API and threading rules: https://mupdf.readthedocs.io/en/latest/reference/c/overview.html
+- MuPDF C API and threading rules: <https://mupdf.readthedocs.io/en/latest/reference/c/overview.html>
   and `docs/examples/multi-threaded.c` in the MuPDF repo
 - SumatraPDF architecture (reference design for RenderCache/DisplayModel/TextSearch, GPL-compatible):
-  https://github.com/sumatrapdfreader/sumatrapdf — `src/RenderCache.cpp`, `src/DisplayModel.cpp`,
+  <https://github.com/sumatrapdfreader/sumatrapdf> — `src/RenderCache.cpp`, `src/DisplayModel.cpp`,
   `src/EngineMupdf.cpp`, `src/TextSearch.cpp`
-- DXGI flip model: https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/for-best-performance--use-dxgi-flip-model
-- Direct2D pixel formats: https://learn.microsoft.com/en-us/windows/win32/direct2d/supported-pixel-formats-and-alpha-modes
-- Per-Monitor V2 DPI: https://learn.microsoft.com/en-us/windows/win32/hidpi/setting-the-default-dpi-awareness-for-a-process
-- Wheel-delta handling: https://devblogs.microsoft.com/oldnewthing/20130123-00/?p=5473
+- DXGI flip model: <https://learn.microsoft.com/en-us/windows/win32/direct3ddxgi/for-best-performance--use-dxgi-flip-model>
+- Direct2D pixel formats: <https://learn.microsoft.com/en-us/windows/win32/direct2d/supported-pixel-formats-and-alpha-modes>
+- Per-Monitor V2 DPI: <https://learn.microsoft.com/en-us/windows/win32/hidpi/setting-the-default-dpi-awareness-for-a-process>
+- Wheel-delta handling: <https://devblogs.microsoft.com/oldnewthing/20130123-00/?p=5473>

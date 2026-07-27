@@ -40,6 +40,13 @@
       L"Άνοιγμα &δεξιά...\tCtrl+Shift+O", L"Abrir a la &derecha...\tCtrl+Shift+O",                 \
       L"Otwórz po &prawej...\tCtrl+Shift+O", L"&Rechts openen...\tCtrl+Shift+O",                   \
       L"Otevřít v&pravo...\tCtrl+Shift+O", L"Öppna till &höger...\tCtrl+Shift+O")                  \
+    X(MenuOpenCenter, L"Open Ce&ntre...\tCtrl+Shift+M", L"Apri al ce&ntro...\tCtrl+Shift+M",       \
+      L"&Mitte öffnen...\tStrg+Umschalt+M", L"Ouvrir au &centre...\tCtrl+Maj+M",                   \
+      L"Meg&nyitás középre...\tCtrl+Shift+M", L"Відкрити по &центру...\tCtrl+Shift+M",             \
+      L"Deschide la ce&ntru...\tCtrl+Shift+M", L"Abrir ao ce&ntro...\tCtrl+Shift+M",               \
+      L"Άνοιγμα στο κέ&ντρο...\tCtrl+Shift+M", L"Abrir en el ce&ntro...\tCtrl+Shift+M",            \
+      L"Otwórz &na środku...\tCtrl+Shift+M", L"In het &midden openen...\tCtrl+Shift+M",            \
+      L"Otevřít &uprostřed...\tCtrl+Shift+M", L"Öppna i &mitten...\tCtrl+Shift+M")                 \
     X(MenuCloseDoc, L"&Close\tCtrl+W", L"C&hiudi\tCtrl+W", L"S&chließen\tStrg+W",                  \
       L"&Fermer\tCtrl+W", L"Be&zárás\tCtrl+W", L"&Закрити\tCtrl+W", L"În&chide\tCtrl+W",           \
       L"Fe&char\tCtrl+W", L"&Κλείσιμο\tCtrl+W", L"&Cerrar\tCtrl+W", L"&Zamknij\tCtrl+W",           \
@@ -52,10 +59,13 @@
       L"Fichiers &récents", L"&Legutóbbi fájlok", L"Останні &файли", L"Fișiere &recente",          \
       L"Ficheiros &recentes", L"Πρόσφατα αρ&χεία", L"Archivos &recientes",                         \
       L"Ostatnie plik&i", L"Recente &bestanden", L"&Nedávné soubory", L"Senaste &filer")           \
-    X(MenuRecentPairs, L"Recent Pa&irs", L"&Coppie recenti", L"Zuletzt verwendete &Paare",         \
-      L"&Paires récentes", L"Legutóbbi &párok", L"Останні па&ри", L"&Perechi recente",             \
-      L"&Pares recentes", L"Πρόσφατα &ζεύγη", L"&Pares recientes", L"Ostatnie pa&ry",              \
-      L"Recente &paren", L"Nedávné &dvojice", L"Senaste &par")                                     \
+    /* the list now holds two- AND three-document arrangements, hence                              \
+       "sessions" rather than "pairs" (same wording as Close Session) */                           \
+    X(MenuRecentSessions, L"Recent Sess&ions", L"Sessioni re&centi",                               \
+      L"Le&tzte Sitzungen", L"Sess&ions récentes", L"Legutóbbi m&unkamenetek",                     \
+      L"Ос&танні сеанси", L"Sesi&uni recente", L"Sessões recen&tes",                               \
+      L"&Πρόσφατες συνεδρίες", L"Sesiones recien&tes", L"Os&tatnie sesje",                         \
+      L"Recen&te sessies", L"Nedávné rela&ce", L"Senaste sess&ioner")                              \
     X(MenuMruEmpty, L"(empty)", L"(vuoto)", L"(leer)", L"(vide)", L"(üres)", L"(порожньо)",        \
       L"(gol)", L"(vazio)", L"(κενό)", L"(vacío)", L"(pusto)", L"(leeg)", L"(prázdné)",            \
       L"(tomt)")                                                                                   \
@@ -95,6 +105,17 @@
       L"Κλείδ&ωμα γραμμών εργαλείων", L"&Bloquear las barras de herramientas",                     \
       L"Za&blokuj paski narzędzi", L"Werkbalken ver&grendelen",                                    \
       L"Zamknout panely nástro&jů", L"&Lås verktygsfälten")                                        \
+    /* pane-count submenu: two items in their own popup, so the mnemonics stay                     \
+       free even where the View popup has none left (Portuguese) */                                \
+    X(MenuPanes, L"Pa&nes", L"P&annelli", L"Berei&che", L"Pann&eaux", L"&Panelek", L"П&анелі",     \
+      L"Pa&nouri", L"Painéi&s", L"Πλαίσ&ια", L"Pane&les", L"P&anele", L"D&eelvensters",            \
+      L"P&anely", L"Pa&neler")                                                                     \
+    X(MenuPanesTwo, L"&Two Panes", L"&Due pannelli", L"&Zwei Bereiche", L"&Deux panneaux",         \
+      L"&Két panel", L"&Дві панелі", L"&Două panouri", L"&Dois painéis", L"&Δύο πλαίσια",          \
+      L"&Dos paneles", L"&Dwa panele", L"&Twee deelvensters", L"&Dva panely", L"T&vå paneler")     \
+    X(MenuPanesThree, L"T&hree Panes", L"&Tre pannelli", L"&Drei Bereiche", L"&Trois panneaux",    \
+      L"&Három panel", L"&Три панелі", L"&Trei panouri", L"&Três painéis", L"&Τρία πλαίσια",       \
+      L"&Tres paneles", L"&Trzy panele", L"&Drie deelvensters", L"&Tři panely", L"&Tre paneler")   \
     X(MenuZoomIn, L"Zoom &In\tCtrl+Plus", L"&Ingrandisci\tCtrl+Più",                               \
       L"Ver&größern\tStrg+Plus", L"&Zoom avant\tCtrl+Plus", L"&Nagyítás\tCtrl+Plusz",              \
       L"З&більшити\tCtrl+Плюс", L"Mărir&e\tCtrl+Plus", L"&Ampliar\tCtrl+Mais",                     \
@@ -266,12 +287,14 @@
       L"&Εμφάνιση κενών στοίχισης", L"Mostrar &espacios de alineación",                            \
       L"Pokaż odstępy wyrówn&ania", L"&Uitlijningsruimten tonen",                                  \
       L"Zobrazit zarovnávací &mezery", L"Visa &justeringsmellanrum")                               \
-    X(MenuSwapPanes, L"S&wap Panes\tF8", L"Scam&bia pannelli\tF8", L"Bereiche &tauschen\tF8",      \
-      L"Éc&hanger les panneaux\tF8", L"Panelek &felcserélése\tF8",                                 \
-      L"Поміняти панелі міс&цями\tF8", L"&Inversează panourile\tF8",                               \
-      L"&Trocar painéis\tF8", L"Ενα&λλαγή πλαισίων\tF8", L"&Intercambiar paneles\tF8",             \
-      L"Za&mień panele\tF8", L"&Deelvensters wisselen\tF8", L"P&rohodit panely\tF8",               \
-      L"&Växla paneler\tF8")                                                                       \
+    X(MenuSwapPanes, L"S&wap/Rotate Panes\tF8 / Shift+F8", L"Scam&bia/ruota pannelli\tF8 / Maiusc+F8",                    \
+      L"Bereiche &tauschen/rotieren\tF8 / Umschalt+F8", L"Éc&hanger/pivoter les panneaux\tF8 / Maj+F8",                   \
+      L"Panelek &felcserélése/forgatása\tF8 / Shift+F8",                                                      \
+      L"Поміняти міс&цями або обернути панелі\tF8 / Shift+F8", L"&Inversează/rotește panourile\tF8 / Shift+F8",          \
+      L"&Trocar/rodar painéis\tF8 / Shift+F8", L"Ενα&λλαγή/περιστροφή πλαισίων\tF8 / Shift+F8",                          \
+      L"&Intercambiar/rotar paneles\tF8 / Mayús+F8", L"Za&mień/obróć panele\tF8 / Shift+F8",                             \
+      L"&Deelvensters wisselen/roteren\tF8 / Shift+F8", L"P&rohodit/otočit panely\tF8 / Shift+F8",                       \
+      L"&Växla/rotera paneler\tF8 / Skift+F8")                                                                \
     X(MenuHelp, L"&Help", L"&?", L"&Hilfe", L"Aid&e", L"Sú&gó", L"&Довідка", L"&Ajutor",           \
       L"&Ajuda", L"&Βοήθεια", L"Ay&uda", L"Pomo&c", L"&Help", L"&Nápověda", L"&Hjälp")             \
     X(MenuAbout, L"&About PDF Side Viewer...", L"&Informazioni su PDF Side Viewer...",             \
@@ -296,6 +319,13 @@
       L"Άνοιγμα δεξιά (Ctrl+Shift+O)", L"Abrir a la derecha (Ctrl+Shift+O)",                       \
       L"Otwórz po prawej (Ctrl+Shift+O)", L"Rechts openen (Ctrl+Shift+O)",                         \
       L"Otevřít vpravo (Ctrl+Shift+O)", L"Öppna till höger (Ctrl+Shift+O)")                        \
+    X(TipOpenCenter, L"Open centre (Ctrl+Shift+M)", L"Apri al centro (Ctrl+Shift+M)",              \
+      L"Mitte öffnen (Strg+Umschalt+M)", L"Ouvrir au centre (Ctrl+Maj+M)",                         \
+      L"Megnyitás középre (Ctrl+Shift+M)", L"Відкрити по центру (Ctrl+Shift+M)",                   \
+      L"Deschide la centru (Ctrl+Shift+M)", L"Abrir ao centro (Ctrl+Shift+M)",                     \
+      L"Άνοιγμα στο κέντρο (Ctrl+Shift+M)", L"Abrir en el centro (Ctrl+Shift+M)",                  \
+      L"Otwórz na środku (Ctrl+Shift+M)", L"In het midden openen (Ctrl+Shift+M)",                  \
+      L"Otevřít uprostřed (Ctrl+Shift+M)", L"Öppna i mitten (Ctrl+Shift+M)")                       \
     X(TipScrollSync, L"Scroll sync (F7)", L"Sync scorrimento (F7)", L"Bildlauf-Sync (F7)",         \
       L"Sync du défilement (F7)", L"Görgetés-szinkron (F7)",                                       \
       L"Синхронізація прокручування (F7)", L"Sincronizare derulare (F7)",                          \
@@ -406,12 +436,20 @@
       L"Εμφάνιση κενών στοίχισης", L"Mostrar espacios de alineación",                              \
       L"Pokaż odstępy wyrównania", L"Uitlijningsruimten tonen",                                    \
       L"Zobrazit zarovnávací mezery", L"Visa justeringsmellanrum")                                 \
-    X(TipSwapPanes, L"Swap panes (F8)", L"Scambia pannelli (F8)", L"Bereiche tauschen (F8)",       \
-      L"Échanger les panneaux (F8)", L"Panelek felcserélése (F8)",                                 \
-      L"Поміняти панелі місцями (F8)", L"Inversează panourile (F8)",                               \
-      L"Trocar painéis (F8)", L"Εναλλαγή πλαισίων (F8)", L"Intercambiar paneles (F8)",             \
-      L"Zamień panele (F8)", L"Deelvensters wisselen (F8)", L"Prohodit panely (F8)",               \
-      L"Växla paneler (F8)")                                                                       \
+    X(TipSwapPanes, L"Swap/rotate panes (F8 / Shift+F8)",                                          \
+      L"Scambia/ruota pannelli (F8 / Maiusc+F8)",                                                  \
+      L"Bereiche tauschen/rotieren (F8 / Umschalt+F8)",                                            \
+      L"Échanger/pivoter les panneaux (F8 / Maj+F8)",                                              \
+      L"Panelek felcserélése/forgatása (F8 / Shift+F8)",                                           \
+      L"Поміняти місцями або обернути панелі (F8 / Shift+F8)",                                     \
+      L"Inversează/rotește panourile (F8 / Shift+F8)",                                             \
+      L"Trocar/rodar painéis (F8 / Shift+F8)",                                                     \
+      L"Εναλλαγή/περιστροφή πλαισίων (F8 / Shift+F8)",                                             \
+      L"Intercambiar/rotar paneles (F8 / Mayús+F8)",                                               \
+      L"Zamień/obróć panele (F8 / Shift+F8)",                                                      \
+      L"Deelvensters wisselen/roteren (F8 / Shift+F8)",                                            \
+      L"Prohodit/otočit panely (F8 / Shift+F8)",                                                   \
+      L"Växla/rotera paneler (F8 / Skift+F8)")                                                     \
     /* toolbar text options (Internet Explorer's exact wording) + short       */                   \
     /* per-button labels for the "below"/"selective on right" modes           */                   \
     X(MenuToolbarTextBelow, L"Sho&w text labels", L"&Mostra etichette di testo",                   \
@@ -439,6 +477,8 @@
     X(LblOpenRight, L"Right", L"Destra", L"Rechts", L"Droite", L"Jobb", L"Праворуч",               \
       L"Dreapta", L"Direita", L"Δεξιά", L"Derecha", L"Prawy", L"Rechts", L"Vpravo",                \
       L"Höger")                                                                                    \
+    X(LblOpenCenter, L"Centre", L"Centro", L"Mitte", L"Centre", L"Közép", L"Центр", L"Centru",     \
+      L"Centro", L"Κέντρο", L"Centro", L"Środek", L"Midden", L"Střed", L"Mitten")                  \
     X(LblScrollSync, L"Scroll sync", L"Sync scorr.", L"Bildlauf-Sync", L"Sync défil.",             \
       L"Görg.-szinkron", L"Синхр. прокруч.", L"Sinc. derulare", L"Sinc. desloc.",                  \
       L"Συγχρ. κύλισης", L"Sinc. despl.", L"Synchr. przewij.", L"Scrollsync",                      \
@@ -486,7 +526,9 @@
     X(LblSwapPanes, L"Swap", L"Scambia", L"Tauschen", L"Échanger", L"Csere", L"Обміняти",          \
       L"Inversează", L"Trocar", L"Εναλλαγή", L"Intercambiar", L"Zamień", L"Wisselen",              \
       L"Prohodit", L"Växla")                                                                       \
-    /* synctex feedback (status bar, never popups) */                                              \
+    /* synctex feedback: the status bar, except the elevation REFUSAL below,  */              \
+    /* which is a message box - the status bar can be hidden and a silent     */              \
+    /* refusal would look like a broken Ctrl+click.                           */              \
     X(SyncTexNoData, L"SyncTeX: no .synctex file for this document",                               \
       L"SyncTeX: nessun file .synctex per questo documento",                                       \
       L"SyncTeX: keine .synctex-Datei für dieses Dokument",                                        \
@@ -543,6 +585,41 @@
       L"SyncTeX: kan de editor niet starten",                                                      \
       L"SyncTeX: editor se nepodařilo spustit",                                                    \
       L"SyncTeX: det gick inte att starta redigeraren")                                            \
+    /* A REFUSAL, not a failure: an elevated instance must not run a command line */               \
+    /* that unelevated code of the same user can rewrite (see LaunchInverseSearch). */             \
+    /* Phrased as a REQUIREMENT, deliberately: the same message is shown when the */               \
+    /* elevation query itself fails, where "you are an administrator" would be a */                \
+    /* claim we cannot make - and "restart normally" would be a promise we cannot */               \
+    /* keep with UAC disabled or under the built-in Administrator account. */                      \
+    X(SyncTexElevated,                                                                             \
+      L"SyncTeX: inverse search requires PDF Side Viewer to run without administrator "            \
+      L"privileges.",                                                                              \
+      L"SyncTeX: la ricerca inversa richiede che PDF Side Viewer sia eseguito senza "              \
+      L"privilegi di amministratore.",                                                             \
+      L"SyncTeX: Die Rückwärtssuche setzt voraus, dass PDF Side Viewer ohne "                      \
+      L"Administratorrechte ausgeführt wird.",                                                     \
+      L"SyncTeX : la recherche inverse exige que PDF Side Viewer s'exécute sans "                  \
+      L"privilèges d'administrateur.",                                                             \
+      L"SyncTeX: a fordított kereséshez a PDF Side Viewert rendszergazdai jogosultságok "          \
+      L"nélkül kell futtatni.",                                                                    \
+      L"SyncTeX: зворотний пошук вимагає, щоб PDF Side Viewer працював без прав "                   \
+      L"адміністратора.",                                                                          \
+      L"SyncTeX: căutarea inversă necesită ca PDF Side Viewer să ruleze fără privilegii "           \
+      L"de administrator.",                                                                        \
+      L"SyncTeX: a pesquisa inversa exige que o PDF Side Viewer seja executado sem "                \
+      L"privilégios de administrador.",                                                            \
+      L"SyncTeX: η αντίστροφη αναζήτηση απαιτεί το PDF Side Viewer να εκτελείται χωρίς "            \
+      L"δικαιώματα διαχειριστή.",                                                                  \
+      L"SyncTeX: la búsqueda inversa requiere que PDF Side Viewer se ejecute sin "                  \
+      L"privilegios de administrador.",                                                            \
+      L"SyncTeX: wyszukiwanie wsteczne wymaga uruchomienia PDF Side Viewer bez "                    \
+      L"uprawnień administratora.",                                                                \
+      L"SyncTeX: omgekeerd zoeken vereist dat PDF Side Viewer zonder "                              \
+      L"beheerdersrechten wordt uitgevoerd.",                                                      \
+      L"SyncTeX: zpětné hledání vyžaduje, aby PDF Side Viewer běžel bez oprávnění "                 \
+      L"správce.",                                                                                 \
+      L"SyncTeX: omvänd sökning kräver att PDF Side Viewer körs utan "                              \
+      L"administratörsbehörighet.")                                                                \
     /* status bar ("Left: " + "3 / 42" is composed in code) */                                     \
     X(StatusLeftPrefix, L"Left: ", L"Sinistra: ", L"Links: ", L"Gauche : ", L"Bal: ",              \
       L"Ліворуч: ", L"Stânga: ", L"Esquerda: ", L"Αριστερά: ", L"Izquierda: ", L"Lewy: ",          \
@@ -550,12 +627,18 @@
     X(StatusRightPrefix, L"Right: ", L"Destra: ", L"Rechts: ", L"Droite : ", L"Jobb: ",            \
       L"Праворуч: ", L"Dreapta: ", L"Direita: ", L"Δεξιά: ", L"Derecha: ", L"Prawy: ",             \
       L"Rechts: ", L"Vpravo: ", L"Höger: ")                                                        \
+    X(StatusCenterPrefix, L"Centre: ", L"Centro: ", L"Mitte: ", L"Centre : ", L"Közép: ",          \
+      L"Центр: ", L"Centru: ", L"Centro: ", L"Κέντρο: ", L"Centro: ", L"Środek: ",                 \
+      L"Midden: ", L"Střed: ", L"Mitten: ")                                                        \
     X(StatusLeftNoDoc, L"Left: —", L"Sinistra: —", L"Links: —", L"Gauche : —", L"Bal: —",          \
       L"Ліворуч: —", L"Stânga: —", L"Esquerda: —", L"Αριστερά: —", L"Izquierda: —",                \
       L"Lewy: —", L"Links: —", L"Vlevo: —", L"Vänster: —")                                         \
     X(StatusRightNoDoc, L"Right: —", L"Destra: —", L"Rechts: —", L"Droite : —", L"Jobb: —",        \
       L"Праворуч: —", L"Dreapta: —", L"Direita: —", L"Δεξιά: —", L"Derecha: —",                    \
       L"Prawy: —", L"Rechts: —", L"Vpravo: —", L"Höger: —")                                        \
+    X(StatusCenterNoDoc, L"Centre: —", L"Centro: —", L"Mitte: —", L"Centre : —", L"Közép: —",      \
+      L"Центр: —", L"Centru: —", L"Centro: —", L"Κέντρο: —", L"Centro: —", L"Środek: —",           \
+      L"Midden: —", L"Střed: —", L"Mitten: —")                                                     \
     X(StatusSyncBoth, L"Sync: scroll+zoom", L"Sync: scorrimento+zoom",                             \
       L"Sync: Bildlauf+Zoom", L"Sync : défilement+zoom", L"Szinkron: görgetés+zoom",               \
       L"Синхр.: прокрутка+масштаб", L"Sinc.: derulare+zoom", L"Sinc.: deslocamento+zoom",          \
@@ -643,6 +726,20 @@
       L"Document openen in rechterdeelvenster",                                                    \
       L"Otevřít dokument v pravém panelu",                                                         \
       L"Öppna dokument i höger panel")                                                             \
+    X(OpenDlgTitleCenter, L"Open document in centre pane",                                         \
+      L"Apri documento nel pannello centrale",                                                     \
+      L"Dokument im mittleren Bereich öffnen",                                                     \
+      L"Ouvrir un document dans le panneau central",                                               \
+      L"Dokumentum megnyitása a középső panelen",                                                  \
+      L"Відкрити документ у центральній панелі",                                                   \
+      L"Deschide un document în panoul central",                                                   \
+      L"Abrir documento no painel central",                                                        \
+      L"Άνοιγμα εγγράφου στο κεντρικό πλαίσιο",                                                    \
+      L"Abrir documento en el panel central",                                                      \
+      L"Otwórz dokument w środkowym panelu",                                                       \
+      L"Document openen in middelste deelvenster",                                                 \
+      L"Otevřít dokument ve středním panelu",                                                      \
+      L"Öppna dokument i mittpanelen")                                                             \
     X(OpenDlgFilter, L"PDF documents (*.pdf)\0*.pdf\0All files (*.*)\0*.*\0",                      \
       L"Documenti PDF (*.pdf)\0*.pdf\0Tutti i file (*.*)\0*.*\0",                                  \
       L"PDF-Dokumente (*.pdf)\0*.pdf\0Alle Dateien (*.*)\0*.*\0",                                  \
@@ -686,6 +783,20 @@
       L"Rechterdeelvenster\nCtrl+Shift+O of dubbelklik om een PDF te openen",                      \
       L"Pravý panel\nCtrl+Shift+O nebo dvojklik pro otevření PDF",                                 \
       L"Höger panel\nCtrl+Shift+O eller dubbelklicka för att öppna en PDF")                        \
+    X(PlaceholderCenter, L"Centre pane\nCtrl+Shift+M or double-click to open a PDF",               \
+      L"Pannello centrale\nCtrl+Shift+M o doppio click per aprire un PDF",                         \
+      L"Mittlerer Bereich\nStrg+Umschalt+M oder Doppelklick, um ein PDF zu öffnen",                \
+      L"Panneau central\nCtrl+Maj+M ou double-clic pour ouvrir un PDF",                            \
+      L"Középső panel\nCtrl+Shift+M vagy dupla kattintás PDF megnyitásához",                       \
+      L"Центральна панель\nCtrl+Shift+M або подвійне клацання, щоб відкрити PDF",                  \
+      L"Panoul central\nCtrl+Shift+M sau dublu clic pentru a deschide un PDF",                     \
+      L"Painel central\nCtrl+Shift+M ou duplo clique para abrir um PDF",                           \
+      L"Κεντρικό πλαίσιο\nCtrl+Shift+M ή διπλό κλικ για άνοιγμα PDF",                              \
+      L"Panel central\nCtrl+Shift+M o doble clic para abrir un PDF",                               \
+      L"Środkowy panel\nCtrl+Shift+M lub dwukrotne kliknięcie, aby otworzyć PDF",                  \
+      L"Middelste deelvenster\nCtrl+Shift+M of dubbelklik om een PDF te openen",                   \
+      L"Střední panel\nCtrl+Shift+M nebo dvojklik pro otevření PDF",                               \
+      L"Mittpanel\nCtrl+Shift+M eller dubbelklicka för att öppna en PDF")                          \
     X(PaneOpening, L"Opening", L"Apertura di", L"Öffnen von", L"Ouverture de",                     \
       L"Megnyitás:", L"Відкриття", L"Se deschide", L"A abrir", L"Άνοιγμα:", L"Abriendo",           \
       L"Otwieranie:", L"Openen van", L"Otevírání:", L"Öppnar")                                     \
@@ -743,6 +854,15 @@
       L"Standaardwaarden voor nieuwe documenten",                                                  \
       L"Výchozí hodnoty pro nové dokumenty",                                                       \
       L"Standardvärden för nya dokument")                                                          \
+    X(OptDefPanes, L"Panes:", L"Pannelli:", L"Bereiche:", L"Panneaux :", L"Panelek:",              \
+      L"Панелі:", L"Panouri:", L"Painéis:", L"Πλαίσια:", L"Paneles:", L"Panele:",                  \
+      L"Deelvensters:", L"Panely:", L"Paneler:")                                                   \
+    X(OptPanesTwo, L"Two panes", L"Due pannelli", L"Zwei Bereiche", L"Deux panneaux",              \
+      L"Két panel", L"Дві панелі", L"Două panouri", L"Dois painéis", L"Δύο πλαίσια",               \
+      L"Dos paneles", L"Dwa panele", L"Twee deelvensters", L"Dva panely", L"Två paneler")          \
+    X(OptPanesThree, L"Three panes", L"Tre pannelli", L"Drei Bereiche", L"Trois panneaux",         \
+      L"Három panel", L"Три панелі", L"Trei panouri", L"Três painéis", L"Τρία πλαίσια",            \
+      L"Tres paneles", L"Trzy panele", L"Drie deelvensters", L"Tři panely", L"Tre paneler")        \
     X(OptDefScrollMode, L"Scrolling:", L"Scorrimento:", L"Bildlauf:", L"Défilement :",             \
       L"Görgetés:", L"Прокручування:", L"Derulare:", L"Deslocamento:", L"Κύλιση:",                 \
       L"Desplazamiento:", L"Przewijanie:", L"Scrollen:", L"Posouvání:", L"Rullning:")              \
@@ -800,30 +920,32 @@
       L"Příkaz zpětného vyhledávání SyncTeX (%f = soubor, %l = řádek):",                           \
       L"SyncTeX-kommando för omvänd sökning (%f = fil, %l = rad):")                                \
     X(OptShellIntegration,                                                                         \
-      L"Show \"Open left/right in PDF Side Viewer\" in the Explorer menu for PDF files",           \
-      L"Mostra \"Apri a sinistra/destra in PDF Side Viewer\" nel menu di Esplora file per i PDF",  \
-      L"„Links/Rechts in PDF Side Viewer öffnen“ im Explorer-Menü für PDF-Dateien anzeigen",       \
-      L"Afficher « Ouvrir à gauche/droite dans PDF Side Viewer » dans le menu de "                 \
+      L"Show \"Open left/right/centre in PDF Side Viewer\" in the Explorer menu for PDF files",    \
+      L"Mostra \"Apri a sinistra/destra/al centro in PDF Side Viewer\" nel menu di "               \
+      L"Esplora file per i PDF",                                                                   \
+      L"„Links/Rechts/Mitte in PDF Side Viewer öffnen“ im Explorer-Menü für PDF-Dateien "          \
+      L"anzeigen",                                                                                 \
+      L"Afficher « Ouvrir à gauche/droite/au centre dans PDF Side Viewer » dans le menu de "       \
       L"l'Explorateur pour les PDF",                                                               \
-      L"„Megnyitás balra/jobbra a PDF Side Viewerben” megjelenítése az Intéző menüjében "          \
-      L"a PDF-ekhez",                                                                              \
-      L"Показувати «Відкрити ліворуч/праворуч у PDF Side Viewer» у меню Провідника "               \
-      L"для файлів PDF",                                                                           \
-      L"Afișează „Deschide la stânga/dreapta în PDF Side Viewer” în meniul Explorer "              \
+      L"„Megnyitás balra/jobbra/középre a PDF Side Viewerben” megjelenítése az Intéző "            \
+      L"menüjében a PDF-ekhez",                                                                    \
+      L"Показувати «Відкрити ліворуч/праворуч/по центру у PDF Side Viewer» у меню "                \
+      L"Провідника для файлів PDF",                                                                \
+      L"Afișează „Deschide la stânga/dreapta/centru în PDF Side Viewer” în meniul Explorer "       \
       L"pentru fișiere PDF",                                                                       \
-      L"Mostrar «Abrir à esquerda/direita no PDF Side Viewer» no menu do Explorador "              \
-      L"para ficheiros PDF",                                                                       \
-      L"Εμφάνιση «Άνοιγμα αριστερά/δεξιά στο PDF Side Viewer» στο μενού της Εξερεύνησης "          \
-      L"για αρχεία PDF",                                                                           \
-      L"Mostrar «Abrir a la izquierda/derecha en PDF Side Viewer» en el menú del "                 \
-      L"Explorador para archivos PDF",                                                             \
-      L"Pokaż „Otwórz po lewej/prawej w PDF Side Viewer” w menu Eksploratora dla "                 \
-      L"plików PDF",                                                                               \
-      L"\"Links/rechts openen in PDF Side Viewer\" tonen in het Verkenner-menu voor "              \
-      L"PDF-bestanden",                                                                            \
-      L"Zobrazit „Otevřít vlevo/vpravo v PDF Side Viewer“ v nabídce Průzkumníka pro "              \
-      L"soubory PDF",                                                                              \
-      L"Visa \"Öppna till vänster/höger i PDF Side Viewer\" i Utforskaren-menyn "                  \
+      L"Mostrar «Abrir à esquerda/direita/ao centro no PDF Side Viewer» no menu do "               \
+      L"Explorador para ficheiros PDF",                                                            \
+      L"Εμφάνιση «Άνοιγμα αριστερά/δεξιά/στο κέντρο στο PDF Side Viewer» στο μενού της "           \
+      L"Εξερεύνησης για αρχεία PDF",                                                               \
+      L"Mostrar «Abrir a la izquierda/derecha/en el centro en PDF Side Viewer» en el menú "        \
+      L"del Explorador para archivos PDF",                                                         \
+      L"Pokaż „Otwórz po lewej/prawej/na środku w PDF Side Viewer” w menu Eksploratora "           \
+      L"dla plików PDF",                                                                           \
+      L"\"Links/rechts/midden openen in PDF Side Viewer\" tonen in het Verkenner-menu "            \
+      L"voor PDF-bestanden",                                                                       \
+      L"Zobrazit „Otevřít vlevo/vpravo/uprostřed v PDF Side Viewer“ v nabídce Průzkumníka "        \
+      L"pro soubory PDF",                                                                          \
+      L"Visa \"Öppna till vänster/höger/mitten i PDF Side Viewer\" i Utforskaren-menyn "           \
       L"för PDF-filer")                                                                            \
     X(OptFsToolbar, L"Show the toolbar in full screen",                                            \
       L"Mostra la barra degli strumenti a schermo intero",                                         \
@@ -924,10 +1046,11 @@
       L"Řádků na krok kolečka (0 = systém):",                                                      \
       L"Rader per hjulsteg (0 = system):")                                                         \
     /* button text must stay within ~130 DLU (MainWindow.cpp Options layout) */                    \
-    X(OptClearRecent, L"Clear recent files and pairs", L"Svuota gli elenchi recenti",              \
+    /* "lists", not "files and pairs": the second list holds sessions now */                       \
+    X(OptClearRecent, L"Clear the recent lists", L"Svuota gli elenchi recenti",                    \
       L"Zuletzt verwendete Listen leeren",                                                         \
-      L"Vider les fichiers et paires récents",                                                     \
-      L"Legutóbbi fájlok és párok törlése",                                                        \
+      L"Vider les listes récentes",                                                                \
+      L"Legutóbbi listák törlése",                                                                 \
       L"Очистити списки останніх",                                                                 \
       L"Golește listele recente",                                                                  \
       L"Limpar as listas recentes",                                                                \
@@ -954,6 +1077,14 @@
       L"Abrir a la derecha en PDF Side Viewer", L"Otwórz po prawej w PDF Side Viewer",             \
       L"Rechts openen in PDF Side Viewer", L"Otevřít vpravo v PDF Side Viewer",                    \
       L"Öppna till höger i PDF Side Viewer")                                                       \
+    X(VerbOpenCenter, L"Open centre in PDF Side Viewer", L"Apri al centro in PDF Side Viewer",     \
+      L"Mitte in PDF Side Viewer öffnen", L"Ouvrir au centre dans PDF Side Viewer",                \
+      L"Megnyitás középre a PDF Side Viewerben", L"Відкрити по центру у PDF Side Viewer",          \
+      L"Deschide la centru în PDF Side Viewer", L"Abrir ao centro no PDF Side Viewer",             \
+      L"Άνοιγμα στο κέντρο στο PDF Side Viewer",                                                   \
+      L"Abrir en el centro en PDF Side Viewer", L"Otwórz na środku w PDF Side Viewer",             \
+      L"In het midden openen in PDF Side Viewer", L"Otevřít uprostřed v PDF Side Viewer",          \
+      L"Öppna i mitten i PDF Side Viewer")                                                         \
     /* go-to-page dialog + shared dialog buttons */                                                \
     X(GotoTitle, L"Go to Page", L"Vai alla pagina", L"Gehe zu Seite", L"Aller à la page",          \
       L"Ugrás oldalra", L"Перейти до сторінки", L"Salt la pagină", L"Ir para a página",            \
@@ -1013,34 +1144,34 @@
       L"Informacje o PDF Side Viewer", L"Info over PDF Side Viewer",                               \
       L"O aplikaci PDF Side Viewer", L"Om PDF Side Viewer")                                        \
     X(AboutBody,                                                                                   \
-      L"Two PDFs side by side with synchronised scrolling.\n\n"                                    \
+      L"Two or three PDFs side by side with synchronised scrolling.\n\n"                           \
       L"(c) 2026 Lorenzo Novara - GPLv3\nPDF rendering: MuPDF (AGPLv3) by Artifex Software",       \
-      L"Due PDF affiancati con scorrimento sincronizzato.\n\n"                                     \
+      L"Due o tre PDF affiancati con scorrimento sincronizzato.\n\n"                               \
       L"(c) 2026 Lorenzo Novara - GPLv3\nRendering PDF: MuPDF (AGPLv3) di Artifex Software",       \
-      L"Zwei PDFs nebeneinander mit synchronisiertem Bildlauf.\n\n"                                \
+      L"Zwei oder drei PDFs nebeneinander mit synchronisiertem Bildlauf.\n\n"                      \
       L"(c) 2026 Lorenzo Novara - GPLv3\nPDF-Rendering: MuPDF (AGPLv3) von Artifex Software",      \
-      L"Deux PDF côte à côte avec défilement synchronisé.\n\n"                                     \
+      L"Deux ou trois PDF côte à côte avec défilement synchronisé.\n\n"                            \
       L"(c) 2026 Lorenzo Novara - GPLv3\nRendu PDF : MuPDF (AGPLv3) par Artifex Software",         \
-      L"Két PDF egymás mellett, szinkronizált görgetéssel.\n\n"                                    \
+      L"Két vagy három PDF egymás mellett, szinkronizált görgetéssel.\n\n"                         \
       L"(c) 2026 Lorenzo Novara - GPLv3\nPDF-megjelenítés: MuPDF (AGPLv3), Artifex Software",      \
-      L"Два PDF поруч із синхронізованим прокручуванням.\n\n"                                      \
+      L"Два або три PDF поруч із синхронізованим прокручуванням.\n\n"                              \
       L"(c) 2026 Lorenzo Novara - GPLv3\nВідтворення PDF: MuPDF (AGPLv3) від Artifex Software",    \
-      L"Două PDF-uri alăturate cu derulare sincronizată.\n\n"                                      \
+      L"Două sau trei PDF-uri alăturate cu derulare sincronizată.\n\n"                             \
       L"(c) 2026 Lorenzo Novara - GPLv3\nRedare PDF: MuPDF (AGPLv3) de Artifex Software",          \
-      L"Dois PDFs lado a lado com deslocamento sincronizado.\n\n"                                  \
+      L"Dois ou três PDFs lado a lado com deslocamento sincronizado.\n\n"                          \
       L"(c) 2026 Lorenzo Novara - GPLv3\nRenderização de PDF: MuPDF (AGPLv3) da Artifex Software", \
-      L"Δύο PDF δίπλα-δίπλα με συγχρονισμένη κύλιση.\n\n"                                          \
+      L"Δύο ή τρία PDF δίπλα-δίπλα με συγχρονισμένη κύλιση.\n\n"                                   \
       L"(c) 2026 Lorenzo Novara - GPLv3\nΑπόδοση PDF: MuPDF (AGPLv3) από την Artifex Software",    \
-      L"Dos PDF lado a lado con desplazamiento sincronizado.\n\n"                                  \
+      L"Dos o tres PDF lado a lado con desplazamiento sincronizado.\n\n"                           \
       L"(c) 2026 Lorenzo Novara - GPLv3\nRepresentación de PDF: MuPDF (AGPLv3) de "                \
       L"Artifex Software",                                                                         \
-      L"Dwa PDF-y obok siebie z synchronizowanym przewijaniem.\n\n"                                \
+      L"Dwa lub trzy PDF-y obok siebie z synchronizowanym przewijaniem.\n\n"                       \
       L"(c) 2026 Lorenzo Novara - GPLv3\nRenderowanie PDF: MuPDF (AGPLv3) od Artifex Software",    \
-      L"Twee PDF's naast elkaar met gesynchroniseerd scrollen.\n\n"                                \
+      L"Twee of drie PDF's naast elkaar met gesynchroniseerd scrollen.\n\n"                        \
       L"(c) 2026 Lorenzo Novara - GPLv3\nPDF-weergave: MuPDF (AGPLv3) van Artifex Software",       \
-      L"Dva dokumenty PDF vedle sebe se synchronizovaným posouváním.\n\n"                          \
+      L"Dva nebo tři dokumenty PDF vedle sebe se synchronizovaným posouváním.\n\n"                 \
       L"(c) 2026 Lorenzo Novara - GPLv3\nVykreslování PDF: MuPDF (AGPLv3) od Artifex Software",    \
-      L"Två PDF-filer sida vid sida med synkroniserad rullning.\n\n"                               \
+      L"Två eller tre PDF-filer sida vid sida med synkroniserad rullning.\n\n"                     \
       L"(c) 2026 Lorenzo Novara - GPLv3\nPDF-rendering: MuPDF (AGPLv3) av Artifex Software")
 
 // Order = the per-language table order in Strings.cpp = the persisted-code
