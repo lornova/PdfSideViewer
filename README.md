@@ -86,8 +86,9 @@ executable that starts instantly.
   override, the SyncTeX inverse-search command, and the Explorer context-menu integration.
   When full screen hides the toolbar, a small floating button in the top-right corner exits
   full screen.
-- **Explorer context menu** (optional, off by default): "Open left/right/centre in PDF Side
-  Viewer" on .pdf files, registered per-user under `SystemFileAssociations` so it can NEVER become
+- **Explorer context menu** (optional, off by default): "Open left/centre/right in PDF Side
+  Viewer" on .pdf files, in that order, each with an icon highlighting the pane it targets,
+  registered per-user under `SystemFileAssociations` so it can NEVER become
   the default PDF handler. They reuse the running window, and "Open centre" switches it to three
   panes. Moving the exe requires re-registering (re-tick the Options checkbox, or run
   `-register-shell`/`-unregister-shell` from a script).

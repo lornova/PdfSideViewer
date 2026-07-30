@@ -63,18 +63,18 @@ Name: "swedish"; MessagesFile: "compiler:Languages\Swedish.isl"
 
 ; Same wording as the app's Options checkbox (Strings.h OptShellIntegration).
 [CustomMessages]
-english.ShellTask=Show "Open left/right/centre in PDF Side Viewer" in the Explorer menu for PDF files
-italian.ShellTask=Mostra "Apri a sinistra/destra/al centro in PDF Side Viewer" nel menu di Esplora file per i PDF
-german.ShellTask=„Links/Rechts/Mitte in PDF Side Viewer öffnen“ im Explorer-Menü für PDF-Dateien anzeigen
-french.ShellTask=Afficher « Ouvrir à gauche/droite/au centre dans PDF Side Viewer » dans le menu de l'Explorateur pour les PDF
-hungarian.ShellTask=„Megnyitás balra/jobbra/középre a PDF Side Viewerben” megjelenítése az Intéző menüjében a PDF-ekhez
-ukrainian.ShellTask=Показувати «Відкрити ліворуч/праворуч/по центру у PDF Side Viewer» у меню Провідника для файлів PDF
-portuguese.ShellTask=Mostrar «Abrir à esquerda/direita/ao centro no PDF Side Viewer» no menu do Explorador para ficheiros PDF
-spanish.ShellTask=Mostrar «Abrir a la izquierda/derecha/en el centro en PDF Side Viewer» en el menú del Explorador para archivos PDF
-polish.ShellTask=Pokaż „Otwórz po lewej/prawej/na środku w PDF Side Viewer” w menu Eksploratora dla plików PDF
-dutch.ShellTask="Links/rechts/midden openen in PDF Side Viewer" tonen in het Verkenner-menu voor PDF-bestanden
-czech.ShellTask=Zobrazit „Otevřít vlevo/vpravo/uprostřed v PDF Side Viewer“ v nabídce Průzkumníka pro soubory PDF
-swedish.ShellTask=Visa "Öppna till vänster/höger/mitten i PDF Side Viewer" i Utforskaren-menyn för PDF-filer
+english.ShellTask=Show "Open left/centre/right in PDF Side Viewer" in the Explorer menu for PDF files
+italian.ShellTask=Mostra "Apri a sinistra/al centro/a destra in PDF Side Viewer" nel menu di Esplora file per i PDF
+german.ShellTask=„Links/Mitte/Rechts in PDF Side Viewer öffnen“ im Explorer-Menü für PDF-Dateien anzeigen
+french.ShellTask=Afficher « Ouvrir à gauche/au centre/à droite dans PDF Side Viewer » dans le menu de l'Explorateur pour les PDF
+hungarian.ShellTask=„Megnyitás balra/középre/jobbra a PDF Side Viewerben” megjelenítése az Intéző menüjében a PDF-ekhez
+ukrainian.ShellTask=Показувати «Відкрити ліворуч/по центру/праворуч у PDF Side Viewer» у меню Провідника для файлів PDF
+portuguese.ShellTask=Mostrar «Abrir à esquerda/ao centro/à direita no PDF Side Viewer» no menu do Explorador para ficheiros PDF
+spanish.ShellTask=Mostrar «Abrir a la izquierda/en el centro/a la derecha en PDF Side Viewer» en el menú del Explorador para archivos PDF
+polish.ShellTask=Pokaż „Otwórz po lewej/na środku/po prawej w PDF Side Viewer” w menu Eksploratora dla plików PDF
+dutch.ShellTask="Links/midden/rechts openen in PDF Side Viewer" tonen in het Verkenner-menu voor PDF-bestanden
+czech.ShellTask=Zobrazit „Otevřít vlevo/uprostřed/vpravo v PDF Side Viewer“ v nabídce Průzkumníka pro soubory PDF
+swedish.ShellTask=Visa "Öppna till vänster/mitten/höger i PDF Side Viewer" i Utforskaren-menyn för PDF-filer
 
 [Tasks]
 Name: "shellintegration"; Description: "{cm:ShellTask}"

@@ -6,14 +6,15 @@
 #include <shellapi.h> // drag & drop
 #include <shlwapi.h>  // PathCompactPathExW (header path middle-ellipsis)
 
+#include <filesystem>
+
 namespace {
 
 constexpr PCWSTR kClassName = L"PsvPaneWindow";
 constexpr float kScaleEpsilon = 0.001f;
 
 std::wstring FileNameOf(const std::wstring& path) {
-    const size_t pos = path.find_last_of(L"\\/");
-    return pos == std::wstring::npos ? path : path.substr(pos + 1);
+    return std::filesystem::path(path).filename().wstring();
 }
 
 // Middle-ellipsis path that preserves the drive and file name (DirectWrite can

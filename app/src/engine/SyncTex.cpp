@@ -51,6 +51,12 @@ std::wstring FromUtf8(const char* s) {
     return out;
 }
 
+// Deliberately NOT std::filesystem::path::parent_path, which is what every
+// other split in this codebase now uses: at a drive root that one returns
+// "C:\" WITH the trailing separator, and TexNameCandidates below treats this
+// result as a prefix of the .tex path and indexes one past its length looking
+// for the separator. A trailing separator shifts that arithmetic by one and
+// silently drops the "./relative" candidate.
 std::wstring DirOf(const std::wstring& path) {
     const size_t sep = path.find_last_of(L"\\/");
     return sep == std::wstring::npos ? std::wstring() : path.substr(0, sep);

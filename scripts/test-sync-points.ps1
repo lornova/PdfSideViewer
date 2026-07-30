@@ -10,8 +10,8 @@
 # guard (phase 10), the status-part schema of a HIDDEN status bar (phase 11)
 # and the settings-persistence failure paths (phase 12: an injected save
 # failure must leave the file byte-identical, and the cleanup must touch only
-# the app's own temp names and only when they cannot belong to a save in
-# flight). Phase order matters: phase 0 asserts the fresh-sandbox defaults,
+# the temp names THIS process id can produce, leaving every foreign one alone).
+# Phase order matters: phase 0 asserts the fresh-sandbox defaults,
 # phases 1..2 explicitly toggle the gaps off, phase 8 reuses the manual a2|c
 # map phase 6 saved. What a phase needs from the persisted state it FORCES
 # (ini edit or command) and asserts, rather than inheriting it silently.
@@ -1026,8 +1026,8 @@ try {
     $before12 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($ini12))
     # NOT -Filter: that is FindFirstFile matching, where a trailing '.*' also
     # matches the bare name, so 'settings.ini.*' counts settings.ini itself.
-    # (The app's own sweep pattern ends in a literal .tmp and its grammar check
-    # runs on the long name, so it cannot hit the file it protects.)
+    # (The app hands the filesystem no pattern at all - it deletes names it
+    # builds itself - so it cannot hit the file it protects.)
     $siblings12 = { @(Get-ChildItem -LiteralPath $scratch -File |
             Where-Object { $_.Name -like 'settings.ini.*' } |
             ForEach-Object { $_.Name }) }
@@ -1050,26 +1050,19 @@ try {
     }
     # The very same run WITHOUT the injection must rewrite the file - otherwise
     # "byte-identical" above would also pass on an app that never saves at all.
-    # Cleanup grammar, checked in the same run: only the app's own artifact
-    # names are removable, and a FOREIGN one only once it is too old to belong
-    # to a save still in flight (the settings lock is best-effort, so another
-    # writer can be between closing its finished temp and promoting it).
-    # Planted around one clean run: the only removable name is
-    # <settings.ini>.<pid>.<counter>.tmp in canonical decimal spelling with a
-    # counter the writer can actually produce (0..63), and a FOREIGN one only
-    # once it is too old to belong to a save still in flight.
+    # Cleanup, checked in the same run. The rule the app implements is: it
+    # RECONSTRUCTS the names its OWN process id can produce
+    # (<settings.ini>.<pid>.<0..63>.tmp) and deletes those, matching nothing.
+    # So a foreign temp is never touched, whatever its age - the accepted cost
+    # of having neither a name grammar nor a staleness clock - and the names
+    # planted here before the run is even started are, by construction, all
+    # foreign.
     $keep12 = [ordered]@{
-        'settings.ini.999998.0.tmp'      = 'fresh: could be a save in flight'
-        'settings.ini.manual.bak'        = 'not the artifact grammar at all'
-        'settings.ini.007.0.tmp'         = 'leading zeros: not a name this app writes'
-        'settings.ini.999997.64.tmp'     = 'counter past the writer range'
-        'settings.ini.0.0.tmp'           = 'pid 0 is the idle process, never a writer'
-        'settings.ini.4294967296.0.tmp'  = 'one past the DWORD range (not the digit-count guard)'
+        'settings.ini.999999.0.tmp'  = 'foreign and aged: age alone no longer removes anything'
+        'settings.ini.999998.0.tmp'  = 'foreign and fresh: could be a save in flight'
+        'settings.ini.manual.bak'    = 'not a temp name at all'
     }
-    # Aged and grammatical, including both accepted boundaries: swept.
-    $sweep12 = @('settings.ini.999999.0.tmp', 'settings.ini.999996.63.tmp',
-        'settings.ini.4294967295.0.tmp')
-    foreach ($name in @($sweep12) + @($keep12.Keys)) {
+    foreach ($name in $keep12.Keys) {
         $p = Join-Path $scratch $name
         Set-Content $p -Value 'leftover' -Encoding Unicode
         # Aged, except the one whose freshness is the point.
@@ -1146,21 +1139,33 @@ try {
                 Where-Object { -not $_.IsInherited })
     }
     $v = Start-Viewer $pdfA $pdfC
-    # A temp carrying the LIVE process id must be swept whatever its age: that
-    # is the "ours on sight" half of the rule, which ageing alone never covers.
-    $ownTmp12 = Join-Path $scratch "settings.ini.$($v.Proc.Id).7.tmp"
-    Set-Content $ownTmp12 -Value 'leftover' -Encoding Unicode
+    # The names carrying the LIVE process id, planted only now because the id is
+    # what the app reconstructs. Both ends of the counter range it can produce,
+    # one aged and one fresh (age is not part of the rule any more), plus the
+    # first counter OUTSIDE it: 64 is never a name a save writes, so the sweep
+    # never reconstructs it and it survives.
+    $ownSweep12 = [ordered]@{
+        "settings.ini.$($v.Proc.Id).0.tmp"  = 'own id, first counter, aged'
+        "settings.ini.$($v.Proc.Id).63.tmp" = 'own id, last counter, fresh'
+    }
+    $ownKeep12 = Join-Path $scratch "settings.ini.$($v.Proc.Id).64.tmp"
+    foreach ($name in $ownSweep12.Keys) {
+        $p = Join-Path $scratch $name
+        Set-Content $p -Value 'leftover' -Encoding Unicode
+        if ($name -like '*.0.tmp') { (Get-Item -LiteralPath $p).LastWriteTime = (Get-Date).AddHours(-2) }
+    }
+    Set-Content $ownKeep12 -Value 'leftover' -Encoding Unicode
     Send-Command $v $IDC_TOGGLE_SCROLL_SYNC
     Start-Sleep -Milliseconds 400
     Stop-Viewer $v
     Assert (([Convert]::ToBase64String([IO.File]::ReadAllBytes($ini12))) -ne $before12) `
         'the same run without the injection DOES rewrite the file (the check discriminates)'
-    Assert (-not (Test-Path -LiteralPath $ownTmp12)) `
-        "this process's own temp is swept regardless of age"
-    foreach ($name in $sweep12) {
+    foreach ($name in $ownSweep12.Keys) {
         Assert (-not (Test-Path -LiteralPath (Join-Path $scratch $name))) `
-            "swept: $name (stale and grammatical)"
+            "swept: $name ($($ownSweep12[$name]))"
     }
+    Assert (Test-Path -LiteralPath $ownKeep12) `
+        'kept: own id but counter 64, past the range a save can write'
     foreach ($name in $keep12.Keys) {
         Assert (Test-Path -LiteralPath (Join-Path $scratch $name)) `
             "kept: $name ($($keep12[$name]))"
@@ -1204,20 +1209,26 @@ try {
     }
     if (Test-Path -LiteralPath $ini12) { throw 'could not remove settings.ini for the rescue phase' }
     $v = Start-Viewer $pdfA $pdfC
+    # An OWN-id temp too, since that is the only kind the sweep would otherwise
+    # remove: without it the guard would be untestable, the two foreign files
+    # above being safe for a different reason entirely.
+    $guardTmp12 = Join-Path $scratch "settings.ini.$($v.Proc.Id).0.tmp"
+    Set-Content $guardTmp12 -Value 'leftover' -Encoding Unicode
     Assert ([Win32.Native]::IsWindowVisible($v.Status)) `
         'NEITHER retained temp is adopted, fresh or aged: the window starts from defaults'
     Stop-Viewer $v                   # and this save recreates settings.ini
     Assert ((Test-Path -LiteralPath $rescueAged12) -and (Test-Path -LiteralPath $rescueFresh12)) `
-        'both temps survive the save that runs while settings.ini is absent'
+        'both foreign temps survive the save that runs while settings.ini is absent'
+    Assert (Test-Path -LiteralPath $guardTmp12) `
+        "and so does this process's own, which the guard is what protects"
     # And the protection ends exactly there: forensic residue, not a recovery
-    # slot. With the canonical file back the ordinary rules apply again, which
-    # for two FOREIGN temps means the aged one goes and the fresh one stays.
+    # slot. With the canonical file back, the same own-id name is swept again.
     $v = Start-Viewer $pdfA $pdfC
+    $guardTmp12b = Join-Path $scratch "settings.ini.$($v.Proc.Id).0.tmp"
+    Set-Content $guardTmp12b -Value 'leftover' -Encoding Unicode
     Stop-Viewer $v
-    Assert (-not (Test-Path -LiteralPath $rescueAged12)) `
-        'the aged one is swept by the next save, once the canonical file exists again'
-    Assert (Test-Path -LiteralPath $rescueFresh12) `
-        'and the fresh one still is not (it could be a save in flight)'
+    Assert (-not (Test-Path -LiteralPath $guardTmp12b)) `
+        'an own-id temp IS swept by the next save, once the canonical file exists again'
 } finally {
     Get-Process PdfSideViewer -ErrorAction SilentlyContinue | ForEach-Object {
         [void]$_.CloseMainWindow()

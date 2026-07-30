@@ -38,7 +38,20 @@ struct PaneSettings {
     int zoomMode = 2; // PaneWindow::ZoomMode (0 manual, 1 fit width, 2 fit page)
 };
 
-struct AppSettings {
+// SyncTeX inverse-search launch template: %f = absolute .tex path, %l = 1-based
+// line. A "://" marks a URI (ShellExecute), anything else is a command line.
+// The default targets VS Code's protocol handler.
+inline constexpr const wchar_t* kDefaultSynctexInverse = L"vscode://file/%f:%l";
+
+// A class, not an aggregate, for ONE reason: the ranges below are an invariant
+// of the type rather than a property of the file it was read from. They used to
+// hold on the load path only (Load clamped, Save wrote whatever it was handed,
+// and MainWindow re-checked three of them by hand), so an out-of-range caller
+// could persist a value no reader would ever have accepted. Normalize is the
+// single owner and both paths run it; the data itself stays public, since there
+// is nothing else here a getter would protect.
+class AppSettings {
+public:
     bool hasPlacement = false;
     RECT normalRect{};
     bool maximized = false;
@@ -76,10 +89,7 @@ struct AppSettings {
     bool defScrollSync = true;
     bool defZoomSync = true;
     std::wstring language = L"en"; // Strings.h kCodes ("en".."sv"); anything else falls back to en
-    // SyncTeX inverse-search launch template: %f = absolute .tex path,
-    // %l = 1-based line. A "://" marks a URI (ShellExecute), anything else is
-    // a command line. Default targets VS Code's protocol handler.
-    std::wstring synctexInverse = L"vscode://file/%f:%l";
+    std::wstring synctexInverse = kDefaultSynctexInverse;
     std::vector<std::wstring> mruFiles;  // most recent first
     std::vector<MruSession> mruSessions; // most recent first
     std::vector<SavedSyncPoints> syncPoints; // most recent first
@@ -100,7 +110,8 @@ struct AppSettings {
 
     // Reads the whole file through ONE handle and parses it in memory: what
     // Load returns is always a single coherent snapshot, never a mixture of
-    // two versions of the file.
+    // two versions of the file. What it returns is also always NORMALIZED, so
+    // no caller has to re-check a range.
     static AppSettings Load();
     // Whole-file write to a uniquely named temp sibling, checked byte counts,
     // then ONE same-volume rename over the target: false = nothing was
@@ -116,7 +127,16 @@ struct AppSettings {
     // The replacement carries the DIRECTORY's inherited security, never the
     // old file's own: the settings directory is the declared boundary (see
     // Settings.cpp), so per-file DACLs and per-file EFS do not survive a save.
+    // What reaches the file is a NORMALIZED copy: the caller's own object is
+    // left untouched, and no value a Load would refuse can be written.
     bool Save() const;
+
+private:
+    // The declared range of every field, plus the two rules that span more than
+    // one: normalRect only means something with hasPlacement, and two of the
+    // three-pane shares have to leave room for the third. Idempotent, and a
+    // no-op on anything Load already produced.
+    void Normalize();
 };
 
 // Directory holding settings.ini (honors the PSV_SETTINGS_DIR test override,

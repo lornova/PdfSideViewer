@@ -1,5 +1,7 @@
 #include "FileWatcher.h"
 
+#include <filesystem>
+
 namespace {
 
 // FILE_NOTIFY_INFORMATION names are counted, not null-terminated.
@@ -22,9 +24,14 @@ void FileWatcher::Watch(HWND notify, UINT msg, const std::wstring& filePath) {
     const DWORD n = GetFullPathNameW(filePath.c_str(), ARRAYSIZE(full), full, nullptr);
     if (n == 0 || n >= ARRAYSIZE(full))
         return;
-    const std::wstring absolute(full, n);
-    const size_t sep = absolute.find_last_of(L"\\/");
-    if (sep == std::wstring::npos)
+    // parent_path, not a hand-rolled split at the last separator: for a file
+    // sitting at a drive ROOT that split yields "C:", which names the CURRENT
+    // directory on C: rather than its root, and the watch would silently
+    // observe the wrong directory.
+    const std::filesystem::path absolute(std::wstring(full, n));
+    const std::wstring dir = absolute.parent_path().wstring();
+    const std::wstring fileName = absolute.filename().wstring();
+    if (dir.empty() || fileName.empty())
         return;
 
     m_notify = notify;
@@ -32,8 +39,7 @@ void FileWatcher::Watch(HWND notify, UINT msg, const std::wstring& filePath) {
     m_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!m_stopEvent)
         return;
-    m_thread = std::thread(&FileWatcher::ThreadProc, this, absolute.substr(0, sep),
-                           absolute.substr(sep + 1), m_generation);
+    m_thread = std::thread(&FileWatcher::ThreadProc, this, dir, fileName, m_generation);
 }
 
 void FileWatcher::Stop() {

@@ -1,6 +1,11 @@
-# Generates app\res\app.ico: two side-by-side pages with an accent line at the same height
-# (the synchronized-scrolling cue). Deterministic System.Drawing rendering, so the icon is
-# reproducible from source; rerun after changing the artwork and commit the resulting .ico.
+# Generates the icons in app\res. Deterministic System.Drawing rendering, so every icon is
+# reproducible from source; rerun after changing the artwork and commit the resulting .ico files.
+#
+#   app.ico               two side-by-side pages with an accent line at the same height (the
+#                         synchronized-scrolling cue), 16..256 px
+#   verb-left.ico         Explorer context-menu verbs: the same pages with the pane the verb
+#   verb-center.ico       targets filled in the accent blue (three pages for the centre one),
+#   verb-right.ico        menu sizes only
 #
 #   powershell scripts\make-icon.ps1
 #
@@ -9,16 +14,16 @@
 # read PNG frames), PNG only for the 256 px frame as is conventional.
 
 param(
-    [string]$OutFile = (Join-Path $PSScriptRoot '..\app\res\app.ico')
+    [string]$OutDir = (Join-Path $PSScriptRoot '..\app\res')
 )
 
 Set-StrictMode -Version 3
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 
-$sizes = 16, 20, 24, 32, 40, 48, 64, 128, 256
-
-function New-Frame([int]$s) {
+# $pageX/$pageW are fractions of the frame size; $highlight is the index of the page filled
+# in accent blue, -1 for none (the app icon, which gets the sync accent line instead).
+function New-Frame([int]$s, [float[]]$pageX, [float]$pageW, [int]$highlight) {
     $bmp = New-Object System.Drawing.Bitmap($s, $s, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
     $g = [System.Drawing.Graphics]::FromImage($bmp)
     try {
@@ -30,6 +35,7 @@ function New-Frame([int]$s) {
         $foldCol   = [System.Drawing.Color]::FromArgb(255, 208, 214, 224)
         $grayCol   = [System.Drawing.Color]::FromArgb(255, 158, 168, 181)
         $accentCol = [System.Drawing.Color]::FromArgb(255, 47, 111, 222)  # sync-blue
+        $inkCol    = [System.Drawing.Color]::FromArgb(255, 245, 247, 250) # lines on accent fill
 
         $bw = [Math]::Max(1.0, $s * 0.05)   # page border width
         $lw = [Math]::Max(1.0, $s * 0.05)   # content line width
@@ -37,18 +43,21 @@ function New-Frame([int]$s) {
         $borderPen = New-Object System.Drawing.Pen($borderCol, [float]$bw)
         $borderPen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
         $paperBrush = New-Object System.Drawing.SolidBrush($paperCol)
+        $accentBrush = New-Object System.Drawing.SolidBrush($accentCol)
         $foldBrush = New-Object System.Drawing.SolidBrush($foldCol)
         $grayPen = New-Object System.Drawing.Pen($grayCol, [float]$lw)
         $accentPen = New-Object System.Drawing.Pen($accentCol, [float]$lw)
+        $inkPen = New-Object System.Drawing.Pen($inkCol, [float]$lw)
 
-        # Two pages, geometry in fractions of s so one routine renders every size.
+        # Geometry in fractions of s so one routine renders every size.
         $y0 = 0.10 * $s
         $ph = 0.80 * $s
-        $pw = 0.40 * $s
+        $pw = $pageW * $s
         $inset = $bw / 2.0
-        foreach ($x0 in (0.06 * $s), (0.54 * $s)) {
-            $x = $x0 + $inset; $y = $y0 + $inset
-            $w = $pw - $bw;    $h = $ph - $bw
+        for ($i = 0; $i -lt $pageX.Count; $i++) {
+            $hl = ($i -eq $highlight)
+            $x = $pageX[$i] * $s + $inset; $y = $y0 + $inset
+            $w = $pw - $bw;                $h = $ph - $bw
             $fold = if ($s -ge 24) { 0.28 * $w } else { 0.0 }
 
             # Page outline with a cut top-right corner (dog-ear when large enough).
@@ -59,7 +68,8 @@ function New-Frame([int]$s) {
                 (New-Object System.Drawing.PointF([float]($x + $w), [float]($y + $h))),
                 (New-Object System.Drawing.PointF([float]$x, [float]($y + $h)))
             )
-            $g.FillPolygon($paperBrush, $pts)
+            $fill = if ($hl) { $accentBrush } else { $paperBrush }
+            $g.FillPolygon($fill, $pts)
             if ($fold -gt 0) {
                 $tri = @(
                     (New-Object System.Drawing.PointF([float]($x + $w - $fold), [float]$y)),
@@ -71,19 +81,22 @@ function New-Frame([int]$s) {
             }
             $g.DrawPolygon($borderPen, $pts)
 
-            # Content lines; the accent sits at the same height on both pages.
+            # Content lines; on the app icon the accent sits at the same height on both
+            # pages, on a highlighted page they read as paper-coloured text.
             if ($s -ge 20) {
                 $pad = 0.18 * $w
                 foreach ($fy in 0.34, 0.52, 0.70) {
                     $ly = $y + $fy * $h
-                    $pen = if ($fy -eq 0.52) { $accentPen } else { $grayPen }
+                    $pen = if ($hl) { $inkPen }
+                           elseif ($highlight -lt 0 -and $fy -eq 0.52) { $accentPen }
+                           else { $grayPen }
                     $g.DrawLine($pen, [float]($x + $pad), [float]$ly, [float]($x + $w - $pad), [float]$ly)
                 }
             }
         }
 
-        $borderPen.Dispose(); $paperBrush.Dispose(); $foldBrush.Dispose()
-        $grayPen.Dispose(); $accentPen.Dispose()
+        $borderPen.Dispose(); $paperBrush.Dispose(); $accentBrush.Dispose(); $foldBrush.Dispose()
+        $grayPen.Dispose(); $accentPen.Dispose(); $inkPen.Dispose()
     } finally {
         $g.Dispose()
     }
@@ -121,47 +134,64 @@ function Get-DibBytes([System.Drawing.Bitmap]$bmp) {
     return , $bytes
 }
 
-$frames = foreach ($s in $sizes) {
-    $bmp = New-Frame $s
-    if ($s -ge 256) {
-        $ms = New-Object System.IO.MemoryStream
-        $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
-        $bytes = $ms.ToArray()
-        $ms.Dispose()
-    } else {
-        $bytes = Get-DibBytes $bmp
-    }
-    $bmp.Dispose()
-    , $bytes
-}
-
-$outDir = Split-Path -Parent $OutFile
-if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir | Out-Null }
-
 # ICONDIR + ICONDIRENTRY[] + payloads. Width/height bytes are 0 for the 256 px frame.
-$fs = [System.IO.File]::Create($OutFile)
-try {
-    $bin = New-Object System.IO.BinaryWriter($fs)
-    $bin.Write([uint16]0)                 # reserved
-    $bin.Write([uint16]1)                 # type: icon
-    $bin.Write([uint16]$sizes.Count)
-    $offset = 6 + 16 * $sizes.Count
-    for ($i = 0; $i -lt $sizes.Count; $i++) {
-        $dim = if ($sizes[$i] -ge 256) { 0 } else { $sizes[$i] }
-        $bin.Write([byte]$dim)            # width
-        $bin.Write([byte]$dim)            # height
-        $bin.Write([byte]0)               # color count (true color)
-        $bin.Write([byte]0)               # reserved
-        $bin.Write([uint16]1)             # planes
-        $bin.Write([uint16]32)            # bit count
-        $bin.Write([uint32]$frames[$i].Length)
-        $bin.Write([uint32]$offset)
-        $offset += $frames[$i].Length
+function Write-Icon([string]$outFile, [int[]]$sizes, [object[]]$frames) {
+    $fs = [System.IO.File]::Create($outFile)
+    try {
+        $bin = New-Object System.IO.BinaryWriter($fs)
+        $bin.Write([uint16]0)                 # reserved
+        $bin.Write([uint16]1)                 # type: icon
+        $bin.Write([uint16]$sizes.Count)
+        $offset = 6 + 16 * $sizes.Count
+        for ($i = 0; $i -lt $sizes.Count; $i++) {
+            $dim = if ($sizes[$i] -ge 256) { 0 } else { $sizes[$i] }
+            $bin.Write([byte]$dim)            # width
+            $bin.Write([byte]$dim)            # height
+            $bin.Write([byte]0)               # color count (true color)
+            $bin.Write([byte]0)               # reserved
+            $bin.Write([uint16]1)             # planes
+            $bin.Write([uint16]32)            # bit count
+            $bin.Write([uint32]$frames[$i].Length)
+            $bin.Write([uint32]$offset)
+            $offset += $frames[$i].Length
+        }
+        foreach ($frame in $frames) { $bin.Write($frame) }
+        $bin.Flush()
+    } finally {
+        $fs.Dispose()
     }
-    foreach ($frame in $frames) { $bin.Write($frame) }
-    $bin.Flush()
-} finally {
-    $fs.Dispose()
+    Write-Host "Wrote $outFile ($((Get-Item $outFile).Length) bytes, $($sizes.Count) frames: $($sizes -join ', '))"
 }
 
-Write-Host "Wrote $OutFile ($((Get-Item $OutFile).Length) bytes, $($sizes.Count) frames: $($sizes -join ', '))"
+if (-not (Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir | Out-Null }
+
+$twoX = [float[]](0.06, 0.54)          # two pages, 0.40 wide
+$threeX = [float[]](0.04, 0.36, 0.68)  # three pages, 0.28 wide
+
+$icons = @(
+    @{ file = 'app.ico';         sizes = [int[]](16, 20, 24, 32, 40, 48, 64, 128, 256)
+       pageX = $twoX;   pw = 0.40; hl = -1 }
+    @{ file = 'verb-left.ico';   sizes = [int[]](16, 20, 24, 32, 40, 48)
+       pageX = $twoX;   pw = 0.40; hl = 0 }
+    @{ file = 'verb-center.ico'; sizes = [int[]](16, 20, 24, 32, 40, 48)
+       pageX = $threeX; pw = 0.28; hl = 1 }
+    @{ file = 'verb-right.ico';  sizes = [int[]](16, 20, 24, 32, 40, 48)
+       pageX = $twoX;   pw = 0.40; hl = 1 }
+)
+
+foreach ($icon in $icons) {
+    $frames = foreach ($s in $icon.sizes) {
+        $bmp = New-Frame $s $icon.pageX $icon.pw $icon.hl
+        if ($s -ge 256) {
+            $ms = New-Object System.IO.MemoryStream
+            $bmp.Save($ms, [System.Drawing.Imaging.ImageFormat]::Png)
+            $bytes = $ms.ToArray()
+            $ms.Dispose()
+        } else {
+            $bytes = Get-DibBytes $bmp
+        }
+        $bmp.Dispose()
+        , $bytes
+    }
+    Write-Icon (Join-Path $OutDir $icon.file) $icon.sizes $frames
+}

@@ -247,8 +247,14 @@ Full screen (F11 / Alt+Enter, Esc exits) strips `WS_OVERLAPPEDWINDOW` and hides 
 rebar plus the status bar without touching their persisted visibility flags ("View > Toolbar"
 only hides bands 1-2; the menu band always stays). Explorer integration (optional, Options or
 `-register-shell`): three static verbs under `HKCU\...\SystemFileAssociations\.pdf\shell`
-(`MUIVerb`, `MultiSelectModel=Single`) — a location that by documented design never
-participates in default-handler resolution; `-open-left/-open-right/-open-center` reuse a
+(`MUIVerb`, `MultiSelectModel=Single`, per-verb `Icon` naming the exe's own resources by
+NEGATIVE resource id — the accent-filled page marks the pane the verb targets, three pages for
+the centre one) — a location that by documented design never participates in default-handler
+resolution. Explorer lists static verbs ALPHABETICALLY by key name (creation order is not
+honoured), so the keys are numbered — `PsvOpen1Left`/`PsvOpen2Center`/`PsvOpen3Right` — to
+force the visual left/centre/right order; the un-numbered names older builds wrote are never
+written any more but still recognized (a rewrite drops this exe's, every removal path covers
+them). `-open-left/-open-right/-open-center` reuse a
 running instance through the same `WM_COPYDATA` channel as forward search (see the XML IPC
 protocol under SyncTeX below; the slot travels as the word `left`/`center`/`right`, and a verb
 aimed at an inactive slot switches three-pane mode on, so it always lands).
@@ -675,17 +681,31 @@ Outline sidebar (`fz_load_outline`) is an M5 item.
   without a second file state to mark it, and half a settings file is worse than defaults, so
   that case degrades to a manual rename. That protection lasts only while the canonical name is
   missing: the first run to recreate `settings.ini`, defaults included, turns the temp back into
-  ordinary stale residue. It is a forensic artifact, not a recovery slot.) Cleanup is
-  correspondingly small: only `settings.ini.<pid>.<counter>.tmp` in canonical decimal spelling
-  with a counter the writer can produce, our own on sight and a foreign one only once it is an
-  hour old (a writer that could not take the lock may be between closing its finished temp and
-  renaming it). Worst case if that judgement is ever wrong: one save fails and the previous
-  file stays. Writers serialize best-effort through
+  ordinary stale residue. It is a forensic artifact, not a recovery slot.) Cleanup does not
+  inspect the directory at all: it RECONSTRUCTS the names this process id can produce
+  (`settings.ini.<own pid>.<0..63>.tmp`) and deletes those. A live process cannot share our id,
+  so every one of those names belongs to us or to a dead run and there is no writer to race;
+  no pattern is handed to the filesystem, so a user's own `settings.ini.something` (and whatever
+  8.3 aliasing would have matched, the API's trailing `.*` including `settings.ini` itself) is
+  out of reach by construction. The earlier version matched a wildcard and re-parsed a name
+  grammar to decide whether a FOREIGN temp was the app's, then dated it against a one-hour clock
+  to guess whether its writer was still alive. Stated cost of dropping that: a temp left by a run
+  whose id is never reused stays for good, inert, holding what `settings.ini` already holds.
+  Writers serialize best-effort through
   a lock file (`util/ScopedFileLock.h`; profile-ACL'd, crosses RDP logon sessions, no predictable
   kernel object name to pre-create), and an unserialized save is still safe: whole files win or
   lose wholesale. The lock does not merge: two instances that loaded the same state are
   last-close-wins, as they always were. Accepted trade-off: a downgrade round-trip drops keys the
   older build does not know (versionless safe-default keys by contract).
+- `AppSettings` is a class rather than an aggregate for one reason: the declared range of each
+  field, and the two rules that span more than one (`normalRect` exists only with `hasPlacement`;
+  two of the three-pane shares must leave room for the third), are an invariant of the TYPE, not a
+  property of the file. `AppSettings::Normalize` is their single owner and BOTH paths run it, so a
+  hand-edited file and an out-of-range caller are repaired by the same code: `Load` returns a
+  normalized snapshot and `Save` serializes a normalized copy, leaving the caller's own object
+  untouched. Before that the clamps lived on the load path only, `Save` wrote whatever it was
+  handed, and `MainWindow` re-checked three of them by hand. The data members stay public: there is
+  no other invariant here, so getters would add a call layer and protect nothing.
 - **Security model for the settings file, declared:** the settings DIRECTORY is the boundary,
   not the file. Every save promotes a freshly created temp, which carries the directory's
   inherited DACL, so a per-file DACL or per-file EFS state set BY HAND does not survive a save.

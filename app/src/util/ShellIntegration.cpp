@@ -1,17 +1,29 @@
 #include "util/ShellIntegration.h"
 
+#include "resource.h" // IDI_VERB_*: per-verb context-menu icons
 #include "util/ScopedFileLock.h"
 #include "util/Settings.h" // UserLockDirectory: where the verb lock lives
 #include "util/Strings.h"
 
 #include <shlobj.h> // SHChangeNotify
 
+#include <string>
+
 namespace {
 
 constexpr PCWSTR kShellBase = L"Software\\Classes\\SystemFileAssociations\\.pdf\\shell";
-constexpr PCWSTR kVerbLeft = L"PsvOpenLeft";
-constexpr PCWSTR kVerbRight = L"PsvOpenRight";
-constexpr PCWSTR kVerbCenter = L"PsvOpenCenter";
+// Explorer lists static verbs ALPHABETICALLY by key name (key-creation order
+// is not honoured), so the digit is what puts the menu in the visual
+// left/centre/right order.
+constexpr PCWSTR kVerbLeft = L"PsvOpen1Left";
+constexpr PCWSTR kVerbCenter = L"PsvOpen2Center";
+constexpr PCWSTR kVerbRight = L"PsvOpen3Right";
+// The un-numbered names every build through 0.9.0 wrote (and alphabetically
+// those sorted centre/left/right, the bug the digits fix). Never written any
+// more; still recognized so upgrades and removals clean them up.
+constexpr PCWSTR kLegacyLeft = L"PsvOpenLeft";
+constexpr PCWSTR kLegacyRight = L"PsvOpenRight";
+constexpr PCWSTR kLegacyCenter = L"PsvOpenCenter";
 
 std::wstring ExePath() {
     wchar_t buf[MAX_PATH];
@@ -68,14 +80,16 @@ bool VerbOwnedBy(PCWSTR verb, const std::wstring& exe) {
            CompareStringOrdinal(owner.c_str(), -1, exe.c_str(), -1, TRUE) == CSTR_EQUAL;
 }
 
-bool WriteVerb(PCWSTR verb, PCWSTR label, PCWSTR flag, const std::wstring& exe) {
+bool WriteVerb(PCWSTR verb, PCWSTR label, PCWSTR flag, int iconId, const std::wstring& exe) {
     const std::wstring base = std::wstring(kShellBase) + L"\\" + verb;
     HKEY key = nullptr;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, base.c_str(), 0, nullptr, 0, KEY_SET_VALUE, nullptr,
                         &key, nullptr) != ERROR_SUCCESS)
         return false;
     bool ok = SetValue(key, L"MUIVerb", label);
-    ok = SetValue(key, L"Icon", L"\"" + exe + L"\",0") && ok;
+    // "path,-N" picks resource id N out of the exe: the MINUS is load-bearing
+    // (a bare index would track icon enumeration order, not the .rc id).
+    ok = SetValue(key, L"Icon", L"\"" + exe + L"\",-" + std::to_wstring(iconId)) && ok;
     // Explicit even though inherent: the default model for command verbs is
     // Document (one process per selected file); a "left file" is a single
     // selection, so the verb hides on multi-selects instead.
@@ -98,6 +112,8 @@ bool WriteVerb(PCWSTR verb, PCWSTR label, PCWSTR flag, const std::wstring& exe) 
 // desired-state entry point has to run a probe AND its mutation inside a
 // single acquisition.
 
+// Current names only: a set still on the legacy names must read as
+// unregistered, so the repair path rewrites (and thereby renames) it.
 bool AllVerbsOwnedBy(const std::wstring& exe) {
     for (PCWSTR verb : {kVerbLeft, kVerbRight, kVerbCenter})
         if (!VerbOwnedBy(verb, exe))
@@ -107,34 +123,43 @@ bool AllVerbsOwnedBy(const std::wstring& exe) {
 
 // A PARTIAL set (an upgrade over the two-verb release, a failed write) reads
 // as unregistered above, yet its verbs are still visible in Explorer and must
-// be removable.
+// be removable; same for verbs still under the legacy names.
 bool AnyVerbOwnedBy(const std::wstring& exe) {
-    for (PCWSTR verb : {kVerbLeft, kVerbRight, kVerbCenter})
+    for (PCWSTR verb :
+         {kVerbLeft, kVerbRight, kVerbCenter, kLegacyLeft, kLegacyRight, kLegacyCenter})
         if (VerbOwnedBy(verb, exe))
             return true;
     return false;
 }
 
 bool WriteAllVerbs(const std::wstring& exe) {
-    // Written in VISUAL order (left, centre, right), matching the File menu:
-    // Explorer does not promise to list verbs in key-creation order, but when
-    // it does, this is the order to be in. The centre verb is registered
+    // This exe's verbs under the LEGACY names go first, or an upgrade would
+    // show six entries; best-effort (a leftover is visible but harmless, and
+    // every removal path covers the legacy names too). Foreign legacy verbs
+    // stay: their copy owns them. The centre verb is registered
     // unconditionally: like the File menu entry, it is a way INTO the
     // three-pane mode, not something that follows it.
-    const bool ok = WriteVerb(kVerbLeft, Str(StrId::VerbOpenLeft), L"-open-left", exe) &&
-                    WriteVerb(kVerbCenter, Str(StrId::VerbOpenCenter), L"-open-center", exe) &&
-                    WriteVerb(kVerbRight, Str(StrId::VerbOpenRight), L"-open-right", exe);
+    for (PCWSTR verb : {kLegacyLeft, kLegacyRight, kLegacyCenter})
+        if (VerbOwnedBy(verb, exe))
+            RegDeleteTreeW(HKEY_CURRENT_USER, (std::wstring(kShellBase) + L"\\" + verb).c_str());
+    const bool ok =
+        WriteVerb(kVerbLeft, Str(StrId::VerbOpenLeft), L"-open-left", IDI_VERB_LEFT, exe) &&
+        WriteVerb(kVerbCenter, Str(StrId::VerbOpenCenter), L"-open-center", IDI_VERB_CENTER,
+                  exe) &&
+        WriteVerb(kVerbRight, Str(StrId::VerbOpenRight), L"-open-right", IDI_VERB_RIGHT, exe);
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
     return ok;
 }
 
 bool RemoveVerbs(const std::wstring& ownedBy, bool ownedOnly) {
-    // Scoped deletes: only our own verb keys, never the .pdf association.
-    // With ownedOnly, ownership is checked PER VERB: a mixed state (this copy
-    // owns some verbs, a portable/dev copy owns others - partial writes from
-    // different exes can interleave) must remove only what is genuinely ours.
+    // Scoped deletes: only our own verb keys (current and legacy names),
+    // never the .pdf association. With ownedOnly, ownership is checked PER
+    // VERB: a mixed state (this copy owns some verbs, a portable/dev copy
+    // owns others - partial writes from different exes can interleave) must
+    // remove only what is genuinely ours.
     bool ok = true;
-    for (PCWSTR verb : {kVerbLeft, kVerbRight, kVerbCenter}) {
+    for (PCWSTR verb :
+         {kVerbLeft, kVerbRight, kVerbCenter, kLegacyLeft, kLegacyRight, kLegacyCenter}) {
         if (ownedOnly && !VerbOwnedBy(verb, ownedBy))
             continue;
         const LSTATUS s = RegDeleteTreeW(HKEY_CURRENT_USER,

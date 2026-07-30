@@ -5,13 +5,18 @@
 #include <shlobj.h> // SHGetKnownFolderPath, FOLDERID_*
 
 #include <cerrno>
-#include <climits>
 #include <cmath>
 #include <cstring>
 #include <cwchar>
+#include <filesystem>
 #include <map>
-#include <optional>
+#include <string_view>
 #include <vector>
+
+// Always the error_code overloads below: the throwing ones would turn an
+// ordinary "the file is not there" into an exception on paths that have to
+// degrade quietly (a save at teardown has no UI left to report through).
+namespace fs = std::filesystem;
 
 namespace {
 
@@ -22,6 +27,11 @@ constexpr PCWSTR kMruFilesSection = L"mru-files";
 constexpr PCWSTR kMruPairsSection = L"mru-pairs";
 constexpr PCWSTR kSyncPointsSection = L"sync-points";
 constexpr PCWSTR kSynctexSection = L"synctex";
+
+// A sane virtual-desktop bound for the saved placement. Extremes from a
+// corrupted or hand-edited file must not overflow the rectangle arithmetic into
+// a placement that is nonsense rather than merely wrong.
+constexpr int kCoordLimit = 1'000'000;
 
 // --------------------------------------------------------------- locations
 
@@ -41,16 +51,14 @@ std::wstring EnvVar(PCWSTR name) {
     return value;
 }
 
-bool IsDirectory(const std::wstring& path) {
-    const DWORD attrs = GetFileAttributesW(path.c_str());
-    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
-}
-
 // Reports whether the directory EXISTS afterwards: a failed creation must
 // surface as "no settings directory", never as a path nothing can be written
-// to.
+// to. create_directory, NOT create_directories: the parent is either the
+// account's profile or a directory the tester named, and silently building a
+// tree under a mistyped one is worse than failing closed.
 bool EnsureDirectory(const std::wstring& path) {
-    return CreateDirectoryW(path.c_str(), nullptr) != FALSE || IsDirectory(path);
+    std::error_code ec;
+    return fs::create_directory(path, ec) || fs::is_directory(path, ec);
 }
 
 // The account's real profile folder, resolved through the shell rather than
@@ -96,15 +104,15 @@ std::wstring FoldKey(const std::wstring& s) {
     return out;
 }
 
-std::wstring TrimAscii(const std::wstring& s) {
-    const auto blank = [](wchar_t c) { return c == L' ' || c == L'\t'; };
-    size_t begin = 0;
-    size_t end = s.size();
-    while (begin < end && blank(s[begin]))
-        ++begin;
-    while (end > begin && blank(s[end - 1]))
-        --end;
-    return s.substr(begin, end - begin);
+// Spaces and tabs ONLY, which is also why the search set is spelled out rather
+// than left to iswspace: that one is locale-dependent and would eat vertical
+// tabs and form feeds the profile API kept.
+std::wstring TrimAscii(std::wstring_view s) {
+    constexpr std::wstring_view kBlank = L" \t";
+    const size_t begin = s.find_first_not_of(kBlank);
+    return begin == std::wstring_view::npos
+               ? std::wstring()
+               : std::wstring(s.substr(begin, s.find_last_not_of(kBlank) - begin + 1));
 }
 
 // Reads the shape GetPrivateProfileString wrote, so every settings.ini this
@@ -125,7 +133,7 @@ IniData ParseIni(const std::wstring& text) {
         size_t end = text.find_first_of(L"\r\n", pos);
         if (end == std::wstring::npos)
             end = text.size();
-        const std::wstring line = TrimAscii(text.substr(pos, end - pos));
+        const std::wstring line = TrimAscii(std::wstring_view(text).substr(pos, end - pos));
         pos = end + 1;
         if (line.empty() || line.front() == L';')
             continue;
@@ -203,9 +211,7 @@ public:
         Section(section).push_back({key, Sanitize(value)});
     }
     void SetInt(PCWSTR section, const std::wstring& key, int value) {
-        wchar_t buffer[32];
-        swprintf_s(buffer, L"%d", value);
-        Set(section, key, buffer);
+        Set(section, key, std::to_wstring(value));
     }
     void SetBool(PCWSTR section, const std::wstring& key, bool value) {
         SetInt(section, key, value ? 1 : 0);
@@ -242,9 +248,7 @@ private:
     // edit box, so this keeps the file well formed BY CONSTRUCTION rather
     // than by luck about what the inputs happen to allow.
     static std::wstring Sanitize(std::wstring value) {
-        value.erase(std::remove_if(value.begin(), value.end(),
-                                   [](wchar_t c) { return c < L' ' && c != L'\t'; }),
-                    value.end());
+        std::erase_if(value, [](wchar_t c) { return c < L' ' && c != L'\t'; });
         return value;
     }
 
@@ -322,8 +326,9 @@ std::wstring ReadWholeFile(const std::wstring& path) {
     return text;
 }
 
-// Highest counter a temp name can carry; cleanup rejects anything above it, so
-// its grammar describes only names this app is able to produce.
+// Highest counter a temp name can carry. It bounds the names CreateUniqueTemp
+// tries AND the ones the sweep below reconstructs, which is what lets the two
+// agree without a grammar to describe them.
 constexpr unsigned long kMaxTempCounter = 63;
 
 // A temp file with a name nothing else can hold: CREATE_NEW never opens an
@@ -384,99 +389,32 @@ bool WriteWholeFile(HANDLE handle, const std::wstring& text) {
     return FlushFileBuffers(handle) != FALSE;
 }
 
-// The ONE artifact name a save creates, and therefore the only one cleanup may
-// ever delete: <settings.ini>.<pid>.<counter>.tmp, canonical decimal spelling,
-// counter inside the range CreateUniqueTemp can actually produce. A wildcard
-// would also swallow a user's own settings.ini.something (and, through 8.3
-// name matching, whatever else happens to alias the pattern - the API's
-// trailing ".*" even matches settings.ini itself).
-bool ParseDecimal(const std::wstring& s, unsigned long limit, unsigned long& out) {
-    if (s.empty() || s.size() > 10 || (s.size() > 1 && s.front() == L'0'))
-        return false; // no leading zeros: not a spelling this app produces
-    for (wchar_t c : s)
-        if (c < L'0' || c > L'9')
-            return false;
-    errno = 0;
-    wchar_t* end = nullptr;
-    const unsigned long value = std::wcstoul(s.c_str(), &end, 10);
-    if (errno == ERANGE || end != s.c_str() + s.size() || value > limit)
-        return false;
-    out = value;
-    return true;
-}
-
-std::optional<DWORD> ParseTempName(const std::wstring& name, const std::wstring& stem) {
-    if (name.size() <= stem.size() + 1 || name.compare(0, stem.size(), stem) != 0 ||
-        name[stem.size()] != L'.' || name.size() < 5 ||
-        name.compare(name.size() - 4, 4, L".tmp") != 0)
-        return std::nullopt;
-    const std::wstring rest = name.substr(stem.size() + 1, name.size() - stem.size() - 5);
-    const size_t dot = rest.find_last_of(L'.');
-    if (dot == std::wstring::npos)
-        return std::nullopt;
-    unsigned long counter = 0;
-    unsigned long pid = 0;
-    // The full DWORD range: process ids being multiples of four is an
-    // implementation detail applications are told not to depend on. Only 0 is
-    // excluded, and that by contract (the idle process is never a writer).
-    if (!ParseDecimal(rest.substr(dot + 1), kMaxTempCounter, counter) ||
-        !ParseDecimal(rest.substr(0, dot), 0xFFFFFFFFul, pid) || pid == 0)
-        return std::nullopt;
-    return static_cast<DWORD>(pid);
-}
-
-// Old enough that no save can still be using it: a save takes milliseconds.
-// A temp's last-write time is also its creation time for this purpose - it is
-// written once and never renamed.
-constexpr ULONGLONG kStaleTempHns = 36'000'000'000ULL; // 1 hour, 100 ns units
-
-bool OlderThan(const FILETIME& stamp, ULONGLONG ageHns) {
-    FILETIME now{};
-    GetSystemTimeAsFileTime(&now);
-    const auto pack = [](const FILETIME& t) {
-        return (static_cast<ULONGLONG>(t.dwHighDateTime) << 32) | t.dwLowDateTime;
-    };
-    const ULONGLONG then = pack(stamp);
-    const ULONGLONG here = pack(now);
-    return here > then && here - then > ageHns;
-}
-
-// Leftovers from a crashed save hold document and MRU paths and would
-// otherwise linger forever. Only OUR OWN process's temps are removed on sight;
-// a foreign one has to be an hour old first, because the settings lock is
-// best-effort and another writer may be between closing its finished temp and
-// renaming it, with nothing holding the file open. Worst case if that
-// judgement is ever wrong: that writer's save fails and the previous file
-// stays - there is no window in which settings.ini does not exist.
-void SweepStaleTemps(const std::wstring& target) {
+// Leftovers from a crashed save hold document and MRU paths and would otherwise
+// linger forever. Only THIS process's own temps are swept, and by RECONSTRUCTING
+// the names a save can produce instead of matching what is on disk: no name
+// grammar to write, no wildcard handed to the filesystem (the API's trailing
+// ".*" matches a user's own settings.ini.something, and settings.ini itself
+// through 8.3 aliasing), and no clock deciding when a file somebody else wrote
+// has been abandoned. A live process cannot share our id, so each of these
+// names belongs to us or to a dead run: there is no writer to race, and the
+// "wait an hour before touching a foreign temp" rule that guarded that race is
+// gone with the reason for it.
+// The cost, stated: a temp left by a run whose id is never reused stays for
+// good. It is inert litter holding what settings.ini already holds.
+void SweepOwnTemps(const std::wstring& target) {
     // Nothing is swept while the canonical file is ABSENT. In that state a
     // retained temp can be the only complete copy of the settings left (see
     // PromoteFile), and litter a user can rename by hand beats deleting the
-    // last snapshot on a timer. The protection lasts exactly that long: once
-    // any run recreates settings.ini (from defaults, if that is all it had),
-    // the old temp becomes an ordinary stale artifact again and the rules
-    // below apply to it. It is short-lived forensic residue, not a durable
-    // recovery slot.
-    if (GetFileAttributesW(target.c_str()) == INVALID_FILE_ATTRIBUTES)
+    // last snapshot. The protection lasts exactly that long: once any run
+    // recreates settings.ini (from defaults, if that is all it had), the temp
+    // is ordinary residue again. It is short-lived forensic residue, not a
+    // durable recovery slot.
+    std::error_code ec;
+    if (!fs::exists(target, ec))
         return;
-    const size_t slash = target.find_last_of(L'\\');
-    if (slash == std::wstring::npos)
-        return;
-    const std::wstring dir = target.substr(0, slash + 1);
-    const std::wstring stem = target.substr(slash + 1);
-    const DWORD self = GetCurrentProcessId();
-    WIN32_FIND_DATAW found{};
-    const HANDLE search = FindFirstFileW((target + L".*.tmp").c_str(), &found);
-    if (search == INVALID_HANDLE_VALUE)
-        return;
-    do {
-        if (found.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            continue;
-        const std::optional<DWORD> pid = ParseTempName(found.cFileName, stem);
-        if (pid && (*pid == self || OlderThan(found.ftLastWriteTime, kStaleTempHns)))
-            DeleteFileW((dir + found.cFileName).c_str());
-    } while (FindNextFileW(search, &found));
-    FindClose(search);
+    const std::wstring stem = target + L"." + std::to_wstring(GetCurrentProcessId()) + L".";
+    for (unsigned long n = 0; n <= kMaxTempCounter; ++n)
+        fs::remove(stem + std::to_wstring(n) + L".tmp", ec);
 }
 
 // Swaps the finished temp in with ONE same-volume namespace rename.
@@ -506,8 +444,9 @@ bool PromoteFile(const std::wstring& temp, const std::wstring& target) {
     // one without a second file state to mark it, and silently loading half a
     // settings file is worse than starting from defaults. That case degrades
     // to manual rescue - rename it - and is documented as such.
-    if (GetFileAttributesW(target.c_str()) != INVALID_FILE_ATTRIBUTES)
-        DeleteFileW(temp.c_str());
+    std::error_code ec;
+    if (fs::exists(target, ec))
+        fs::remove(temp, ec);
     return false;
 }
 
@@ -519,7 +458,7 @@ PaneSettings LoadPane(const IniData& ini, PCWSTR section) {
     pane.zoom = ReadFloat(ini, section, L"zoom", 1.0f);
     pane.scrollX = ReadFloat(ini, section, L"scrollX", 0);
     pane.scrollY = ReadFloat(ini, section, L"scrollY", 0);
-    pane.zoomMode = std::clamp(ReadInt(ini, section, L"zoomMode", 2), 0, 2);
+    pane.zoomMode = ReadInt(ini, section, L"zoomMode", 2); // range: AppSettings::Normalize
     return pane;
 }
 
@@ -567,6 +506,58 @@ std::wstring UserLockDirectory() {
     return EnsureDirectory(dir) ? dir : std::wstring();
 }
 
+void AppSettings::Normalize() {
+    if (!hasPlacement) {
+        normalRect = {}; // no placement, no rectangle: never carried, never written
+    } else {
+        // Widened BEFORE anything is subtracted: the edges are LONG and their
+        // difference is not representable for every pair the caller may hold.
+        const long long left = std::clamp<long long>(normalRect.left, -kCoordLimit, kCoordLimit);
+        const long long top = std::clamp<long long>(normalRect.top, -kCoordLimit, kCoordLimit);
+        // Bounded as a width and a height rather than as edges, which is also
+        // the shape the file stores (x/y/w/h).
+        const long long w = std::clamp<long long>(
+            static_cast<long long>(normalRect.right) - normalRect.left, 0, kCoordLimit);
+        const long long h = std::clamp<long long>(
+            static_cast<long long>(normalRect.bottom) - normalRect.top, 0, kCoordLimit);
+        normalRect = {static_cast<LONG>(left), static_cast<LONG>(top),
+                      static_cast<LONG>(left + w), static_cast<LONG>(top + h)};
+    }
+    splitRatio = std::clamp(splitRatio, 0.1f, 0.9f);
+    splitRatio3Left = std::clamp(splitRatio3Left, 0.1f, 0.8f);
+    splitRatio3Center = std::clamp(splitRatio3Center, 0.1f, 0.8f);
+    // Two shares must leave room for the third; a pair that does not falls back
+    // to equal thirds rather than collapsing a pane.
+    if (splitRatio3Left + splitRatio3Center > 0.9f) {
+        splitRatio3Left = 1.0f / 3.0f;
+        splitRatio3Center = 1.0f / 3.0f;
+    }
+    paneCount = std::clamp(paneCount, 2, kPaneSlots);
+    if (dpi == 0)
+        dpi = 96; // zero is not a DPI: everything divides by it
+    scrollMode = std::clamp(scrollMode, 0, 1);
+    wheelLines = std::clamp(wheelLines, 0, 100);
+    outlineWidth = std::clamp(outlineWidth, 120, 600);
+    toolbarText = std::clamp(toolbarText, 0, 2);
+    defPaneCount = std::clamp(defPaneCount, 2, kPaneSlots);
+    defScrollMode = std::clamp(defScrollMode, 0, 1);
+    defZoomMode = std::clamp(defZoomMode, 0, 2);
+    if (language.empty())
+        language = L"en";
+    if (synctexInverse.empty())
+        synctexInverse = kDefaultSynctexInverse; // cleared in the dialog = back to the default
+    for (PaneSettings& pane : panes)
+        pane.zoomMode = std::clamp(pane.zoomMode, 0, 2);
+    // Both MRU lists and the sync-point memory cap at the digit mnemonics, so
+    // the cap belongs to the type rather than to each loop that walks them.
+    if (mruFiles.size() > kMruMaxEntries)
+        mruFiles.resize(kMruMaxEntries);
+    if (mruSessions.size() > kMruMaxEntries)
+        mruSessions.resize(kMruMaxEntries);
+    if (syncPoints.size() > kMruMaxEntries)
+        syncPoints.resize(kMruMaxEntries);
+}
+
 AppSettings AppSettings::Load() {
     AppSettings s;
     const std::wstring path = SettingsPath();
@@ -581,61 +572,47 @@ AppSettings AppSettings::Load() {
     // reader-side lock that could time out.
     const IniData ini = ParseIni(ReadWholeFile(path));
     s.hasPlacement = ReadInt(ini, kWindowSection, L"hasPlacement", 0) != 0;
-    // Clamped to a sane virtual-desktop range BEFORE the additions: extremes
-    // from a corrupted or hand-edited file must not overflow the rectangle
-    // arithmetic into a placement that is nonsense rather than merely wrong.
-    constexpr int kCoordLimit = 1'000'000;
+    // The four keys are clamped INDIVIDUALLY here, before they are added: the
+    // range itself is Normalize's, but the sums below have to be defined first.
     const int x = std::clamp(ReadInt(ini, kWindowSection, L"x", 0), -kCoordLimit, kCoordLimit);
     const int y = std::clamp(ReadInt(ini, kWindowSection, L"y", 0), -kCoordLimit, kCoordLimit);
     const int w = std::clamp(ReadInt(ini, kWindowSection, L"w", 0), 0, kCoordLimit);
     const int h = std::clamp(ReadInt(ini, kWindowSection, L"h", 0), 0, kCoordLimit);
     s.normalRect = {x, y, x + w, y + h};
     s.maximized = ReadInt(ini, kWindowSection, L"maximized", 0) != 0;
-    s.splitRatio = std::clamp(ReadFloat(ini, kWindowSection, L"splitRatio", 0.5f), 0.1f, 0.9f);
-    s.paneCount = std::clamp(ReadInt(ini, kWindowSection, L"paneCount", 2), 2, kPaneSlots);
-    s.splitRatio3Left =
-        std::clamp(ReadFloat(ini, kWindowSection, L"splitRatio3Left", 1.0f / 3.0f), 0.1f, 0.8f);
-    s.splitRatio3Center =
-        std::clamp(ReadFloat(ini, kWindowSection, L"splitRatio3Center", 1.0f / 3.0f), 0.1f, 0.8f);
-    // Two shares must leave room for the third; a hand-edited pair that does
-    // not falls back to equal thirds rather than collapsing a pane.
-    if (s.splitRatio3Left + s.splitRatio3Center > 0.9f) {
-        s.splitRatio3Left = 1.0f / 3.0f;
-        s.splitRatio3Center = 1.0f / 3.0f;
-    }
-    s.dpi = static_cast<UINT>(std::max(1, ReadInt(ini, kWindowSection, L"dpi", 96)));
+    s.splitRatio = ReadFloat(ini, kWindowSection, L"splitRatio", 0.5f);
+    s.paneCount = ReadInt(ini, kWindowSection, L"paneCount", 2);
+    s.splitRatio3Left = ReadFloat(ini, kWindowSection, L"splitRatio3Left", 1.0f / 3.0f);
+    s.splitRatio3Center = ReadFloat(ini, kWindowSection, L"splitRatio3Center", 1.0f / 3.0f);
+    // Negatives are excluded HERE, not by Normalize: they would reach an
+    // unsigned field as a value near its maximum, which is not out of range.
+    s.dpi = static_cast<UINT>(std::max(0, ReadInt(ini, kWindowSection, L"dpi", 96)));
     s.toolbar = ReadInt(ini, kWindowSection, L"toolbar", 1) != 0;
     s.statusbar = ReadInt(ini, kWindowSection, L"statusbar", 1) != 0;
     s.outline = ReadInt(ini, kWindowSection, L"outline", 0) != 0;
     s.language = ReadString(ini, kWindowSection, L"language");
-    if (s.language.empty())
-        s.language = L"en";
     s.scrollSync = ReadInt(ini, kSyncSection, L"scroll", 1) != 0;
     s.zoomSync = ReadInt(ini, kSyncSection, L"zoom", 1) != 0;
     s.showGaps = ReadInt(ini, kSyncSection, L"showGaps", 1) != 0;
     s.showAnchors = ReadInt(ini, kSyncSection, L"showAnchors", 1) != 0;
     s.showTicks = ReadInt(ini, kSyncSection, L"showTicks", 1) != 0;
-    s.scrollMode = std::clamp(ReadInt(ini, kWindowSection, L"scrollMode", 0), 0, 1);
+    s.scrollMode = ReadInt(ini, kWindowSection, L"scrollMode", 0);
     s.restoreSession = ReadInt(ini, kWindowSection, L"restoreSession", 1) != 0;
-    s.wheelLines = std::clamp(ReadInt(ini, kWindowSection, L"wheelLines", 0), 0, 100);
-    s.outlineWidth = std::clamp(ReadInt(ini, kWindowSection, L"outlineWidth", 260), 120, 600);
+    s.wheelLines = ReadInt(ini, kWindowSection, L"wheelLines", 0);
+    s.outlineWidth = ReadInt(ini, kWindowSection, L"outlineWidth", 260);
     s.rebarLocked = ReadInt(ini, kWindowSection, L"rebarLocked", 1) != 0;
     s.rebarBands = ReadString(ini, kWindowSection, L"rebarBands");
-    s.toolbarText = std::clamp(ReadInt(ini, kWindowSection, L"toolbarText", 1), 0, 2);
+    s.toolbarText = ReadInt(ini, kWindowSection, L"toolbarText", 1);
     s.fsToolbar = ReadInt(ini, kWindowSection, L"fsToolbar", 0) != 0;
     s.fsStatus = ReadInt(ini, kWindowSection, L"fsStatusbar", 0) != 0;
     s.showHeader = ReadInt(ini, kWindowSection, L"header", 1) != 0;
     s.headerShowPath = ReadInt(ini, kWindowSection, L"headerPath", 0) != 0;
-    s.defPaneCount = std::clamp(ReadInt(ini, kDefaultsSection, L"paneCount", 2), 2, kPaneSlots);
-    s.defScrollMode = std::clamp(ReadInt(ini, kDefaultsSection, L"scrollMode", 0), 0, 1);
-    s.defZoomMode = std::clamp(ReadInt(ini, kDefaultsSection, L"zoomMode", 2), 0, 2);
+    s.defPaneCount = ReadInt(ini, kDefaultsSection, L"paneCount", 2);
+    s.defScrollMode = ReadInt(ini, kDefaultsSection, L"scrollMode", 0);
+    s.defZoomMode = ReadInt(ini, kDefaultsSection, L"zoomMode", 2);
     s.defScrollSync = ReadInt(ini, kDefaultsSection, L"scrollSync", 1) != 0;
     s.defZoomSync = ReadInt(ini, kDefaultsSection, L"zoomSync", 1) != 0;
-    {
-        std::wstring inverse = ReadString(ini, kSynctexSection, L"inverse");
-        if (!inverse.empty())
-            s.synctexInverse = std::move(inverse); // empty/missing keeps the default
-    }
+    s.synctexInverse = ReadString(ini, kSynctexSection, L"inverse"); // empty: see Normalize
     for (size_t i = 0; i < kMruMaxEntries; ++i) {
         std::wstring f = ReadString(ini, kMruFilesSection, L"file" + std::to_wstring(i));
         if (f.empty())
@@ -671,6 +648,9 @@ AppSettings AppSettings::Load() {
     // reopens as two panes, or the park would not survive a restart.
     for (int slot = 0; slot < kPaneSlots; ++slot)
         s.panes[static_cast<size_t>(slot)] = LoadPane(ini, kSlotKeys[slot]);
+    // ONE pass over everything the file could have said, instead of a clamp
+    // wrapped around each read: no caller ever sees a value outside its range.
+    s.Normalize();
     return s;
 }
 
@@ -686,49 +666,56 @@ bool AppSettings::Save() const {
     // exactly as they were before it existed. Failing to acquire it therefore
     // does not discard the save.
     const ScopedFileLock lock(SettingsLockPath(), 1000);
+    // Normalized on a COPY: what the file receives obeys the same ranges Load
+    // enforces, so no save can persist a value the next start would refuse,
+    // while the caller's own object is left exactly as it handed it over.
+    AppSettings s = *this;
+    s.Normalize();
     // Trade-off, accepted: a whole-file rewrite drops keys this build does
     // not know, so a DOWNGRADE round-trip loses a newer version's additions
     // (they are versionless safe-default keys by contract).
     IniWriter ini;
-    ini.SetBool(kWindowSection, L"hasPlacement", hasPlacement);
-    ini.SetInt(kWindowSection, L"x", normalRect.left);
-    ini.SetInt(kWindowSection, L"y", normalRect.top);
-    ini.SetInt(kWindowSection, L"w", normalRect.right - normalRect.left);
-    ini.SetInt(kWindowSection, L"h", normalRect.bottom - normalRect.top);
-    ini.SetBool(kWindowSection, L"maximized", maximized);
-    ini.SetFloat(kWindowSection, L"splitRatio", splitRatio);
-    ini.SetInt(kWindowSection, L"paneCount", paneCount);
-    ini.SetFloat(kWindowSection, L"splitRatio3Left", splitRatio3Left);
-    ini.SetFloat(kWindowSection, L"splitRatio3Center", splitRatio3Center);
-    ini.SetInt(kWindowSection, L"dpi", static_cast<int>(dpi));
-    ini.SetBool(kWindowSection, L"toolbar", toolbar);
-    ini.SetBool(kWindowSection, L"statusbar", statusbar);
-    ini.SetBool(kWindowSection, L"outline", outline);
-    ini.Set(kWindowSection, L"language", language);
-    ini.SetInt(kWindowSection, L"scrollMode", scrollMode);
-    ini.SetBool(kWindowSection, L"restoreSession", restoreSession);
-    ini.SetInt(kWindowSection, L"wheelLines", wheelLines);
-    ini.SetInt(kWindowSection, L"outlineWidth", outlineWidth);
-    ini.SetBool(kWindowSection, L"rebarLocked", rebarLocked);
-    ini.Set(kWindowSection, L"rebarBands", rebarBands);
-    ini.SetInt(kWindowSection, L"toolbarText", toolbarText);
-    ini.SetBool(kWindowSection, L"fsToolbar", fsToolbar);
-    ini.SetBool(kWindowSection, L"fsStatusbar", fsStatus);
-    ini.SetBool(kWindowSection, L"header", showHeader);
-    ini.SetBool(kWindowSection, L"headerPath", headerShowPath);
-    ini.SetInt(kDefaultsSection, L"paneCount", defPaneCount);
-    ini.SetInt(kDefaultsSection, L"scrollMode", defScrollMode);
-    ini.SetInt(kDefaultsSection, L"zoomMode", defZoomMode);
-    ini.SetBool(kDefaultsSection, L"scrollSync", defScrollSync);
-    ini.SetBool(kDefaultsSection, L"zoomSync", defZoomSync);
-    ini.SetBool(kSyncSection, L"scroll", scrollSync);
-    ini.SetBool(kSyncSection, L"zoom", zoomSync);
-    ini.SetBool(kSyncSection, L"showGaps", showGaps);
-    ini.SetBool(kSyncSection, L"showAnchors", showAnchors);
-    ini.SetBool(kSyncSection, L"showTicks", showTicks);
-    ini.Set(kSynctexSection, L"inverse", synctexInverse);
-    for (size_t i = 0; i < mruFiles.size() && i < kMruMaxEntries; ++i)
-        ini.Set(kMruFilesSection, L"file" + std::to_wstring(i), mruFiles[i]);
+    ini.SetBool(kWindowSection, L"hasPlacement", s.hasPlacement);
+    ini.SetInt(kWindowSection, L"x", s.normalRect.left);
+    ini.SetInt(kWindowSection, L"y", s.normalRect.top);
+    ini.SetInt(kWindowSection, L"w", s.normalRect.right - s.normalRect.left);
+    ini.SetInt(kWindowSection, L"h", s.normalRect.bottom - s.normalRect.top);
+    ini.SetBool(kWindowSection, L"maximized", s.maximized);
+    ini.SetFloat(kWindowSection, L"splitRatio", s.splitRatio);
+    ini.SetInt(kWindowSection, L"paneCount", s.paneCount);
+    ini.SetFloat(kWindowSection, L"splitRatio3Left", s.splitRatio3Left);
+    ini.SetFloat(kWindowSection, L"splitRatio3Center", s.splitRatio3Center);
+    ini.SetInt(kWindowSection, L"dpi", static_cast<int>(s.dpi));
+    ini.SetBool(kWindowSection, L"toolbar", s.toolbar);
+    ini.SetBool(kWindowSection, L"statusbar", s.statusbar);
+    ini.SetBool(kWindowSection, L"outline", s.outline);
+    ini.Set(kWindowSection, L"language", s.language);
+    ini.SetInt(kWindowSection, L"scrollMode", s.scrollMode);
+    ini.SetBool(kWindowSection, L"restoreSession", s.restoreSession);
+    ini.SetInt(kWindowSection, L"wheelLines", s.wheelLines);
+    ini.SetInt(kWindowSection, L"outlineWidth", s.outlineWidth);
+    ini.SetBool(kWindowSection, L"rebarLocked", s.rebarLocked);
+    ini.Set(kWindowSection, L"rebarBands", s.rebarBands);
+    ini.SetInt(kWindowSection, L"toolbarText", s.toolbarText);
+    ini.SetBool(kWindowSection, L"fsToolbar", s.fsToolbar);
+    ini.SetBool(kWindowSection, L"fsStatusbar", s.fsStatus);
+    ini.SetBool(kWindowSection, L"header", s.showHeader);
+    ini.SetBool(kWindowSection, L"headerPath", s.headerShowPath);
+    ini.SetInt(kDefaultsSection, L"paneCount", s.defPaneCount);
+    ini.SetInt(kDefaultsSection, L"scrollMode", s.defScrollMode);
+    ini.SetInt(kDefaultsSection, L"zoomMode", s.defZoomMode);
+    ini.SetBool(kDefaultsSection, L"scrollSync", s.defScrollSync);
+    ini.SetBool(kDefaultsSection, L"zoomSync", s.defZoomSync);
+    ini.SetBool(kSyncSection, L"scroll", s.scrollSync);
+    ini.SetBool(kSyncSection, L"zoom", s.zoomSync);
+    ini.SetBool(kSyncSection, L"showGaps", s.showGaps);
+    ini.SetBool(kSyncSection, L"showAnchors", s.showAnchors);
+    ini.SetBool(kSyncSection, L"showTicks", s.showTicks);
+    ini.Set(kSynctexSection, L"inverse", s.synctexInverse);
+    // The kMruMaxEntries cap the three loops below used to repeat is Normalize's
+    // now, so each one simply walks its list.
+    for (size_t i = 0; i < s.mruFiles.size(); ++i)
+        ini.Set(kMruFilesSection, L"file" + std::to_wstring(i), s.mruFiles[i]);
     // A slot that is empty in an entry gets no key at all, rather than a blank
     // one, so an entry that shrank from three documents to two leaves no stale
     // centre path behind. (Rebuilding the file from scratch is what makes
@@ -741,13 +728,13 @@ bool AppSettings::Save() const {
                 ini.Set(section, kSlotKeys[slot] + n, value);
         }
     };
-    for (size_t i = 0; i < mruSessions.size() && i < kMruMaxEntries; ++i)
-        writeSlots(kMruPairsSection, std::to_wstring(i), mruSessions[i].path);
-    for (size_t i = 0; i < syncPoints.size() && i < kMruMaxEntries; ++i) {
+    for (size_t i = 0; i < s.mruSessions.size(); ++i)
+        writeSlots(kMruPairsSection, std::to_wstring(i), s.mruSessions[i].path);
+    for (size_t i = 0; i < s.syncPoints.size(); ++i) {
         const std::wstring n = std::to_wstring(i);
-        writeSlots(kSyncPointsSection, n, syncPoints[i].path);
-        ini.Set(kSyncPointsSection, L"manual" + n, syncPoints[i].manual);
-        ini.SetBool(kSyncPointsSection, L"auto" + n, syncPoints[i].hadAuto);
+        writeSlots(kSyncPointsSection, n, s.syncPoints[i].path);
+        ini.Set(kSyncPointsSection, L"manual" + n, s.syncPoints[i].manual);
+        ini.SetBool(kSyncPointsSection, L"auto" + n, s.syncPoints[i].hadAuto);
     }
     for (int slot = 0; slot < kPaneSlots; ++slot) {
         // Active slots always; an inactive centre only while it PARKS a
@@ -755,12 +742,12 @@ bool AppSettings::Save() const {
         // section out entirely: a pristine two-pane settings.ini never grows a
         // [center], and a park that was wiped (Close Session, Ctrl+W) does not
         // linger in the file to resurrect.
-        const PaneSettings& pane = panes[static_cast<size_t>(slot)];
-        if (SlotActive(slot, paneCount) || !pane.path.empty())
+        const PaneSettings& pane = s.panes[static_cast<size_t>(slot)];
+        if (SlotActive(slot, s.paneCount) || !pane.path.empty())
             SavePane(ini, kSlotKeys[slot], pane);
     }
 
-    SweepStaleTemps(target);
+    SweepOwnTemps(target);
     std::wstring temp;
     const HANDLE handle = CreateUniqueTemp(target, temp);
     if (handle == INVALID_HANDLE_VALUE)
@@ -768,7 +755,8 @@ bool AppSettings::Save() const {
     const bool written = WriteWholeFile(handle, ini.Text());
     const bool closed = CloseHandle(handle) != FALSE;
     if (!written || !closed) {
-        DeleteFileW(temp.c_str()); // never promote a partial file
+        std::error_code ec;
+        fs::remove(temp, ec); // never promote a partial file
         return false;
     }
     return PromoteFile(temp, target);

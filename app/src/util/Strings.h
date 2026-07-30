@@ -920,32 +920,32 @@
       L"Příkaz zpětného vyhledávání SyncTeX (%f = soubor, %l = řádek):",                           \
       L"SyncTeX-kommando för omvänd sökning (%f = fil, %l = rad):")                                \
     X(OptShellIntegration,                                                                         \
-      L"Show \"Open left/right/centre in PDF Side Viewer\" in the Explorer menu for PDF files",    \
-      L"Mostra \"Apri a sinistra/destra/al centro in PDF Side Viewer\" nel menu di "               \
+      L"Show \"Open left/centre/right in PDF Side Viewer\" in the Explorer menu for PDF files",    \
+      L"Mostra \"Apri a sinistra/al centro/a destra in PDF Side Viewer\" nel menu di "             \
       L"Esplora file per i PDF",                                                                   \
-      L"„Links/Rechts/Mitte in PDF Side Viewer öffnen“ im Explorer-Menü für PDF-Dateien "          \
+      L"„Links/Mitte/Rechts in PDF Side Viewer öffnen“ im Explorer-Menü für PDF-Dateien "          \
       L"anzeigen",                                                                                 \
-      L"Afficher « Ouvrir à gauche/droite/au centre dans PDF Side Viewer » dans le menu de "       \
+      L"Afficher « Ouvrir à gauche/au centre/à droite dans PDF Side Viewer » dans le menu de "     \
       L"l'Explorateur pour les PDF",                                                               \
-      L"„Megnyitás balra/jobbra/középre a PDF Side Viewerben” megjelenítése az Intéző "            \
+      L"„Megnyitás balra/középre/jobbra a PDF Side Viewerben” megjelenítése az Intéző "            \
       L"menüjében a PDF-ekhez",                                                                    \
-      L"Показувати «Відкрити ліворуч/праворуч/по центру у PDF Side Viewer» у меню "                \
+      L"Показувати «Відкрити ліворуч/по центру/праворуч у PDF Side Viewer» у меню "                \
       L"Провідника для файлів PDF",                                                                \
-      L"Afișează „Deschide la stânga/dreapta/centru în PDF Side Viewer” în meniul Explorer "       \
+      L"Afișează „Deschide la stânga/centru/dreapta în PDF Side Viewer” în meniul Explorer "       \
       L"pentru fișiere PDF",                                                                       \
-      L"Mostrar «Abrir à esquerda/direita/ao centro no PDF Side Viewer» no menu do "               \
+      L"Mostrar «Abrir à esquerda/ao centro/à direita no PDF Side Viewer» no menu do "             \
       L"Explorador para ficheiros PDF",                                                            \
-      L"Εμφάνιση «Άνοιγμα αριστερά/δεξιά/στο κέντρο στο PDF Side Viewer» στο μενού της "           \
+      L"Εμφάνιση «Άνοιγμα αριστερά/στο κέντρο/δεξιά στο PDF Side Viewer» στο μενού της "           \
       L"Εξερεύνησης για αρχεία PDF",                                                               \
-      L"Mostrar «Abrir a la izquierda/derecha/en el centro en PDF Side Viewer» en el menú "        \
+      L"Mostrar «Abrir a la izquierda/en el centro/a la derecha en PDF Side Viewer» en el menú "   \
       L"del Explorador para archivos PDF",                                                         \
-      L"Pokaż „Otwórz po lewej/prawej/na środku w PDF Side Viewer” w menu Eksploratora "           \
+      L"Pokaż „Otwórz po lewej/na środku/po prawej w PDF Side Viewer” w menu Eksploratora "        \
       L"dla plików PDF",                                                                           \
-      L"\"Links/rechts/midden openen in PDF Side Viewer\" tonen in het Verkenner-menu "            \
+      L"\"Links/midden/rechts openen in PDF Side Viewer\" tonen in het Verkenner-menu "            \
       L"voor PDF-bestanden",                                                                       \
-      L"Zobrazit „Otevřít vlevo/vpravo/uprostřed v PDF Side Viewer“ v nabídce Průzkumníka "        \
+      L"Zobrazit „Otevřít vlevo/uprostřed/vpravo v PDF Side Viewer“ v nabídce Průzkumníka "        \
       L"pro soubory PDF",                                                                          \
-      L"Visa \"Öppna till vänster/höger/mitten i PDF Side Viewer\" i Utforskaren-menyn "           \
+      L"Visa \"Öppna till vänster/mitten/höger i PDF Side Viewer\" i Utforskaren-menyn "           \
       L"för PDF-filer")                                                                            \
     X(OptFsToolbar, L"Show the toolbar in full screen",                                            \
       L"Mostra la barra degli strumenti a schermo intero",                                         \

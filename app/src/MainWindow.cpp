@@ -14,11 +14,22 @@
 #include <shellapi.h> // ShellExecuteW for the synctex inverse-search URI
 #include <shlwapi.h>  // PathCompactPathExW for the MRU menu labels
 
+#include <filesystem>
+
 #ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
 #define DWMWA_USE_IMMERSIVE_DARK_MODE 20
 #endif
 
 namespace {
+
+// error_code overloads throughout: a document that vanished is an ordinary
+// outcome here, reported to the user, never an exception.
+// Not identical to the GetFileAttributesW test it replaces, and better for it:
+// that one reported a file it could not STAT (denied) as absent, so an
+// unreadable document was silently dropped from the MRU as "missing", while
+// fs::exists reports an unknown-but-present file as present and lets the open
+// fail with its own message.
+namespace fs = std::filesystem;
 
 constexpr int kSplitterDip = 6;
 constexpr int kMinPaneDip = 120;
@@ -289,10 +300,10 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> fil
     m_outlineWidthDip = session.outlineWidth;
     m_rebarLocked = session.rebarLocked;
     m_rebarBandsSaved = session.rebarBands; // applied by BuildRebar in WM_CREATE
-    m_toolbarText = std::clamp(session.toolbarText, 0, 2); // read by CreateToolbar
+    m_toolbarText = session.toolbarText; // read by CreateToolbar
     m_fsShowToolbar = session.fsToolbar;
     m_fsShowStatus = session.fsStatus;
-    m_defaults.paneCount = std::clamp(session.defPaneCount, 2, kPaneSlots);
+    m_defaults.paneCount = session.defPaneCount;
     m_defaults.scrollMode = session.defScrollMode != 0 ? PaneWindow::ScrollMode::Paged
                                                        : PaneWindow::ScrollMode::Continuous;
     m_defaults.zoomMode = static_cast<PaneWindow::ZoomMode>(session.defZoomMode);
@@ -306,9 +317,9 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> fil
     // configured DEFAULT applies, exactly like the scroll mode and the sync
     // locks - a launch that does not reopen the last session must not inherit
     // its layout either. A third positional argument overrides both (and gets
-    // persisted, like every other implicit activation).
-    m_paneCount = std::clamp(m_restoreSession ? session.paneCount : m_defaults.paneCount, 2,
-                             kPaneSlots);
+    // persisted, like every other implicit activation). Both are in range by
+    // construction: AppSettings normalizes them.
+    m_paneCount = m_restoreSession ? session.paneCount : m_defaults.paneCount;
     if (!files[kSlotCenter].empty())
         m_paneCount = 3;
 
@@ -655,8 +666,8 @@ void MainWindow::SetPaneCount(int count) {
         // The DocumentOpened this triggers also restores the trio's remembered
         // sync points, because the shrink cleared m_lastDoc above.
         const PaneSettings& fb = m_fallback[kSlotCenter];
-        if (!fb.path.empty() &&
-            GetFileAttributesW(fb.path.c_str()) != INVALID_FILE_ATTRIBUTES)
+        std::error_code ec;
+        if (!fb.path.empty() && fs::exists(fb.path, ec))
             Pane(kSlotCenter)->OpenDocumentWithView(
                 fb.path, fb.zoom, fb.scrollX, fb.scrollY,
                 static_cast<PaneWindow::ZoomMode>(fb.zoomMode));
@@ -710,8 +721,8 @@ void MainWindow::ApplySession(const AppSettings& session) {
             if (!SlotOn(slot))
                 continue;
             const PaneSettings& fb = m_fallback[static_cast<size_t>(slot)];
-            if (!fb.path.empty() &&
-                GetFileAttributesW(fb.path.c_str()) != INVALID_FILE_ATTRIBUTES)
+            std::error_code ec;
+            if (!fb.path.empty() && fs::exists(fb.path, ec))
                 Pane(slot)->OpenDocumentWithView(fb.path, fb.zoom, fb.scrollX, fb.scrollY,
                                                  static_cast<PaneWindow::ZoomMode>(fb.zoomMode));
         }
@@ -985,7 +996,8 @@ void MainWindow::OpenMruFile(size_t index) {
     if (index >= m_mruFiles.size())
         return;
     const std::wstring path = m_mruFiles[index]; // copy: the erase below invalidates
-    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    std::error_code ec;
+    if (!fs::exists(path, ec)) {
         m_mruFiles.erase(m_mruFiles.begin() + static_cast<ptrdiff_t>(index));
         RebuildMruMenus();
         const std::wstring msg = Str(StrId::MruMissingFile) + path;
@@ -1001,7 +1013,8 @@ void MainWindow::OpenMruSession(size_t index) {
     const MruSession entry = m_mruSessions[index]; // copy: the erase below invalidates
     for (int slot = 0; slot < kPaneSlots; ++slot) {
         const std::wstring& path = entry.path[static_cast<size_t>(slot)];
-        if (path.empty() || GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES)
+        std::error_code ec;
+        if (path.empty() || fs::exists(path, ec))
             continue;
         m_mruSessions.erase(m_mruSessions.begin() + static_cast<ptrdiff_t>(index));
         RebuildMruMenus();
@@ -2787,7 +2800,9 @@ void MainWindow::LaunchInverseSearch(const SyncTexIndex::InverseHit& hit) {
                     MB_OK | MB_ICONINFORMATION);
         return;
     }
-    std::wstring cmd = m_synctexInverse.empty() ? L"vscode://file/%f:%l" : m_synctexInverse;
+    // Empty only between an Options dialog that cleared the box and the next
+    // save, which normalizes it back: the settings themselves never hand one over.
+    std::wstring cmd = m_synctexInverse.empty() ? kDefaultSynctexInverse : m_synctexInverse;
     const bool uri = cmd.find(L"://") != std::wstring::npos;
     std::wstring file = hit.texPath;
     if (uri) {

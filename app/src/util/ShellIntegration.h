@@ -2,7 +2,7 @@
 
 #include "framework.h"
 
-// Explorer context-menu verbs for .pdf files ("Open left/right/centre in
+// Explorer context-menu verbs for .pdf files ("Open left/centre/right in
 // PdfSideViewer"). They live under HKCU\Software\Classes\
 // SystemFileAssociations\.pdf\shell: per-user (no admin) and, by documented
 // design, NEVER part of default-handler resolution, so the app cannot become

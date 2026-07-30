@@ -1,0 +1,29 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "PdfSideViewer (Debug x64)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/x64/Debug/PdfSideViewer.exe",
+            // Es.: "testdata/a.pdf", "testdata/b.pdf" per aprire due pannelli già popolati.
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "console": "internalConsole",
+            // Per non toccare il settings.ini reale (MRU comprese), stessa sandbox degli
+            // script E2E:
+            // "environment": [{ "name": "PSV_SETTINGS_DIR", "value": "${workspaceFolder}/build/devsettings" }],
+            "preLaunchTask": "msbuild-debug-x64"
+        },
+        {
+            "name": "PdfSideViewer (Release x64)",
+            "type": "cppvsdbg",
+            "request": "launch",
+            "program": "${workspaceFolder}/build/x64/Release/PdfSideViewer.exe",
+            "args": [],
+            "cwd": "${workspaceFolder}",
+            "console": "internalConsole",
+            "preLaunchTask": "msbuild-release-x64"
+        }
+    ]
+}

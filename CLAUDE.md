@@ -31,7 +31,8 @@ Scripts: `make-release.ps1 -Platform x64` (portable zip); `make-installer.ps1` c
 `scripts\PdfSideViewer.iss` (Inno Setup 6, UTF-8 BOM required by the accented `[CustomMessages]`)
 into a per-user winget-ready installer, version read from resource.h; `make-test-pdfs.ps1`
 regenerates `testdata\*.pdf` (hand-built PDFs with links/outline); `make-icon.ps1` regenerates
-`app\res\app.ico` (deterministic System.Drawing artwork).
+the icons in `app\res` (app.ico plus the three Explorer verb icons; deterministic
+System.Drawing artwork).
 
 - Inno gotcha: `[UninstallRun]` Check params are evaluated at SETUP time, so conditional uninstall
   logic lives in CurUninstallStepChanged (the verbs are removed only if they point into `{app}`: a
@@ -177,9 +178,12 @@ declared security model: the settings DIRECTORY is the boundary, so a per-file D
 does NOT survive a save, and since `[synctex] inverse` is trusted input that reaches
 ShellExecute/CreateProcess, whoever can write the directory can run code as the user - which is
 why an ELEVATED instance refuses inverse search outright and the manifest pins asInvoker),
-cleanup deletes only
-`settings.ini.<pid>.<counter>.tmp` in canonical spelling, ours on sight and a foreign one only
-after an hour, and Load reads the whole file through ONE handle - dozens of independent profile reads are individually coherent but can
+cleanup RECONSTRUCTS the names our OWN pid can
+produce (`settings.ini.<pid>.<0..63>.tmp`) and deletes those, matching nothing and dating
+nothing: a foreign temp is never touched, which is the accepted cost of having no name grammar
+and no staleness clock. Ranges live in `AppSettings::Normalize`, run by BOTH Load and Save
+(on a copy), so no save can persist a value the next start would refuse. Load reads the whole
+file through ONE handle - dozens of independent profile reads are individually coherent but can
 straddle a concurrent swap, and the hybrid would be re-persisted; writers serialize best-effort
 via a lock file, `util/ScopedFileLock.h`, chosen over a named mutex: profile ACL, crosses RDP
 sessions, no predictable kernel name to pre-create; semantics stay last-close-wins, and a
@@ -227,6 +231,15 @@ menu/toolbar checked state (`UpdateCommandUi`).
 
 ## Conventions
 
+- Path splitting and plain file existence/removal go through `<filesystem>` (`fs::exists`,
+  `fs::remove`, `fs::is_directory`, `path::filename`/`parent_path`), always the `error_code`
+  overloads. The Win32 call stays only where the standard cannot express the requirement, and
+  each such site says why: `MoveFileExW` in Settings.cpp (`std::filesystem::rename` adds
+  `MOVEFILE_COPY_ALLOWED` and cannot ask for `MOVEFILE_WRITE_THROUGH`), `CreateFileW` for the
+  settings read (iostreams open with `_SH_DENYNO`, so no `FILE_SHARE_DELETE` and a concurrent
+  atomic swap would fail), `GetFullPathNameW` (lexical, collapses `..`, does not touch the disk:
+  neither `absolute` nor `canonical` does that), and `DirOf` in SyncTex.cpp (its consumer needs
+  a prefix with NO trailing separator, which `parent_path` does not give at a root).
 - clang-format-ish 100 columns, 4 spaces; comments explain constraints, not what the next line does.
   The maintainer communicates in Italian.
 - Every user-visible string goes through `util/Strings.h`: an X-list with one column per language,
