@@ -77,6 +77,11 @@ public:
     bool fsStatus = false;  // full screen: keep the status bar visible
     bool showHeader = true;      // per-pane header strip with the PDF file name/path
     bool headerShowPath = false; // header shows the full path instead of the file name
+    // Find bar toggles ([find]). Sticky across sessions like the toolbar state,
+    // and global rather than per pane: the bar retargets whichever pane has the
+    // focus, so a per-pane option would silently change under the user.
+    bool findMatchCase = false;
+    bool findWholeWord = false;
     // Rebar band layout in visual order, "id,cx,break;..." per band (empty =
     // default). Parsed leniently: anything malformed keeps the default row.
     std::wstring rebarBands;

@@ -203,6 +203,40 @@ constexpr WORD kOptPaneCountId = 2116;
 constexpr WORD kSyncPtsListId = 2401;
 constexpr WORD kSyncPtsRemoveId = 2402;
 constexpr WORD kSyncPtsClearId = 2403;
+// Find-bar child ids (2500+ control-id space). The counter used to have none,
+// which put it out of reach of GetDlgItem and therefore of the E2E scripts.
+constexpr WORD kFindOptsBarId = 2501;
+constexpr WORD kFindNavBarId = 2502;
+constexpr WORD kFindCountId = 2503;
+constexpr WORD kFindCloseBarId = 2504;
+
+// Find-bar metrics, DIP. The button is the toolbar's requested SIZE; its real
+// width is measured with TB_GETMAXSIZE, never assumed to be n * kFindButtonDip.
+constexpr int kFindBarHeightDip = 34;
+constexpr int kFindPadDip = 6;
+constexpr int kFindGapDip = 4;
+constexpr int kFindButtonDip = 26;
+constexpr int kFindCountDip = 64;
+constexpr int kFindEditMinDip = 40;
+
+// Find-bar icons: TWO imagelists for the three toolbars (the nav and close
+// bars share the MDL2 one). The labels stay in a strip of their own because
+// CreateGlyphImageList sizes the whole strip from one glyphPx: sharing a cell
+// big enough for two letters would render the MDL2 arrows visibly larger than
+// the identical-purpose icons in the toolbar right above them.
+// E74A/E74B are Up/Down (literal arrows, not the E70E/E70D chevrons) and E711
+// is Cancel.
+constexpr GlyphSpec kFindNavGlyphs[] = {
+    {0xE74A}, // 0 previous match
+    {0xE74B}, // 1 next match
+    {0xE711}, // 2 close the find bar
+};
+// Segoe MDL2 Assets ships no match-case or whole-word glyph (nor does Segoe
+// Fluent Icons), which is why every editor draws the letters themselves.
+constexpr LabelSpec kFindOptLabels[] = {
+    {L"Aa", false},  // 0 match case
+    {L"ab", true},   // 1 whole word (underlined, as in VS Code)
+};
 // Posted to the (modal) sync-points dialog when the map changes underneath it:
 // the modal loop still dispatches WM_PSV_* messages, so an auto-reload can
 // clear/regenerate the map while the dialog shows stale rows.
@@ -218,10 +252,34 @@ struct OptionsDialogState {
 };
 
 // The find bar is a plain container: forward its children's notifications to
-// the main window, which owns all command handling.
+// the main window, which owns all command handling. WM_NOTIFY travels too, or
+// the toolbars' TTN_GETDISPINFOW would die here and every button would show an
+// empty tooltip: comctl32 sends it to the toolbar's PARENT, which is this
+// container and not the frame.
 LRESULT CALLBACK FindBarProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    if (msg == WM_COMMAND)
+    if (msg == WM_COMMAND || msg == WM_NOTIFY)
         return SendMessageW(GetParent(hwnd), msg, wParam, lParam);
+    if (msg == WM_PAINT) {
+        // A thin frame, so the overlay reads as a panel floating over the page
+        // instead of a patch of chrome painted onto it. COLOR_BTNSHADOW and not
+        // COLOR_WINDOWFRAME: the latter is near-black, far heavier than the
+        // hairline this kind of widget carries. The class brush has already
+        // filled the background by the time BeginPaint returns.
+        PAINTSTRUCT ps;
+        const HDC dc = BeginPaint(hwnd, &ps);
+        RECT rc;
+        GetClientRect(hwnd, &rc);
+        if (HBRUSH edge = CreateSolidBrush(GetSysColor(COLOR_BTNSHADOW))) {
+            const int dpi = static_cast<int>(GetDpiForWindow(hwnd));
+            for (int i = 0, n = std::max(1, MulDiv(1, dpi, 96)); i < n; ++i) {
+                FrameRect(dc, &rc, edge); // one pixel per call
+                InflateRect(&rc, -1, -1);
+            }
+            DeleteObject(edge);
+        }
+        EndPaint(hwnd, &ps);
+        return 0;
+    }
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
@@ -264,6 +322,9 @@ void MainWindow::RegisterWindowClass(HINSTANCE hinst) {
 
     WNDCLASSEXW fb{};
     fb.cbSize = sizeof(fb);
+    // Redraw on resize: without it, shrinking the bar leaves the frame drawn at
+    // the OLD right edge, since only the newly exposed area is invalidated.
+    fb.style = CS_HREDRAW | CS_VREDRAW;
     fb.lpfnWndProc = FindBarProc;
     fb.hInstance = hinst;
     fb.hCursor = LoadCursorW(nullptr, IDC_ARROW);
@@ -279,6 +340,10 @@ MainWindow::~MainWindow() {
         ImageList_Destroy(m_toolbarIcons);
     if (m_fsBarIcons)
         ImageList_Destroy(m_fsBarIcons);
+    if (m_findGlyphIcons)
+        ImageList_Destroy(m_findGlyphIcons);
+    if (m_findOptsIcons)
+        ImageList_Destroy(m_findOptsIcons);
 }
 
 bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> files,
@@ -361,6 +426,8 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> fil
     m_sync->SetMapChangedHandler([this] { ApplyAlignmentGaps(); });
     m_showHeader = session.showHeader;
     m_headerShowPath = session.headerShowPath;
+    m_findOptions.matchCase = session.findMatchCase;
+    m_findOptions.wholeWord = session.findWholeWord;
     // The per-pane pushes happen in ConfigurePane, below, once the handlers
     // exist: a pane created later by the mode switch must get the same set.
     // m_activePane defaults to the leftmost pane; mark it so the cue and the
@@ -498,6 +565,10 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> fil
         wchar_t buffer[64];
         if (total == 0)
             wcscpy_s(buffer, done ? L"0" : L"…");
+        else if (active < 0)
+            // A fresh query selects nothing (the view must not move), so there
+            // is no "m of n" to show yet: just how many there are.
+            swprintf_s(buffer, L"%d%s", total, done ? L"" : L"+");
         else
             swprintf_s(buffer, L"%d/%d%s", active + 1, total, done ? L"" : L"+");
         SetWindowTextW(m_findCount, buffer);
@@ -767,6 +838,8 @@ void MainWindow::SaveSession() const {
     s.showTicks = m_showTicks;
     s.showHeader = m_showHeader;
     s.headerShowPath = m_headerShowPath;
+    s.findMatchCase = m_findOptions.matchCase;
+    s.findWholeWord = m_findOptions.wholeWord;
     s.scrollMode = m_scrollMode == PaneWindow::ScrollMode::Paged ? 1 : 0;
     s.restoreSession = m_restoreSession;
     s.wheelLines = m_wheelLines;
@@ -849,6 +922,20 @@ HMENU MainWindow::BuildMenuBar() {
     AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     append(file, IDC_EXIT, StrId::MenuExit);
 
+    // Edit: the two commands that had no menu entry at all (Copy, and the whole
+    // find family reachable only by Ctrl+F and the toolbar), plus the find
+    // options - which are otherwise discoverable only on a bar whose narrowest
+    // widths shed them.
+    HMENU edit = CreatePopupMenu();
+    append(edit, IDC_COPY, StrId::MenuCopy);
+    AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
+    append(edit, IDC_FIND_SHOW, StrId::MenuFind);
+    append(edit, IDC_FIND_NEXT, StrId::MenuFindNext);
+    append(edit, IDC_FIND_PREV, StrId::MenuFindPrev);
+    AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
+    append(edit, IDC_FIND_MATCH_CASE, StrId::MenuMatchCase);
+    append(edit, IDC_FIND_WHOLE_WORD, StrId::MenuWholeWord);
+
     HMENU lang = CreatePopupMenu();
     // Alphabetical by native name (Greek and Cyrillic after Latin), NOT id
     // order: the ids keep Lang-enum order and both the radio check and the
@@ -914,6 +1001,7 @@ HMENU MainWindow::BuildMenuBar() {
 
     HMENU bar = CreateMenu();
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(file), Str(StrId::MenuFile));
+    AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(edit), Str(StrId::MenuEdit));
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(view), Str(StrId::MenuView));
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(sync), Str(StrId::MenuSync));
     AppendMenuW(bar, MF_POPUP, reinterpret_cast<UINT_PTR>(help), Str(StrId::MenuHelp));
@@ -1591,6 +1679,20 @@ StrId MainWindow::CommandTipId(UINT id) {
         return StrId::TipAlignmentGaps;
     case IDC_SWAP_PANES:
         return StrId::TipSwapPanes;
+    case IDC_FIND_MATCH_CASE:
+        return StrId::TipMatchCase;
+    case IDC_FIND_WHOLE_WORD:
+        return StrId::TipWholeWord;
+    case IDC_FIND_PREV:
+        return StrId::TipFindPrev;
+    case IDC_FIND_NEXT:
+        return StrId::TipFindNext;
+    case IDC_FIND_CLOSE:
+        return StrId::TipFindClose;
+    // Explicit, so the fallback below stops standing in for it: any id that
+    // reaches a TBSTYLE_TOOLTIPS toolbar without a case here would otherwise
+    // claim to be the full-screen button.
+    case IDC_FULLSCREEN:
     default:
         return StrId::TipFullScreen;
     }
@@ -2157,6 +2259,8 @@ void MainWindow::UpdateCommandUi() {
         check(IDC_TOGGLE_SCROLL_SYNC, m_sync->ScrollSync());
         check(IDC_TOGGLE_ZOOM_SYNC, m_sync->ZoomSync());
         check(IDC_TOGGLE_ALIGNMENT_GAPS, m_showAlignmentGaps);
+        check(IDC_FIND_MATCH_CASE, m_findOptions.matchCase);
+        check(IDC_FIND_WHOLE_WORD, m_findOptions.wholeWord);
         UINT fitId = IDC_ZOOM_ACTUAL;
         switch (FocusedPane()->GetZoomMode()) {
         case PaneWindow::ZoomMode::FitWidth:
@@ -2185,6 +2289,13 @@ void MainWindow::UpdateCommandUi() {
         enable(IDC_SYNC_FROM_BOOKMARKS, canGenerate);
         enable(IDC_SYNC_POINTS, hasPoints);
         enable(IDC_CLEAR_SYNC_POINTS, hasPoints);
+        enable(IDC_COPY, FocusedPane()->HasSelection());
+        // Closing the find bar clears the search, so there is no "repeat the
+        // last search" to offer once it is gone: grey rather than pretend.
+        const bool canStep = m_findBar && IsWindowVisible(m_findBar) && m_findTarget &&
+                             m_findTarget->MatchCount() > 0;
+        enable(IDC_FIND_NEXT, canStep);
+        enable(IDC_FIND_PREV, canStep);
     }
     if (m_toolbar) {
         const auto press = [this](WORD id, bool on) {
@@ -2206,6 +2317,12 @@ void MainWindow::UpdateCommandUi() {
         tbEnable(IDC_SYNC_FROM_BOOKMARKS, canGenerate);
         tbEnable(IDC_SYNC_POINTS, hasPoints);
         tbEnable(IDC_CLEAR_SYNC_POINTS, hasPoints);
+    }
+    if (m_findOptsBar) {
+        SendMessageW(m_findOptsBar, TB_CHECKBUTTON, IDC_FIND_MATCH_CASE,
+                     MAKELPARAM(m_findOptions.matchCase ? TRUE : FALSE, 0));
+        SendMessageW(m_findOptsBar, TB_CHECKBUTTON, IDC_FIND_WHOLE_WORD,
+                     MAKELPARAM(m_findOptions.wholeWord ? TRUE : FALSE, 0));
     }
 }
 
@@ -3052,6 +3169,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         m_dpi = HIWORD(wParam);
         UpdateUiFont();
         RebuildToolbarIcons();
+        EnsureFindBarToolbars(); // no-op unless the DPI really moved
         UpdateRebarBandSizes();
         // Panes must know the new DPI before SetWindowPos: its synchronous
         // WM_SIZE cascade rebuilds and presents their targets immediately.
@@ -3159,11 +3277,7 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_TIMER:
         if (wParam == kFindDebounceTimer) {
             KillTimer(m_hwnd, kFindDebounceTimer);
-            if (m_findTarget && m_findBar && IsWindowVisible(m_findBar)) {
-                wchar_t text[256];
-                GetWindowTextW(m_findEdit, text, ARRAYSIZE(text));
-                m_findTarget->StartSearch(text);
-            }
+            RestartFindSearch();
             return 0;
         }
         if (wParam == kStatusMsgTimer) {
@@ -3340,6 +3454,20 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         case IDC_FIND_CLOSE:
             CloseFindBar();
+            return 0;
+        case IDC_COPY:
+            // Same path as the pane's own Ctrl+C; the menu item is greyed when
+            // there is nothing selected, so this cannot land on an empty one.
+            FocusedPane()->CopySelection();
+            return 0;
+        case IDC_FIND_MATCH_CASE:
+        case IDC_FIND_WHOLE_WORD:
+            if (LOWORD(wParam) == IDC_FIND_MATCH_CASE)
+                m_findOptions.matchCase = !m_findOptions.matchCase;
+            else
+                m_findOptions.wholeWord = !m_findOptions.wholeWord;
+            UpdateCommandUi();
+            RestartFindSearch();
             return 0;
         case IDC_TOGGLE_OUTLINE: {
             m_outlineVisible = !m_outlineVisible;
@@ -3584,6 +3712,10 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
     case WM_INITMENUPOPUP:
         m_menuBand.OnInitMenuPopup();
+        // Edit ▸ Copy follows the selection and Find Next/Previous follow the
+        // match list, neither of which posts a view event: refresh the whole
+        // command state as the popup opens rather than leave it stale.
+        UpdateCommandUi();
         break;
     case WM_UNINITMENUPOPUP:
         m_menuBand.OnUninitMenuPopup();
@@ -3823,18 +3955,85 @@ void MainWindow::CreateFindBar() {
                                  m_findBar, reinterpret_cast<HMENU>(IDC_FIND_EDIT), hinst,
                                  nullptr);
     m_findCount = CreateWindowExW(0, L"STATIC", L"", WS_CHILD | WS_VISIBLE | SS_CENTER, 0, 0, 0,
-                                  0, m_findBar, nullptr, hinst, nullptr);
-    m_findPrev = CreateWindowExW(0, L"BUTTON", L"<", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0,
-                                 0, m_findBar, reinterpret_cast<HMENU>(IDC_FIND_PREV), hinst,
-                                 nullptr);
-    m_findNext = CreateWindowExW(0, L"BUTTON", L">", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0, 0,
-                                 0, m_findBar, reinterpret_cast<HMENU>(IDC_FIND_NEXT), hinst,
-                                 nullptr);
-    m_findClose = CreateWindowExW(0, L"BUTTON", L"X", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 0, 0,
-                                  0, 0, m_findBar, reinterpret_cast<HMENU>(IDC_FIND_CLOSE),
-                                  hinst, nullptr);
+                                  0, m_findBar, reinterpret_cast<HMENU>(kFindCountId), hinst,
+                                  nullptr);
+    // TBSTYLE_FLAT is legal here, unlike on the full-screen bar: the find bar's
+    // window class paints its own COLOR_BTNFACE background under the children,
+    // which is exactly what a flat toolbar needs (without it, flat = a black
+    // band).
+    const DWORD barStyle = WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_TABSTOP | TBSTYLE_FLAT |
+                           TBSTYLE_TRANSPARENT | TBSTYLE_TOOLTIPS | CCS_NORESIZE |
+                           CCS_NOPARENTALIGN | CCS_NODIVIDER;
+    m_findOptsBar = CreateWindowExW(0, TOOLBARCLASSNAMEW, nullptr, barStyle, 0, 0, 0, 0,
+                                    m_findBar, reinterpret_cast<HMENU>(kFindOptsBarId), hinst,
+                                    nullptr);
+    m_findNavBar = CreateWindowExW(0, TOOLBARCLASSNAMEW, nullptr, barStyle, 0, 0, 0, 0, m_findBar,
+                                   reinterpret_cast<HMENU>(kFindNavBarId), hinst, nullptr);
+    m_findCloseBar = CreateWindowExW(0, TOOLBARCLASSNAMEW, nullptr, barStyle, 0, 0, 0, 0,
+                                     m_findBar, reinterpret_cast<HMENU>(kFindCloseBarId), hinst,
+                                     nullptr);
+    // One button per TBBUTTON row; the imagelist indices are the kFindNavGlyphs
+    // and kFindOptLabels order.
+    const auto addButtons = [](HWND bar, std::span<const std::pair<int, WORD>> buttons,
+                               BYTE style) {
+        if (!bar)
+            return;
+        SendMessageW(bar, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+        for (const auto& [image, id] : buttons) {
+            TBBUTTON b{};
+            b.iBitmap = image;
+            b.idCommand = id;
+            b.fsState = TBSTATE_ENABLED;
+            b.fsStyle = style;
+            SendMessageW(bar, TB_ADDBUTTONSW, 1, reinterpret_cast<LPARAM>(&b));
+        }
+    };
+    const std::pair<int, WORD> optButtons[] = {{0, IDC_FIND_MATCH_CASE}, {1, IDC_FIND_WHOLE_WORD}};
+    const std::pair<int, WORD> navButtons[] = {{0, IDC_FIND_PREV}, {1, IDC_FIND_NEXT}};
+    const std::pair<int, WORD> closeButtons[] = {{2, IDC_FIND_CLOSE}};
+    addButtons(m_findOptsBar, optButtons, BTNS_CHECK);
+    addButtons(m_findNavBar, navButtons, BTNS_BUTTON);
+    addButtons(m_findCloseBar, closeButtons, BTNS_BUTTON);
+    EnsureFindBarToolbars();
     SetWindowSubclass(m_findEdit, FindEditProc, 1, reinterpret_cast<DWORD_PTR>(m_hwnd));
     UpdateUiFont();
+}
+
+void MainWindow::EnsureFindBarToolbars() {
+    if (!m_findOptsBar || !m_findNavBar || !m_findCloseBar || m_findBarDpi == m_dpi)
+        return;
+    const int glyphPx = MulDiv(16, m_dpi, 96);
+    HIMAGELIST glyphs = CreateGlyphImageList(std::span<const GlyphSpec>(kFindNavGlyphs), glyphPx,
+                                             glyphPx, GetSysColor(COLOR_BTNTEXT));
+    HIMAGELIST labels = CreateLabelImageList(std::span<const LabelSpec>(kFindOptLabels), glyphPx,
+                                             GetSysColor(COLOR_BTNTEXT));
+    if (!glyphs || !labels) {
+        if (glyphs)
+            ImageList_Destroy(glyphs);
+        if (labels)
+            ImageList_Destroy(labels);
+        return; // keep the old icons rather than leave the buttons blank
+    }
+    // Install FIRST, destroy the previous lists after: these toolbars survive a
+    // DPI change (unlike the full-screen bar, which is recreated whole), so
+    // freeing a list they still reference would leave them drawing from it. The
+    // nav and close bars deliberately SHARE one list - toolbars do not own an
+    // imagelist, and the close glyph is just its third cell.
+    SendMessageW(m_findNavBar, TB_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(glyphs));
+    SendMessageW(m_findCloseBar, TB_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(glyphs));
+    SendMessageW(m_findOptsBar, TB_SETIMAGELIST, 0, reinterpret_cast<LPARAM>(labels));
+    if (m_findGlyphIcons)
+        ImageList_Destroy(m_findGlyphIcons);
+    if (m_findOptsIcons)
+        ImageList_Destroy(m_findOptsIcons);
+    m_findGlyphIcons = glyphs;
+    m_findOptsIcons = labels;
+    const int btn = MulDiv(kFindButtonDip, m_dpi, 96);
+    for (HWND bar : {m_findOptsBar, m_findNavBar, m_findCloseBar}) {
+        SendMessageW(bar, TB_SETBUTTONSIZE, 0, MAKELPARAM(btn, btn));
+        SendMessageW(bar, TB_AUTOSIZE, 0, 0);
+    }
+    m_findBarDpi = m_dpi;
 }
 
 void MainWindow::UpdateUiFont() {
@@ -3847,8 +4046,9 @@ void MainWindow::UpdateUiFont() {
     HFONT font = CreateFontIndirectW(&ncm.lfMessageFont);
     if (!font)
         return;
-    for (HWND child : {m_findEdit, m_findCount, m_findPrev, m_findNext, m_findClose,
-                       m_outlineTree, m_status, m_pageBox}) {
+    // The find-bar toolbars are deliberately absent: they draw icons, not text,
+    // and TB_SETIMAGELIST already sizes them.
+    for (HWND child : {m_findEdit, m_findCount, m_outlineTree, m_status, m_pageBox}) {
         if (child)
             SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     }
@@ -3909,10 +4109,11 @@ void MainWindow::UpdateOutlineSidebar(PaneWindow* pane) {
 void MainWindow::LayoutFindBar() {
     if (!m_findBar || !m_findTarget)
         return;
+    EnsureFindBarToolbars();
     RECT rc;
     GetClientRect(m_hwnd, &rc);
-    const int barH = MulDiv(34, m_dpi, 96);
-    const int pad = MulDiv(6, m_dpi, 96);
+    const int barH = MulDiv(kFindBarHeightDip, m_dpi, 96);
+    const int pad = MulDiv(kFindPadDip, m_dpi, 96);
     // The target pane's own edges, in client coordinates: for the leftmost
     // pane the right edge is the splitter, for the rightmost the client edge.
     int paneLeft = 0;
@@ -3948,18 +4149,40 @@ void MainWindow::LayoutFindBar() {
     }
     // Sized to the TARGET pane, not a fixed width: three panes plus the
     // outline leave ~268-DIP panes at the default window, where a 340-DIP
-    // overlay would blanket the neighbour's content. Below the full 210-DIP
-    // scheme (3 x 26 buttons, 64 count, 40-px edit minimum, gaps) the bar
-    // sheds pieces instead of crossing the pane boundary: the match counter
-    // first, then the prev/next buttons (F3 and Shift+F3 keep both
-    // directions reachable) - down to close + edit, which still fit the
-    // 120-DIP pane minimum.
-    const int fullW = MulDiv(210, m_dpi, 96);
-    const int noCountW = MulDiv(142, m_dpi, 96);
-    // Below the close button plus a usable edit box (26 + 40 + three 4-DIP
-    // gaps) the two would have to OVERLAP, so the button goes as well: Esc
-    // still closes the bar, and Ctrl+F is what opened it.
-    const int noCloseW = MulDiv(78, m_dpi, 96);
+    // overlay would blanket the neighbour's content. Below the full scheme the
+    // bar sheds pieces instead of crossing the pane boundary, in order of
+    // least damage: the OPTION TOGGLES first (sticky state, still set from a
+    // wider pane and remembered across sessions), then the match counter, then
+    // prev/next (F3 and Shift+F3 keep both directions reachable), down to
+    // close + edit, which still fit the 120-DIP pane minimum.
+    //
+    // Shedding the toggles before the counter is the whole point of that
+    // order: the counter is live feedback read continuously while typing, and
+    // the ~268-DIP three-pane case is precisely the geometry this ladder was
+    // written to protect - the other order would take the counter away there.
+    const int gap = MulDiv(kFindGapDip, m_dpi, 96);
+    const int btn = MulDiv(kFindButtonDip, m_dpi, 96);
+    const int countW = MulDiv(kFindCountDip, m_dpi, 96);
+    const int editMin = MulDiv(kFindEditMinDip, m_dpi, 96);
+    // Measured, never n * btn: TB_SETBUTTONSIZE is a REQUEST that comctl32 may
+    // raise to fit the image plus padding, and a toolbar laid out to the
+    // assumed width would clip its last button.
+    const auto barWidth = [](HWND bar, int fallback) {
+        SIZE size{};
+        if (bar && SendMessageW(bar, TB_GETMAXSIZE, 0, reinterpret_cast<LPARAM>(&size)) &&
+            size.cx > 0)
+            return static_cast<int>(size.cx);
+        return fallback;
+    };
+    const int optsW = barWidth(m_findOptsBar, 2 * btn);
+    const int navW = barWidth(m_findNavBar, 2 * btn);
+    const int closeW = barWidth(m_findCloseBar, btn);
+    // Each threshold is "everything from here rightwards, plus a usable edit".
+    const int editOnlyW = 2 * gap + editMin;
+    const int noNavW = editOnlyW + closeW + gap;
+    const int noCountW = noNavW + navW + gap;
+    const int noOptsW = noCountW + countW + gap;
+    const int fullW = noOptsW + optsW + gap;
     // Never wider than the pane itself, with NO absolute floor under that cap:
     // a floor larger than the pane is by definition an overhang into the
     // neighbour, and full-screen pane widths bypass the minimum-track clamp
@@ -3972,32 +4195,39 @@ void MainWindow::LayoutFindBar() {
     const int x = std::max(paneLeft, paneRight - barW - pad);
     SetWindowPos(m_findBar, HWND_TOP, x, barY, barW, barH, SWP_NOACTIVATE);
 
-    const int gap = MulDiv(4, m_dpi, 96);
-    const int btn = MulDiv(26, m_dpi, 96);
-    const int countW = MulDiv(64, m_dpi, 96);
     const int innerH = barH - 2 * gap;
-    const bool showCount = barW >= fullW;
+    const bool showOpts = barW >= fullW;
+    const bool showCount = barW >= noOptsW;
     const bool showNav = barW >= noCountW;
-    const bool showClose = barW >= noCloseW;
+    const bool showClose = barW >= noNavW;
+    // Focus first, hide second: hiding the window that HOLDS the focus does not
+    // move it, and an invisible toolbar would go on eating the arrow keys.
+    const HWND focus = GetFocus();
+    for (const auto& [bar, keep] : {std::pair{m_findOptsBar, showOpts},
+                                    std::pair{m_findNavBar, showNav},
+                                    std::pair{m_findCloseBar, showClose}}) {
+        if (!keep && bar && bar == focus && m_findEdit)
+            SetFocus(m_findEdit);
+        ShowWindow(bar, keep ? SW_SHOW : SW_HIDE);
+    }
     ShowWindow(m_findCount, showCount ? SW_SHOW : SW_HIDE);
-    ShowWindow(m_findPrev, showNav ? SW_SHOW : SW_HIDE);
-    ShowWindow(m_findNext, showNav ? SW_SHOW : SW_HIDE);
-    ShowWindow(m_findClose, showClose ? SW_SHOW : SW_HIDE);
     int right = barW - gap;
     if (showClose) {
-        MoveWindow(m_findClose, right - btn, gap, btn, innerH, TRUE);
-        right -= btn + gap;
+        MoveWindow(m_findCloseBar, right - closeW, gap, closeW, innerH, TRUE);
+        right -= closeW + gap;
     }
     if (showNav) {
-        MoveWindow(m_findNext, right - btn, gap, btn, innerH, TRUE);
-        right -= btn + gap;
-        MoveWindow(m_findPrev, right - btn, gap, btn, innerH, TRUE);
-        right -= btn + gap;
+        MoveWindow(m_findNavBar, right - navW, gap, navW, innerH, TRUE);
+        right -= navW + gap;
     }
     if (showCount) {
         MoveWindow(m_findCount, right - countW, gap + MulDiv(4, m_dpi, 96), countW,
                    innerH - MulDiv(4, m_dpi, 96), TRUE);
         right -= countW + gap;
+    }
+    if (showOpts) {
+        MoveWindow(m_findOptsBar, right - optsW, gap, optsW, innerH, TRUE);
+        right -= optsW + gap;
     }
     // Whatever is left, down to a sliver: a fixed minimum here is what used to
     // push the edit box UNDER the close button at the narrowest widths.
@@ -4026,7 +4256,17 @@ void MainWindow::ShowFindBar() {
     wchar_t text[256];
     GetWindowTextW(m_findEdit, text, ARRAYSIZE(text));
     if (text[0] != L'\0')
-        m_findTarget->StartSearch(text); // retarget with the previous needle
+        m_findTarget->StartSearch(text, m_findOptions); // retarget, previous query
+}
+
+// The needle lives in the edit box and the options in m_findOptions; either
+// changing means the same thing to the pane, which latches the PAIR.
+void MainWindow::RestartFindSearch() {
+    if (!m_findTarget || !m_findBar || !IsWindowVisible(m_findBar))
+        return;
+    wchar_t text[256];
+    GetWindowTextW(m_findEdit, text, ARRAYSIZE(text));
+    m_findTarget->StartSearch(text, m_findOptions);
 }
 
 void MainWindow::CloseFindBar() {

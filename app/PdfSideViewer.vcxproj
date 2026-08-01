@@ -119,6 +119,7 @@
     <ClInclude Include="src\util\Settings.h" />
     <ClInclude Include="src\util\ShellIntegration.h" />
     <ClInclude Include="src\util\Strings.h" />
+    <ClInclude Include="src\util\TextClass.h" />
     <ClInclude Include="src\view\MenuBand.h" />
     <ClInclude Include="src\view\PageLayout.h" />
     <ClInclude Include="src\view\SyncController.h" />

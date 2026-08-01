@@ -607,24 +607,71 @@ Design:
 
 **Search** (per pane, find bar targets the focused pane):
 
-- `fz_search_stext_page(ctx, stextPage, needle, hit_mark, quads, hit_max)` returns highlight
-  **quads**, with `hit_mark` grouping the quads of one logical match (line-wrapped matches yield
-  several quads). Match model: `struct Match { int page; std::vector<fz_quad> quads; }`.
+- `fz_match_stext_page(ctx, stextPage, needle, hit_mark, quads, hit_max, options)` returns
+  highlight **quads**, with `hit_mark` grouping the quads of one logical match (line-wrapped
+  matches yield several quads). Match model:
+  `struct Match { int page; std::vector<fz_quad> quads; }`.
+  The worker builds the stext page itself with the flags MuPDF's own search path uses
+  (`FZ_STEXT_DEHYPHENATE`, `source/fitz/util.c`), rather than letting `fz_match_page_number`
+  build a private one: the whole-word filter below has to classify boundaries on the very page
+  the matcher ran on.
 - Quads live in page space and are transformed page→screen at paint time, so highlights survive
   scroll/zoom without re-searching. Active match in a distinct color, alpha-blended overlay
   (`FillGeometry` at fractional alpha over the page bitmap).
 - Whole-document "m of n" count runs on the pane worker page-by-page, cancellable, posting
   incremental results; typing in the find box stays responsive.
+- Results arriving NEVER select or scroll to a match: they land while the reader is still
+  typing, and jumping would cost them the place they were reading. The counter therefore shows
+  a bare total until something is selected, and the first F3 lands on the first match at or
+  after the CURRENT page (wrapping to the top when every match is behind), not on match one.
 - Normalization pass copied from SumatraPDF's `TextSearch`: Unicode case folding, whitespace
   collapse, hyphen and smart-quote variants.
-- The 1.27+ `fz_match_*` / `fz_search_options` API (regex, cross-page matches) is still labeled
-  experimental upstream; v1 uses the stable `fz_search_*` family and pins the MuPDF version.
+- **Search options** (`Document::SearchOptions`, an application-level POD: no `fz_` type reaches a
+  UI header, and the translation to `fz_search_options` happens inside the worker). They are part
+  of the query IDENTITY, not a side setting: the pane latches the `(needle, options)` pair, so
+  toggling one with the text unchanged re-runs the search instead of being swallowed by the
+  same-needle guard. Global to the frame rather than per pane, because the find bar retargets
+  whichever pane has the focus. Persisted in `[find]`.
+  - **Match case**: `FZ_SEARCH_EXACT` instead of `FZ_SEARCH_IGNORE_CASE`. The `fz_search_*`
+    family this replaced is itself a shim over `fz_match_*` with `FZ_SEARCH_IGNORE_CASE`
+    (`source/fitz/stext-search.c`), so the engine underneath is unchanged and the
+    case-insensitive branch is bit-for-bit what shipped before. This lifts the v1 decision to
+    stay on `fz_search_*`: that decision was made because `fz_match_*` was labeled experimental,
+    but the stable entry point was already running it.
+  - **Match whole word**: MuPDF 1.28 has NO flag for it, and the obvious `FZ_SEARCH_REGEXP` route
+    with `\b…\b` is unusable - mujs classifies word characters with an ASCII-only `iswordchar`
+    (`thirdparty/mujs/regexp.c`), so `\bperché\b` matches nothing at all, which in a fourteen-
+    language application is a broken feature rather than a limitation. The boundary is therefore
+    decided worker-side: locate the run geometrically (the hit quad's centre picks the
+    `fz_stext_line`, the covered characters are those whose own quad centre falls inside it),
+    then take the neighbours from the line's character LIST. Geometry only finds the run; "before"
+    and "after" come from reading order, which is what keeps bidi and vertical `wmode` correct.
+    The predicate is `util/TextClass.h` (`GetStringTypeW`, `C1_ALPHA | C1_DIGIT`, no locale
+    input). A side whose own needle edge is not a word character is left unconstrained, so "(a"
+    and "3.14" still match. A run the geometry cannot locate is KEPT: a visible false positive is
+    correctable, a silently missing match is not.
+- Regex (`FZ_SEARCH_REGEXP`) is deliberately NOT shipped. mujs has a recursion-depth guard
+  (`REG_MAXREC 4096`) but no step budget, and its matcher recurses once per character consumed;
+  with the exe's 1 MB stack reserve the guard needs ~1.25 MB and therefore can never fire, so a
+  pattern as ordinary as `Cap.*olo` stack-overflows the worker on a dense page - uncatchable by
+  `fz_try`, which is setjmp-based. Nested quantifiers additionally run in exponential time with no
+  cookie or abort anywhere in `stext-search.c`, which would wedge `Document::Shutdown`'s
+  unconditional `join()`. Reviving it needs, at minimum, `FZ_SEARCH_KEEP_LINES` (which bounds `.`
+  to a line, `I_ANY` refusing newlines), an 8 MB `/STACK`, and no live search in regex mode.
 
 **Selection & links**: mouse selection via `fz_snap_selection` (char/word/line on click count) +
 `fz_highlight_selection` for quads; Ctrl+C via `fz_copy_selection(ctx, stext, a, b, crlf=1)` →
 UTF-8→UTF-16 → `CF_UNICODETEXT`. Links via `fz_load_links` per page: hand cursor on hover;
 internal destinations resolved with `fz_resolve_link_dest`, external URLs to `ShellExecuteW`.
 Outline sidebar (`fz_load_outline`) is an M5 item.
+
+**Environment hygiene for spawned processes**: `wWinMain` clears `ELECTRON_RUN_AS_NODE`. Started
+from VS Code (its debug launcher, or an extension launching an external viewer) the app inherits
+it; a shell-spawned child inherits our block in turn, and Electron reading that variable boots as
+plain Node, so the `vscode://` inverse-search handler rejects `--open-url` and exits. The symptom
+is Ctrl+click doing nothing at all, with no way to report it: `ShellExecuteW` returns success
+because the process really did start. Invisible when the app is launched from Explorer, which is
+why it survived to 0.9.1.
 
 ### 4.3 Input handling
 
@@ -891,7 +938,7 @@ Each milestone leaves the tree buildable and the app usable.
 | Risk | Mitigation |
 | --- | --- |
 | MuPDF VS projects target v142 | retarget to v143 is routine and documented; pin the MuPDF tag |
-| `fz_match_*` search API experimental | use stable `fz_search_*` in v1; revisit at the next MuPDF bump |
+| `fz_match_*` search API experimental | adopted at 1.28: the "stable" `fz_search_*` is a shim over it, so the label never described a second engine. Its REGEXP branch stays out (mujs has no step budget and no abort; see the Search section) |
 | Memory blow-up on huge documents / deep zoom | shared 256 MB `fz_store` budget + byte-budgeted RenderCache + tiling + display lists instead of pixmaps as the durable cache |
 | Sync feedback loops / drift | reentrancy guard; anchor recapture on re-lock; relative mode as documented fallback |
 | Touchpad pinch not delivered via WM_GESTURE | accepted v1 gap; DirectManipulation planned, design keeps one viewport per pane HWND |

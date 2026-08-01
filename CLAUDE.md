@@ -198,7 +198,9 @@ menu/toolbar checked state (`UpdateCommandUi`).
   (`pendingId`, `failedScale`) must be released by a posted result or reset on device loss, or pages
   go permanently blank.
 - Results are gated by generation/searchId (`m_openGen`, `m_searchSeq`), not by path or needle echo:
-  re-opening the same file must not resurrect stale results.
+  re-opening the same file must not resurrect stale results. A search query is the
+  `(needle, Document::SearchOptions)` PAIR, and `PaneWindow::StartSearch`'s unchanged-query
+  early-out compares both: comparing the needle alone silently swallows every option toggle.
 - `ID2D1RenderTarget::GetSize()` returns DIPs even in `D2D1_UNIT_MODE_PIXELS`; use the client rect
   or `GetPixelSize()`.
 - Device-loss recovery uses `DxResources::Generation()` so one pane never discards the device the
@@ -209,7 +211,10 @@ menu/toolbar checked state (`UpdateCommandUi`).
   rebar paints the band background); never on a toolbar whose parent paints nothing under children,
   where flat = a black band.
 - The menu bar is a MenuBand toolbar in rebar band 0; the `HMENU` is built but NEVER attached to the
-  window (fullscreen just hides the rebar). MainWindow owns the HMENU and every WM_COMMAND; MenuBand
+  window (fullscreen just hides the rebar), so `GetMenu` returns nothing and menu state can only be
+  refreshed from `WM_INITMENUPOPUP` (which `TrackPopupMenuEx` does deliver to the frame): Edit ▸
+  Copy follows the selection and Find Next/Previous follow the match list, and neither of those
+  posts a view event. MainWindow owns the HMENU and every WM_COMMAND; MenuBand
   owns tracking (WH_MSGFILTER hook scoped to the track loop, EndMenu+retrack for hover/arrow
   switches; the Alt+scroll SC_KEYMENU swallow stays FIRST). Tracking never starts inside
   TBN_DROPDOWN (posted kMsgTrack: comctl32 paints the dropped button hot while the notify is in
@@ -224,6 +229,12 @@ menu/toolbar checked state (`UpdateCommandUi`).
 - Cross-process E2E: `SetWindowText`/`GetWindowText` on another process's control DO NOT deliver
   WM_SETTEXT/WM_GETTEXT (SetWindowText even returns success, touching only the caption cache); test
   scripts must SEND `WM_SETTEXT` explicitly.
+- `wWinMain` clears `ELECTRON_RUN_AS_NODE` before anything can spawn a child. Started FROM VS Code
+  (its debug launcher, or an extension launching an external viewer) we inherit it, every process we
+  start inherits our block in turn, and Electron reading it boots as plain Node: the `vscode://`
+  inverse-search handler then rejects `--open-url` and exits, so Ctrl+click silently does nothing and
+  `ShellExecuteW` cannot report it (the process DID start). Only that variable - the `VSCODE_*` ones
+  are harmless. Do not "clean up" this call: launched from Explorer the bug is invisible.
 - Any epsilon meant to attribute a PAGE from a fractional sync position must survive the
   page->pixel->page round trip (scrolls quantize to whole pixels): `MapTarget`'s wait clamp is 1% of
   a page for this reason; 0.0001 parked the center ON the boundary and the counter flipped to the

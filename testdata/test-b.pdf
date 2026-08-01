@@ -39,7 +39,7 @@ BT /F1 18 Tf 40 396 Td (612 x 792 pt) Tj ET
 endstream
 endobj
 9 0 obj
-<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
 endobj
 xref
 0 10
@@ -56,5 +56,5 @@ xref
 trailer
 << /Size 10 /Root 1 0 R >>
 startxref
-1130
+1157
 %%EOF

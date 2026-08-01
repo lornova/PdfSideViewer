@@ -88,6 +88,15 @@ public:
         int pageIndex = 0;
         std::vector<LinkInfo> links;
     };
+    // Search modifiers, in application terms: the fz_search_options they map to
+    // are built inside the worker, so no UI header ever names a MuPDF constant.
+    // Part of the search IDENTITY, not a side setting: the pane compares the
+    // (needle, options) pair to decide whether a query is unchanged.
+    struct SearchOptions {
+        bool matchCase = false;
+        bool wholeWord = false;
+        bool operator==(const SearchOptions&) const = default;
+    };
     struct SearchMatch {
         int pageIndex = 0;
         std::vector<RectPt> rects; // one logical hit may span several boxes
@@ -133,7 +142,7 @@ public:
     // Whole-document search, processed in small chunks interleaved with
     // renders; a new StartSearch supersedes the previous one, results carry
     // the searchId so stale batches are discarded pane-side.
-    void StartSearch(std::wstring needle, uint64_t searchId);
+    void StartSearch(std::wstring needle, SearchOptions options, uint64_t searchId);
     void CancelSearch();
 
     // Queued renders for pages outside [first,last] are dropped (fast scroll).
@@ -153,6 +162,7 @@ private:
         int col = 0;
         uint64_t requestId = 0;
         std::string needleUtf8; // Search jobs only
+        SearchOptions searchOptions;
         uint64_t searchId = 0;
     };
 

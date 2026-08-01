@@ -83,6 +83,44 @@
       L"&Kilépés\tAlt+F4", L"Ви&йти\tAlt+F4", L"&Ieșire\tAlt+F4", L"&Sair\tAlt+F4",                \
       L"Έ&ξοδος\tAlt+F4", L"&Salir\tAlt+F4", L"Za&kończ\tAlt+F4", L"&Afsluiten\tAlt+F4",           \
       L"&Konec\tAlt+F4", L"&Avsluta\tAlt+F4")                                                      \
+    /* Edit menu. The top-level mnemonic is free of File/View/Sync/Help in EVERY */                \
+    /* language: FR cannot take E (Aid&e), HU cannot take S (&Szinkronizálás), */                  \
+    /* NL cannot take B nor E (&Bestand, B&eeld). */                                               \
+    X(MenuEdit, L"&Edit", L"&Modifica", L"&Bearbeiten", L"Éditio&n", L"Szerkesz&tés",              \
+      L"&Редагування", L"&Editare", L"&Editar", L"&Επεξεργασία", L"&Edición", L"&Edycja",          \
+      L"Be&werken", L"Ú&pravy", L"&Redigera")                                                      \
+    X(MenuCopy, L"&Copy\tCtrl+C", L"&Copia\tCtrl+C", L"&Kopieren\tStrg+C", L"&Copier\tCtrl+C",     \
+      L"&Másolás\tCtrl+C", L"&Копіювати\tCtrl+C", L"Copia&ză\tCtrl+C", L"&Copiar\tCtrl+C",         \
+      L"&Αντιγραφή\tCtrl+C", L"&Copiar\tCtrl+C", L"&Kopiuj\tCtrl+C", L"&Kopiëren\tCtrl+C",         \
+      L"&Kopírovat\tCtrl+C", L"&Kopiera\tCtrl+C")                                                  \
+    X(MenuFind, L"&Find...\tCtrl+F", L"&Trova...\tCtrl+F", L"&Suchen...\tStrg+F",                  \
+      L"&Rechercher...\tCtrl+F", L"&Keresés...\tCtrl+F", L"&Знайти...\tCtrl+F",                    \
+      L"&Caută...\tCtrl+F", L"&Localizar...\tCtrl+F", L"&Εύρεση...\tCtrl+F",                       \
+      L"&Buscar...\tCtrl+F", L"&Znajdź...\tCtrl+F", L"&Zoeken...\tCtrl+F",                         \
+      L"&Najít...\tCtrl+F", L"&Sök...\tCtrl+F")                                                    \
+    X(MenuFindNext, L"Find &Next\tF3", L"Trova &successivo\tF3", L"&Weitersuchen\tF3",             \
+      L"Rechercher le &suivant\tF3", L"Kö&vetkező találat\tF3", L"Знайти &далі\tF3",               \
+      L"Caută &următorul\tF3", L"Localizar &seguinte\tF3", L"Εύρεση ε&πόμενου\tF3",                \
+      L"Buscar &siguiente\tF3", L"Znajdź &następny\tF3", L"&Volgende zoeken\tF3",                  \
+      L"Najít &další\tF3", L"Sök &nästa\tF3")                                                      \
+    X(MenuFindPrev, L"Find &Previous\tShift+F3", L"Trova &precedente\tShift+F3",                   \
+      L"&Rückwärts suchen\tUmschalt+F3", L"Rechercher le &précédent\tMaj+F3",                      \
+      L"&Előző találat\tShift+F3", L"Знайти &назад\tShift+F3",                                     \
+      L"Caută &anteriorul\tShift+F3", L"Localizar &anterior\tShift+F3",                            \
+      L"Εύρεση προη&γούμενου\tShift+F3", L"Buscar &anterior\tShift+F3",                            \
+      L"Znajdź &poprzedni\tShift+F3", L"V&orige zoeken\tShift+F3",                                 \
+      L"Najít &předchozí\tShift+F3", L"Sök &föregående\tShift+F3")                                 \
+    X(MenuMatchCase, L"Match Cas&e", L"&Maiuscole/minuscole",                                      \
+      L"&Groß-/Kleinschreibung beachten", L"Respecter la cass&e",                                  \
+      L"Kis- és nagybe&tű megkülönböztetése", L"&Враховувати регістр",                             \
+      L"Ține cont de &majuscule și minuscule", L"&Diferenciar maiúsculas de minúsculas",           \
+      L"&Διάκριση πεζών/κεφαλαίων", L"Coincidir &mayúsculas y minúsculas",                         \
+      L"&Uwzględnij wielkość liter", L"&Hoofdlettergevoelig",                                      \
+      L"&Rozlišovat malá a velká písmena", L"Matcha skift&läge")                                   \
+    X(MenuWholeWord, L"Match &Whole Word", L"Parola &intera", L"Nur ganzes W&ort suchen",          \
+      L"&Mot entier", L"&Csak teljes szó", L"&Лише слово цілком", L"Numai cuvinte &întregi",       \
+      L"Apenas palavras &inteiras", L"&Μόνο ολόκληρες λέξεις", L"Solo palabras comple&tas",        \
+      L"Tylko &całe wyrazy", L"Volledi&g woord", L"Pouze &celá slova", L"Matcha &hela ord")        \
     X(MenuView, L"&View", L"&Visualizza", L"&Ansicht", L"&Affichage", L"&Nézet", L"&Вигляд",       \
       L"&Vizualizare", L"&Ver", L"&Προβολή", L"&Ver", L"&Widok", L"B&eeld", L"&Zobrazit",          \
       L"&Visa")                                                                                    \
@@ -378,6 +416,37 @@
       L"Rechercher (Ctrl+F)", L"Keresés (Ctrl+F)", L"Пошук (Ctrl+F)", L"Căutare (Ctrl+F)",         \
       L"Localizar (Ctrl+F)", L"Εύρεση (Ctrl+F)", L"Buscar (Ctrl+F)", L"Znajdź (Ctrl+F)",           \
       L"Zoeken (Ctrl+F)", L"Najít (Ctrl+F)", L"Sök (Ctrl+F)")                                      \
+    /* find bar: toggles and navigation (graphic buttons, tooltip only) */                         \
+    X(TipMatchCase, L"Match case", L"Maiuscole/minuscole",                                         \
+      L"Groß-/Kleinschreibung beachten", L"Respecter la casse",                                    \
+      L"Kis- és nagybetű megkülönböztetése", L"Враховувати регістр",                               \
+      L"Ține cont de majuscule și minuscule", L"Diferenciar maiúsculas de minúsculas",             \
+      L"Διάκριση πεζών/κεφαλαίων", L"Coincidir mayúsculas y minúsculas",                           \
+      L"Uwzględnij wielkość liter", L"Hoofdlettergevoelig",                                        \
+      L"Rozlišovat malá a velká písmena", L"Matcha skiftläge")                                     \
+    X(TipWholeWord, L"Match whole word", L"Parola intera", L"Nur ganzes Wort suchen",              \
+      L"Mot entier", L"Csak teljes szó", L"Лише слово цілком", L"Numai cuvinte întregi",           \
+      L"Apenas palavras inteiras", L"Μόνο ολόκληρες λέξεις", L"Solo palabras completas",           \
+      L"Tylko całe wyrazy", L"Volledig woord", L"Pouze celá slova", L"Matcha hela ord")            \
+    X(TipFindNext, L"Next match (F3)", L"Risultato successivo (F3)", L"Nächster Treffer (F3)",     \
+      L"Résultat suivant (F3)", L"Következő találat (F3)", L"Наступний збіг (F3)",                 \
+      L"Rezultatul următor (F3)", L"Ocorrência seguinte (F3)", L"Επόμενο αποτέλεσμα (F3)",         \
+      L"Coincidencia siguiente (F3)", L"Następne wystąpienie (F3)", L"Volgend resultaat (F3)",     \
+      L"Další výskyt (F3)", L"Nästa träff (F3)")                                                   \
+    X(TipFindPrev, L"Previous match (Shift+F3)", L"Risultato precedente (Shift+F3)",               \
+      L"Vorheriger Treffer (Umschalt+F3)", L"Résultat précédent (Maj+F3)",                         \
+      L"Előző találat (Shift+F3)", L"Попередній збіг (Shift+F3)",                                  \
+      L"Rezultatul anterior (Shift+F3)", L"Ocorrência anterior (Shift+F3)",                        \
+      L"Προηγούμενο αποτέλεσμα (Shift+F3)", L"Coincidencia anterior (Shift+F3)",                   \
+      L"Poprzednie wystąpienie (Shift+F3)", L"Vorig resultaat (Shift+F3)",                         \
+      L"Předchozí výskyt (Shift+F3)", L"Föregående träff (Shift+F3)")                              \
+    X(TipFindClose, L"Close find bar (Esc)", L"Chiudi la barra di ricerca (Esc)",                  \
+      L"Suchleiste schließen (Esc)", L"Fermer la barre de recherche (Échap)",                      \
+      L"Keresősáv bezárása (Esc)", L"Закрити панель пошуку (Esc)",                                 \
+      L"Închide bara de căutare (Esc)", L"Fechar a barra de localização (Esc)",                    \
+      L"Κλείσιμο γραμμής εύρεσης (Esc)", L"Cerrar la barra de búsqueda (Esc)",                     \
+      L"Zamknij pasek wyszukiwania (Esc)", L"Zoekbalk sluiten (Esc)",                              \
+      L"Zavřít panel hledání (Esc)", L"Stäng sökfältet (Esc)")                                     \
     X(TipOutline, L"Outline (F9)", L"Segnalibri (F9)", L"Lesezeichen (F9)", L"Signets (F9)",       \
       L"Könyvjelzők (F9)", L"Закладки (F9)", L"Marcaje (F9)", L"Marcadores (F9)",                  \
       L"Σελιδοδείκτες (F9)", L"Marcadores (F9)", L"Zakładki (F9)", L"Bladwijzers (F9)",            \

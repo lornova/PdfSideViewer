@@ -14,10 +14,27 @@ function Format-PdfText([string]$s) {
     return "<FEFF$hex>"
 }
 
+# PDF literal-string form of a line of body text. The file is written as ASCII,
+# so anything above 0x7E goes in as an OCTAL escape: with /WinAnsiEncoding on the
+# font those bytes are Latin-1, which covers every accented letter these tests
+# need (and keeps the generator's ASCII-only output rule intact).
+function Format-PdfLiteral([string]$s) {
+    $out = ''
+    foreach ($ch in $s.ToCharArray()) {
+        $code = [int]$ch
+        if ($ch -eq '(' -or $ch -eq ')' -or $ch -eq '\') { $out += "\$ch" }
+        elseif ($code -ge 0x20 -and $code -le 0x7E) { $out += $ch }
+        elseif ($code -le 0xFF) { $out += '\' + [Convert]::ToString($code, 8).PadLeft(3, '0') }
+        else { $out += '?' }
+    }
+    return $out
+}
+
 function New-TestPdf {
     param([string]$Path, [array]$Pages, [switch]$WithLinks, [switch]$WithPageLabels,
           [array]$Outline)
-    # Pages: @{W=..; H=..; Label=..}
+    # Pages: @{W=..; H=..; Label=..[; Lines=@('body text', ...)]}
+    # Lines: extra 14pt body lines under the label, for the text-search tests.
     # Outline: @{Title=..; Page=<0-based>[; Depth=<0-based>]} - a preorder
     # bookmark list with /Fit destinations (page-top targets, deterministic
     # for the sync-point tests); Depth (default 0) nests the item under the
@@ -49,6 +66,13 @@ function New-TestPdf {
         $text = "BT /F1 48 Tf $cx $cy Td ($($p.Label)) Tj ET"
         $mid = "BT /F1 18 Tf 40 $([int]($p.H/2)) Td ($($p.W) x $($p.H) pt) Tj ET"
         $stream = "$border`n$text`n$mid"
+        if ($p.Lines) {
+            $ly = $cy - 60
+            foreach ($line in $p.Lines) {
+                $stream += "`nBT /F1 14 Tf 40 $ly Td ($(Format-PdfLiteral $line)) Tj ET"
+                $ly -= 20
+            }
+        }
         $annots = ''
         if ($WithLinks -and $i -eq 0) {
             # first page: internal link to page 3 (obj 7) + external link
@@ -60,7 +84,10 @@ function New-TestPdf {
         $objs += "$pageNum 0 obj`n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 $($p.W) $($p.H)] /Contents $contNum 0 R /Resources << /Font << /F1 $fontObj 0 R >> >>$annots >>`nendobj`n"
         $objs += "$contNum 0 obj`n<< /Length $len >>`nstream`n$stream`nendstream`nendobj`n"
     }
-    $objs += "$fontObj 0 obj`n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>`nendobj`n"
+    # WinAnsiEncoding so the octal escapes of Format-PdfLiteral decode to the
+    # accented letters; it agrees with ASCII over 0x20-0x7E, so every PDF this
+    # script already produced is byte-identical in what it shows.
+    $objs += "$fontObj 0 obj`n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>`nendobj`n"
     if ($WithLinks) {
         $h = $Pages[0].H
         # rects are bottom-up: y in [H-260, H-230] wraps the internal-link text
@@ -152,6 +179,34 @@ New-TestPdf -Path (Join-Path $OutDir 'test-b.pdf') -Pages @(
     @{W=612; H=792; Label='B - Pagina 1 (Letter)'},
     @{W=612; H=792; Label='B - Pagina 2 (Letter)'},
     @{W=612; H=792; Label='B - Pagina 3 (Letter)'}
+)
+
+# Text-search fixture (scripts\test-find-options.ps1). Every line is a trap for
+# one of the find-bar options:
+#  - page 1: three cases of "teorema", so Match Case takes 3 hits down to 1;
+#  - page 2: "arco" standing alone, INSIDE "barcollare" (b-arco-llare) and at the
+#    start of "arcobaleno", so Whole Word takes 3 down to 1;
+#  - page 3: the same for the ACCENTED "perché", which is the case the regex
+#    route could never have handled (mujs classifies word characters ASCII-only,
+#    so "\bperché\b" matches nothing at all);
+#  - page 4: >3000 characters on one line once flattened. Nothing searched for
+#    lives here; it exists to pin the recursion depth of a regex matcher against
+#    a real page, for the regex phase.
+$denseWords = 'lorem ipsum dolor sit amet consectetur adipiscing elit sed do eiusmod tempor'
+New-TestPdf -Path (Join-Path $OutDir 'find-a.pdf') -Pages @(
+    @{W=595; H=842; Label='F - Pagina 1'; Lines=@(
+        'Teorema di Pitagora',
+        'il teorema fondamentale',
+        'TEOREMA in maiuscolo')},
+    @{W=595; H=842; Label='F - Pagina 2'; Lines=@(
+        'arco trionfale',
+        'barcollare piano',
+        'arcobaleno acceso')},
+    @{W=595; H=842; Label='F - Pagina 3'; Lines=@(
+        "perch$([char]0xE9) no",
+        "sperch$([char]0xE9) finto",
+        "perch$([char]0xE9)s finto")},
+    @{W=595; H=842; Label='F - Pagina 4'; Lines=@(1..40 | ForEach-Object { $denseWords })}
 )
 
 # Numbered-bookmark pair for the sync-points feature (scripts\test-sync-points.ps1).

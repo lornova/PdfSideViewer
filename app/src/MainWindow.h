@@ -87,6 +87,14 @@ enum CommandId : WORD {
     IDC_PANES_THREE = 1076,
     IDC_SWAP_PANES_BACK = 1077, // Shift+F8: reverse rotation (accelerator-only,
                                 // same as F8 with two panes)
+    // Find bar toggles. No accelerator on purpose: Alt+letter would have to
+    // swallow WM_SYSKEYDOWN and still leave SC_KEYMENU arming the menu band on
+    // the Alt release, and their tooltips therefore advertise none.
+    IDC_FIND_MATCH_CASE = 1078,
+    IDC_FIND_WHOLE_WORD = 1079,
+    // Ctrl+C is handled by the focused pane itself (it owns the selection);
+    // this id exists so Edit ▸ Copy can reach the same code.
+    IDC_COPY = 1080,
     // Control ids live in a separate >= 2000 space so they can never collide
     // with command dispatch: 2001 page box, 2100+ Options dialog, 2201 goto
     // dialog, 2300+ the menu-band toolbar and its buttons (MenuBand.h), 2400+
@@ -203,9 +211,11 @@ private:
     void ApplySession(const AppSettings& session);
     void SaveSession() const;
     void CreateFindBar();
+    void EnsureFindBarToolbars(); // (re)builds both imagelists at the current DPI
     void ShowFindBar();
     void CloseFindBar();
     void LayoutFindBar();
+    void RestartFindSearch(); // re-issues the current query with m_findOptions
     void UpdateUiFont();
     void UpdateOutlineSidebar(PaneWindow* pane);
     static bool IsSystemDark();
@@ -358,13 +368,22 @@ private:
     // document is opening/unreachable does not wipe it from settings.ini.
     PerPane<PaneSettings> m_fallback;
 
-    // Find bar (overlay child hosting the standard controls)
+    // Find bar (overlay child hosting the edit, the counter and three toolbars).
+    // The buttons are comctl32 toolbars rather than loose BUTTONs so they carry
+    // MDL2/label icons, a themed latched state and tooltips for free - and so
+    // that moving the whole search UI into the main toolbar later is a change
+    // of parent rather than a rewrite.
     HWND m_findBar = nullptr;
     HWND m_findEdit = nullptr;
     HWND m_findCount = nullptr;
-    HWND m_findPrev = nullptr;
-    HWND m_findNext = nullptr;
-    HWND m_findClose = nullptr;
+    HWND m_findOptsBar = nullptr;  // match case + whole word (BTNS_CHECK)
+    HWND m_findNavBar = nullptr;   // previous + next match
+    HWND m_findCloseBar = nullptr; // close; its own toolbar because the ladder
+                                   // sheds the direction buttons before it
+    HIMAGELIST m_findOptsIcons = nullptr;
+    HIMAGELIST m_findGlyphIcons = nullptr; // MDL2, shared by the nav and close bars
+    UINT m_findBarDpi = 0;        // DPI both find-bar imagelists were built at
+    Document::SearchOptions m_findOptions; // persisted in [find]; global, not per pane
     HFONT m_uiFont = nullptr;
     PaneWindow* m_findTarget = nullptr;
 

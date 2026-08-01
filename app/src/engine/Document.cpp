@@ -1,6 +1,7 @@
 #include "engine/Document.h"
 
 #include "engine/MupdfLib.h"
+#include "util/TextClass.h"
 
 // fz_try is setjmp-based; its longjmp only ever jumps forward within the same
 // fz_try/fz_catch region, so C++ destructors in enclosing scopes still run.
@@ -38,6 +39,138 @@ template <typename T>
 void PostOrDelete(HWND hwnd, UINT msg, std::unique_ptr<T> payload) {
     if (hwnd && PostMessageW(hwnd, msg, 0, reinterpret_cast<LPARAM>(payload.get())))
         payload.release();
+}
+
+// ------------------------------------------------------ whole-word filtering
+// MuPDF 1.28 has no whole-word search flag, and the regex route is unusable
+// here: mujs classifies word characters with an ASCII-only iswordchar
+// (thirdparty/mujs/regexp.c), so "\bperché\b" matches nothing at all - in an
+// application whose UI ships in fourteen languages that is a broken feature,
+// not a limitation. The boundary is therefore decided below, on the very stext
+// page the matcher ran on.
+
+struct QuadBox {
+    float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+};
+
+QuadBox BoxOf(const fz_quad& q) {
+    QuadBox b;
+    b.x0 = std::min({q.ul.x, q.ur.x, q.ll.x, q.lr.x});
+    b.x1 = std::max({q.ul.x, q.ur.x, q.ll.x, q.lr.x});
+    b.y0 = std::min({q.ul.y, q.ur.y, q.ll.y, q.lr.y});
+    b.y1 = std::max({q.ul.y, q.ur.y, q.ll.y, q.lr.y});
+    return b;
+}
+
+// fz_stext_char::c and fz_chartorune both hand out an int that is -1 for an
+// unmappable glyph; only a real codepoint reaches the Unicode tables.
+char32_t RuneOf(int c) {
+    return c > 0 ? static_cast<char32_t>(c) : 0;
+}
+
+// The text line whose box contains the hit quad's centre. Structure blocks are
+// walked too: a tagged PDF nests its text inside them, and missing that text
+// would silently turn the boundary test into a coin toss.
+fz_stext_line* LineOfQuad(fz_stext_block* first, const fz_quad& hit) {
+    const QuadBox box = BoxOf(hit);
+    const float hx = (box.x0 + box.x1) / 2;
+    const float hy = (box.y0 + box.y1) / 2;
+    for (fz_stext_block* block = first; block; block = block->next) {
+        if (block->type == FZ_STEXT_BLOCK_TEXT) {
+            for (fz_stext_line* line = block->u.t.first_line; line; line = line->next) {
+                if (hx >= line->bbox.x0 && hx <= line->bbox.x1 && hy >= line->bbox.y0 &&
+                    hy <= line->bbox.y1)
+                    return line;
+            }
+        } else if (block->type == FZ_STEXT_BLOCK_STRUCT && block->u.s.down) {
+            if (fz_stext_line* line = LineOfQuad(block->u.s.down->first_block, hit))
+                return line;
+        }
+    }
+    return nullptr;
+}
+
+// The characters flanking the run a hit quad covers. Geometry is used ONLY to
+// locate the run; "before" and "after" then come from the line's character
+// list, which is in reading order. That is what a word boundary asks for, and
+// it keeps bidi runs and vertical writing (fz_stext_line::wmode) correct
+// without a special case: there, logical and geometric order disagree.
+struct RunNeighbours {
+    bool located = false;
+    fz_stext_char* before = nullptr; // located with null = the run starts the line
+    fz_stext_char* after = nullptr;  // located with null = the run ends the line
+};
+
+RunNeighbours NeighboursInLine(fz_stext_line* line, const fz_quad& hit) {
+    RunNeighbours out;
+    const QuadBox box = BoxOf(hit);
+    fz_stext_char* prev = nullptr;
+    for (fz_stext_char* ch = line->first_char; ch; ch = ch->next) {
+        const QuadBox cb = BoxOf(ch->quad);
+        const float cx = (cb.x0 + cb.x1) / 2;
+        const float cy = (cb.y0 + cb.y1) / 2;
+        if (cx >= box.x0 && cx <= box.x1 && cy >= box.y0 && cy <= box.y1) {
+            if (!out.located) {
+                out.located = true;
+                out.before = prev;
+            }
+            out.after = ch->next; // the last covered character wins
+        }
+        prev = ch;
+    }
+    return out;
+}
+
+// Which sides of the needle can carry a boundary at all. Searching "(a", "3.14"
+// or "--" with whole word on must still find them, exactly as \b behaves: a
+// side whose own edge character is not a word character stays unconstrained.
+struct NeedleEdges {
+    bool leading = false;
+    bool trailing = false;
+};
+
+NeedleEdges EdgesOf(const std::string& needleUtf8) {
+    NeedleEdges edges;
+    if (needleUtf8.empty())
+        return edges;
+    int last = 0;
+    bool first = true;
+    for (const char* p = needleUtf8.c_str(); *p;) {
+        int rune = 0;
+        p += fz_chartorune(&rune, p);
+        if (first) {
+            edges.leading = IsWordChar(RuneOf(rune));
+            first = false;
+        }
+        last = rune;
+    }
+    edges.trailing = IsWordChar(RuneOf(last));
+    return edges;
+}
+
+// A hit survives when neither constrained side touches another word character.
+// A run the geometry cannot locate is KEPT: an unclassifiable hit shown is a
+// visible, correctable false positive, while one dropped is a match that
+// silently does not exist.
+bool HitIsWholeWord(fz_stext_page* stext, const NeedleEdges& edges, const fz_quad& firstQuad,
+                    const fz_quad& lastQuad) {
+    if (!stext)
+        return true;
+    if (edges.leading) {
+        if (fz_stext_line* line = LineOfQuad(stext->first_block, firstQuad)) {
+            const RunNeighbours n = NeighboursInLine(line, firstQuad);
+            if (n.located && n.before && IsWordChar(RuneOf(n.before->c)))
+                return false;
+        }
+    }
+    if (edges.trailing) {
+        if (fz_stext_line* line = LineOfQuad(stext->first_block, lastQuad)) {
+            const RunNeighbours n = NeighboursInLine(line, lastQuad);
+            if (n.located && n.after && IsWordChar(RuneOf(n.after->c)))
+                return false;
+        }
+    }
+    return true;
 }
 
 } // namespace
@@ -174,7 +307,7 @@ void Document::RequestLinks(int pageIndex) {
     m_cv.notify_one();
 }
 
-void Document::StartSearch(std::wstring needle, uint64_t searchId) {
+void Document::StartSearch(std::wstring needle, SearchOptions options, uint64_t searchId) {
     EnsureWorker();
     {
         std::lock_guard lock(m_mutex);
@@ -183,6 +316,7 @@ void Document::StartSearch(std::wstring needle, uint64_t searchId) {
         Job job;
         job.type = Job::Type::Search;
         job.needleUtf8 = ToUtf8(needle);
+        job.searchOptions = options;
         job.searchId = searchId;
         job.pageIndex = 0;
         m_jobs.push_back(std::move(job));
@@ -725,17 +859,33 @@ void Document::WorkerSearch(fz_context* ctx, const Job& job) {
     std::vector<int> marks(kMaxHitQuads);
     std::vector<fz_quad> quads(kMaxHitQuads);
 
+    // FZ_SEARCH_EXACT is case SENSITIVE; the historic fz_search_* family is
+    // itself a shim over this one with FZ_SEARCH_IGNORE_CASE, so the
+    // case-insensitive branch reproduces the previous behaviour bit for bit.
+    const fz_search_options options =
+        job.searchOptions.matchCase ? FZ_SEARCH_EXACT : FZ_SEARCH_IGNORE_CASE;
+    // The stext model fz_match_page builds internally (source/fitz/util.c).
+    // Built here instead so the whole-word filter looks at the SAME page the
+    // matcher ran on: a second extraction with different flags would classify
+    // boundaries against text the hits do not come from.
+    fz_stext_options stextOpts{};
+    stextOpts.flags = FZ_STEXT_DEHYPHENATE;
+    const NeedleEdges edges = EdgesOf(job.needleUtf8);
+
     for (int page = job.pageIndex; page < end; ++page) {
         {
             std::lock_guard lock(m_mutex);
             if (m_quit || job.searchId != m_currentSearchId)
                 return;
         }
+        fz_stext_page* stext = nullptr;
         int count = 0;
+        fz_var(stext);
         fz_var(count);
         fz_try(ctx) {
-            count = fz_search_page_number(ctx, m_doc, page, job.needleUtf8.c_str(), marks.data(),
-                                          quads.data(), kMaxHitQuads);
+            stext = fz_new_stext_page_from_page_number(ctx, m_doc, page, &stextOpts);
+            count = fz_match_stext_page(ctx, stext, job.needleUtf8.c_str(), marks.data(),
+                                        quads.data(), kMaxHitQuads, options);
         }
         fz_catch(ctx) {
             count = 0; // damaged page: skip
@@ -745,23 +895,36 @@ void Document::WorkerSearch(fz_context* ctx, const Job& job) {
         SearchMatch current;
         current.pageIndex = page;
         int currentMark = -1;
-        for (int i = 0; i < count; ++i) {
-            if (marks[i] != currentMark && !current.rects.empty()) {
+        fz_quad firstQuad{};
+        fz_quad lastQuad{};
+        const auto flush = [&] {
+            if (current.rects.empty())
+                return;
+            if (!job.searchOptions.wholeWord ||
+                HitIsWholeWord(stext, edges, firstQuad, lastQuad))
                 result->matches.push_back(std::move(current));
-                current = SearchMatch{};
-                current.pageIndex = page;
-            }
+            current = SearchMatch{};
+            current.pageIndex = page;
+        };
+        for (int i = 0; i < count; ++i) {
+            if (marks[i] != currentMark)
+                flush();
             currentMark = marks[i];
             const fz_quad& q = quads[static_cast<size_t>(i)];
+            if (current.rects.empty())
+                firstQuad = q;
+            lastQuad = q;
+            const QuadBox b = BoxOf(q);
             RectPt r;
-            r.x0 = std::min({q.ul.x, q.ur.x, q.ll.x, q.lr.x});
-            r.x1 = std::max({q.ul.x, q.ur.x, q.ll.x, q.lr.x});
-            r.y0 = std::min({q.ul.y, q.ur.y, q.ll.y, q.lr.y});
-            r.y1 = std::max({q.ul.y, q.ur.y, q.ll.y, q.lr.y});
+            r.x0 = b.x0;
+            r.x1 = b.x1;
+            r.y0 = b.y0;
+            r.y1 = b.y1;
             current.rects.push_back(r);
         }
-        if (!current.rects.empty())
-            result->matches.push_back(std::move(current));
+        flush();
+        if (stext)
+            fz_drop_stext_page(ctx, stext);
     }
 
     result->pagesScanned = end;

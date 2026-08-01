@@ -54,6 +54,18 @@ bool SendOpenDocument(HWND target, int slot, const std::wstring& path) {
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR, _In_ int nCmdShow) {
     try {
+        // Launched FROM VS Code (its debug launcher, or an extension such as
+        // LaTeX Workshop starting an external viewer) this process inherits
+        // ELECTRON_RUN_AS_NODE=1. Every process we start inherits our block in
+        // turn - including the one the shell starts for a "vscode://" inverse
+        // search - and Electron reading that variable boots as plain Node,
+        // rejects "--open-url" and exits: Ctrl+click silently does nothing, and
+        // ShellExecuteW cannot report it because the process DID start. The
+        // variable means nothing to us, so drop it before anything can be
+        // spawned. Only this one: the VSCODE_* variables are harmless (verified
+        // by clearing this one alone and watching the handler go from exit 9,
+        // "bad option: --open-url", to exit 0).
+        SetEnvironmentVariableW(L"ELECTRON_RUN_AS_NODE", nullptr);
         INITCOMMONCONTROLSEX icc{sizeof(icc),
                                  ICC_TREEVIEW_CLASSES | ICC_BAR_CLASSES | ICC_COOL_CLASSES |
                                  ICC_LISTVIEW_CLASSES};

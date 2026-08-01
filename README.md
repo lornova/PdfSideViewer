@@ -45,8 +45,12 @@ executable that starts instantly.
   Generated points survive auto-reload (re-derived from the fresh outline), and each pair's
   points are remembered across sessions: reopening the same two documents brings its manual
   points back and re-derives the generated ones.
-- Full-document **text search** (Ctrl+F) with live highlighting and F3 navigation.
-- **Text selection** with the mouse (double-click = word), Ctrl+C copies Unicode text.
+- Full-document **text search** (Ctrl+F) with live highlighting and F3 navigation, plus
+  **Match case** and **Match whole word** toggles in the find bar (remembered across sessions).
+  Whole-word boundaries are Unicode-aware, so "perché" is a whole word too. Typing never moves
+  the view: the highlights appear where you are, and F3 steps from the page you are on.
+- **Text selection** with the mouse (double-click = word), Ctrl+C copies Unicode text. Copy and
+  the whole find family also live in the **Edit menu**.
 - Clickable **links** (internal destinations and web URLs) and an **outline sidebar** (F9).
 - **Auto-reload**: documents rewritten on disk (e.g. by a LaTeX build) reload in place,
   keeping position, zoom and sync.
@@ -127,7 +131,7 @@ executable that starts instantly.
 | F7 / Ctrl+F7 | Toggle scroll sync / zoom sync |
 | Shift+F7 / Ctrl+Shift+F7 | Add a sync point at the current alignment / clear sync points |
 | Alt + scroll | Adjust one pane while synced (re-anchors; with sync points the tweak is transient) |
-| Ctrl+F, F3, Shift+F3 | Find, next match, previous match |
+| Ctrl+F, F3, Shift+F3 | Find, next match, previous match (Esc closes the find bar) |
 | Ctrl+C | Copy selected text |
 | F9 | Outline (bookmarks) sidebar |
 | Ctrl+wheel, Ctrl +/− | Zoom (anchored at the cursor) |

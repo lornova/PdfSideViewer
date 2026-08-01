@@ -112,7 +112,9 @@ void PaneWindow::ResetDocumentState() {
     m_linksPending.clear();
     ClearSelection();
     m_searchNeedle.clear();
+    m_searchOptions = {};
     m_pendingSearch.clear();
+    m_pendingOptions = {};
     ++m_searchSeq;
     m_matches.clear();
     m_activeMatch = -1;
@@ -1324,8 +1326,10 @@ void PaneWindow::OnDocOpened(std::unique_ptr<Document::OpenResult> result) {
         if (!m_pendingSearch.empty()) {
             // Query typed while the document was still opening: run it now.
             const std::wstring pending = std::move(m_pendingSearch);
+            const Document::SearchOptions pendingOptions = m_pendingOptions;
             m_pendingSearch.clear();
-            StartSearch(pending);
+            m_pendingOptions = {};
+            StartSearch(pending, pendingOptions);
         }
     }
     Invalidate();
@@ -2316,37 +2320,40 @@ void PaneWindow::OnLinks(std::unique_ptr<Document::LinksResult> result) {
 void PaneWindow::OnSearchResult(std::unique_ptr<Document::SearchResult> result) {
     if (!result || result->searchId != m_searchSeq)
         return; // superseded search
-    const bool hadNone = m_matches.empty();
     for (auto& match : result->matches)
         m_matches.push_back(std::move(match));
     m_searchDone = result->done;
-    if (hadNone && !m_matches.empty()) {
-        m_activeMatch = 0;
-        ScrollToMatch(m_matches[0]);
-    }
+    // Deliberately does NOT select or scroll to anything: results arrive while
+    // the reader is still typing, and yanking the view to page 1 loses the
+    // place they were reading. The highlights appear where they are; moving is
+    // GotoMatch's job, and it starts from where the reader actually is.
     NotifySearchStatus();
     Invalidate();
 }
 
-void PaneWindow::StartSearch(const std::wstring& needle) {
-    if (needle == m_searchNeedle)
+void PaneWindow::StartSearch(const std::wstring& needle, Document::SearchOptions options) {
+    if (needle == m_searchNeedle && options == m_searchOptions)
         return; // unchanged (debounce echo)
     ++m_searchSeq;
     m_matches.clear();
     m_activeMatch = -1;
     if (needle.empty() || m_state != State::Open) {
-        // Never latch a query that did not run: the same-needle guard would
+        // Never latch a query that did not run: the same-query guard would
         // block it forever once the document opens. Park it instead and
         // re-issue on DocumentOpened.
         m_searchNeedle.clear();
+        m_searchOptions = {};
         m_pendingSearch = needle;
+        m_pendingOptions = options;
         m_searchDone = true;
         m_doc.CancelSearch();
     } else {
         m_pendingSearch.clear();
+        m_pendingOptions = {};
         m_searchNeedle = needle;
+        m_searchOptions = options;
         m_searchDone = false;
-        m_doc.StartSearch(needle, m_searchSeq);
+        m_doc.StartSearch(needle, options, m_searchSeq);
     }
     NotifySearchStatus();
     Invalidate();
@@ -2354,7 +2361,9 @@ void PaneWindow::StartSearch(const std::wstring& needle) {
 
 void PaneWindow::ClearSearch() {
     m_searchNeedle.clear();
+    m_searchOptions = {};
     m_pendingSearch.clear();
+    m_pendingOptions = {};
     ++m_searchSeq;
     m_matches.clear();
     m_activeMatch = -1;
@@ -2368,7 +2377,24 @@ void PaneWindow::GotoMatch(int delta) {
     if (m_matches.empty())
         return;
     const int n = static_cast<int>(m_matches.size());
-    const int base = m_activeMatch < 0 ? 0 : m_activeMatch + delta;
+    int base;
+    if (m_activeMatch < 0) {
+        // Nothing selected yet (a fresh query never moves the view): the first
+        // step lands on the match nearest to where the reader IS - the first one
+        // on the current page or after it - instead of dragging them back to the
+        // top of the document. Backwards from there is the one before it.
+        const int page = static_cast<int>(SyncPosition());
+        int anchor = 0; // every match is behind us: wrap to the first
+        for (size_t i = 0; i < m_matches.size(); ++i) {
+            if (m_matches[i].pageIndex >= page) {
+                anchor = static_cast<int>(i);
+                break;
+            }
+        }
+        base = delta >= 0 ? anchor : anchor - 1;
+    } else {
+        base = m_activeMatch + delta;
+    }
     m_activeMatch = ((base % n) + n) % n;
     ScrollToMatch(m_matches[static_cast<size_t>(m_activeMatch)]);
     NotifySearchStatus();

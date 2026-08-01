@@ -174,9 +174,17 @@ public:
     void SetSearchStatusHandler(SearchStatusHandler handler) {
         m_onSearchStatus = std::move(handler);
     }
-    void StartSearch(const std::wstring& needle);
+    // The options are part of the query: toggling one with the text unchanged
+    // must re-run the search, so both are latched together.
+    void StartSearch(const std::wstring& needle, Document::SearchOptions options);
     void ClearSearch();
     void GotoMatch(int delta); // +1 next, -1 previous; wraps around
+    int MatchCount() const { return static_cast<int>(m_matches.size()); }
+
+    // Selection state and Ctrl+C, exposed for the Edit menu (the pane handles
+    // the accelerator itself).
+    bool HasSelection() const { return m_hasSelection; }
+    void CopySelection();
 
     // ------------------------------------------------------ persisted state --
     const std::wstring& DocumentPath() const { return m_docPath; }
@@ -301,7 +309,6 @@ private:
     void ActivateLink(const Document::LinkInfo& link);
     void ClearSelection();
     std::wstring SelectionText() const;
-    void CopySelection();
     void DrawOverlays(ID2D1SolidColorBrush* brush, int page, const D2D1_RECT_F& dest,
                       float scale);
     void DrawAnchorMarker(ID2D1SolidColorBrush* brush, const SyncMarker& marker,
@@ -487,7 +494,9 @@ private:
 
     SearchStatusHandler m_onSearchStatus;
     std::wstring m_searchNeedle;
+    Document::SearchOptions m_searchOptions;  // latched with m_searchNeedle
     std::wstring m_pendingSearch; // typed while the document was still opening
+    Document::SearchOptions m_pendingOptions; // options the parked query carried
     uint64_t m_searchSeq = 0; // matches Document::StartSearch ids
     std::vector<Document::SearchMatch> m_matches; // page order
     int m_activeMatch = -1;

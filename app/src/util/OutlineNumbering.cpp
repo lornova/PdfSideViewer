@@ -1,5 +1,7 @@
 #include "util/OutlineNumbering.h"
 
+#include "util/TextClass.h"
+
 #include <cwctype>
 #include <initializer_list>
 #include <map>
@@ -76,19 +78,10 @@ bool IsAsciiAlpha(wchar_t c) {
     return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z');
 }
 
-// A letter of an intro WORD: accents/umlauts included (German "Anhang" is
-// ASCII, but Hungarian "rész"/"függelék"/"melléklet" are not). GetStringTypeW
-// classifies from the Unicode tables with no locale input; IsCharAlphaW is
-// documented to follow the language the USER selected, and a CRT iswalpha
-// follows the C locale - either would make bookmark matching depend on the
-// host Windows configuration. Digits and letter COMPONENTS stay ASCII by
-// design (see the grammar).
-bool IsWordLetter(wchar_t c) {
-    WORD type = 0;
-    if (!GetStringTypeW(CT_CTYPE1, &c, 1, &type))
-        return false;
-    return (type & C1_ALPHA) != 0;
-}
+// A letter of an intro WORD is util/TextClass.h's IsWordLetter: accents and
+// umlauts included (German "Anhang" is ASCII, but Hungarian "rész"/"függelék"/
+// "melléklet" are not), and deliberately NOT its IsWordChar - digits and letter
+// COMPONENTS stay ASCII by design here (see the grammar).
 
 // Invariant-locale lowercasing for every comparison key in this file:
 // CharLowerBuffW follows the user's language too (under a Turkish locale "I"
