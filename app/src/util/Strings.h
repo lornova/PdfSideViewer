@@ -143,26 +143,42 @@
       L"Κλείδ&ωμα γραμμών εργαλείων", L"&Bloquear las barras de herramientas",                     \
       L"Za&blokuj paski narzędzi", L"Werkbalken ver&grendelen",                                    \
       L"Zamknout panely nástro&jů", L"&Lås verktygsfälten")                                        \
-    /* pane-count submenu: two items in their own popup, so the mnemonics stay                     \
-       free even where the View popup has none left (Portuguese) */                                \
-    X(MenuPanes, L"Pa&nes", L"P&annelli", L"Berei&che", L"Pann&eaux", L"&Panelek", L"П&анелі",     \
-      L"Pa&nouri", L"Painéi&s", L"Πλαίσ&ια", L"Pane&les", L"P&anele", L"D&eelvensters",            \
-      L"P&anely", L"Pa&neler")                                                                     \
-    X(MenuPanesTwo, L"&Two Panes", L"&Due pannelli", L"&Zwei Bereiche", L"&Deux panneaux",         \
-      L"&Két panel", L"&Дві панелі", L"&Două panouri", L"&Dois painéis", L"&Δύο πλαίσια",          \
-      L"&Dos paneles", L"&Dwa panele", L"&Twee deelvensters", L"&Dva panely", L"T&vå paneler")     \
-    X(MenuPanesThree, L"T&hree Panes", L"&Tre pannelli", L"&Drei Bereiche", L"&Trois panneaux",    \
-      L"&Három panel", L"&Три панелі", L"&Trei panouri", L"&Três painéis", L"&Τρία πλαίσια",       \
-      L"&Tres paneles", L"&Trzy panele", L"&Drie deelvensters", L"&Tři panely", L"&Tre paneler")   \
+    /* mnemonics chosen free in BOTH menus that show it (View popup and the                        \
+       rebar context menu); pt/es use "esquema" because no free letter of                          \
+       either menu occurs in the plainer wording */                                                \
+    X(MenuResetToolbarLayout, L"&Reset the Toolbar Layout",                                        \
+      L"Ripristina la disposi&zione delle barre degli strumenti",                                  \
+      L"&Anordnung der Symbolleisten zurücksetzen",                                                \
+      L"Réinitialiser la disposition des &barres d'outils",                                        \
+      L"Eszköztár-elrendezés &visszaállítása",                                                     \
+      L"&Скинути розташування панелей інструментів",                                               \
+      L"Resetează disp&unerea barelor de instrumente",                                             \
+      L"Repor o es&quema das barras de ferramentas",                                               \
+      L"Επαναφο&ρά διάταξης γραμμών εργαλείων",                                                    \
+      L"Restablecer el es&quema de las barras de herramientas",                                    \
+      L"Przywróć &układ pasków narzędzi", L"Werkba&lkindeling herstellen",                         \
+      L"Obnovit &rozložení panelů nástrojů", L"Å&terställ verktygsfältens layout")                 \
+    /* flat radio pair in the View popup (the "Panes" submenu is gone).                            \
+       Mnemonics re-picked to stay unique there in every language; pt and nl                       \
+       had no two free letters covering these words, so MenuZoomOut (pt:                           \
+       Red&uzir) and MenuScrollPaged (nl: &Pagina per pagina) ceded r and n */                     \
+    X(MenuPanesTwo, L"Two Pa&nes", L"&Due pannelli", L"Zwei Berei&che", L"&Deux panneaux",         \
+      L"Két &panel", L"&Дві панелі", L"&Două panouri", L"Doi&s painéis", L"Δύο πλαίσ&ια",          \
+      L"Dos pane&les", L"D&wa panele", L"Twee deelve&nsters", L"&Dva panely", L"Två pa&neler")     \
+    X(MenuPanesThree, L"T&hree Panes", L"Tre p&annelli", L"&Drei Bereiche", L"Trois pann&eaux",    \
+      L"&Három panel", L"Т&ри панелі", L"Trei pa&nouri", L"T&rês painéis", L"&Τρία πλαίσια",       \
+      L"Tre&s paneles", L"Trzy pane&le", L"Dri&e deelvensters", L"Tř&i panely", L"Tr&e paneler")   \
     X(MenuZoomIn, L"Zoom &In\tCtrl+Plus", L"&Ingrandisci\tCtrl+Più",                               \
       L"Ver&größern\tStrg+Plus", L"&Zoom avant\tCtrl+Plus", L"&Nagyítás\tCtrl+Plusz",              \
       L"З&більшити\tCtrl+Плюс", L"Mărir&e\tCtrl+Plus", L"&Ampliar\tCtrl+Mais",                     \
       L"&Μεγέθυνση\tCtrl+Συν", L"&Ampliar\tCtrl+Más", L"&Powiększ\tCtrl+Plus",                     \
       L"&Inzoomen\tCtrl+Plus", L"&Přiblížit\tCtrl+Plus", L"Zooma &in\tCtrl+Plus")                  \
+    /* pt mnemonic on the u, not the natural R: r is MenuPanesThree's (the                         \
+       only free letter of "Três painéis" once MenuPanesTwo takes the s) */                        \
     X(MenuZoomOut, L"Zoom O&ut\tCtrl+Minus", L"&Riduci\tCtrl+Meno",                                \
       L"Ver&kleinern\tStrg+Minus", L"Zoom arr&ière\tCtrl+Moins",                                   \
       L"K&icsinyítés\tCtrl+Mínusz", L"З&меншити\tCtrl+Мінус", L"Mi&cșorare\tCtrl+Minus",           \
-      L"&Reduzir\tCtrl+Menos", L"Σμίκρ&υνση\tCtrl+Πλην", L"&Reducir\tCtrl+Menos",                  \
+      L"Red&uzir\tCtrl+Menos", L"Σμίκρ&υνση\tCtrl+Πλην", L"&Reducir\tCtrl+Menos",                  \
       L"Po&mniejsz\tCtrl+Minus", L"&Uitzoomen\tCtrl+Min", L"&Oddálit\tCtrl+Minus",                 \
       L"Zooma &ut\tCtrl+Minus")                                                                    \
     X(MenuActualSize, L"&Actual Size\tCtrl+0", L"Dimensioni &effettive\tCtrl+0",                   \
@@ -192,12 +208,14 @@
       L"Συνε&χής κύλιση\tCtrl+4", L"Desplazamiento c&ontinuo\tCtrl+4",                             \
       L"Przewijanie &ciągłe\tCtrl+4", L"Doorlopend s&crollen\tCtrl+4",                             \
       L"Pl&ynulé posouvání\tCtrl+4", L"Kontinuerlig rullnin&g\tCtrl+4")                            \
+    /* nl mnemonic on the P: n is MenuPanesTwo's ("deelvensters" offers no                         \
+       other letter the View popup still has free) */                                              \
     X(MenuScrollPaged, L"Page-&by-Page\tCtrl+5", L"Pagina per pagi&na\tCtrl+5",                    \
       L"Seiten&weise\tStrg+5", L"Page par pa&ge\tCtrl+5",                                          \
       L"Oldalankénti gö&rgetés\tCtrl+5", L"&Посторінково\tCtrl+5",                                 \
       L"Pa&gină cu pagină\tCtrl+5", L"Página a pá&gina\tCtrl+5",                                   \
       L"Σελίδα-σελίδ&α\tCtrl+5", L"Pá&gina a página\tCtrl+5",                                      \
-      L"Strona po stron&ie\tCtrl+5", L"Pagina per pagi&na\tCtrl+5",                                \
+      L"Strona po stron&ie\tCtrl+5", L"&Pagina per pagina\tCtrl+5",                                \
       L"Str&ánka po stránce\tCtrl+5", L"Sida &för sida\tCtrl+5")                                   \
     X(MenuGotoPage, L"&Go to Page...\tCtrl+G", L"&Vai alla pagina...\tCtrl+G",                     \
       L"Gehe &zu Seite...\tStrg+G", L"&Aller à la page...\tCtrl+G",                                \

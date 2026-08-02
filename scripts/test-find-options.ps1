@@ -149,8 +149,14 @@ function Start-Viewer {
     return $v
 }
 function Stop-Viewer($v) {
-    [void]$v.Proc.CloseMainWindow()
-    if (-not $v.Proc.WaitForExit(10000)) { $v.Proc.Kill(); throw 'viewer did not exit after CloseMainWindow' }
+    # NOT Process.CloseMainWindow(): .NET resolves the "main window" as the
+    # first visible unowned top-level in z-order, and a tooltip's SysShadow
+    # (TOPMOST, visible, ownerless - keyboard focus parked on a toolbar keeps
+    # the tip up, phase 6 does exactly that) outranks the frame. The WM_CLOSE
+    # then lands on the shadow and the viewer never exits. The frame HWND is
+    # already known: post WM_CLOSE to it directly.
+    [void][Win32.Find]::PostMessageW($v.Main, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+    if (-not $v.Proc.WaitForExit(10000)) { $v.Proc.Kill(); throw 'viewer did not exit after WM_CLOSE' }
     Assert ($v.Proc.ExitCode -eq 0) "exit code 0 (got $($v.Proc.ExitCode))"
 }
 function Show-FindBar($v) {

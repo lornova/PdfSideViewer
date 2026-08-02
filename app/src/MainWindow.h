@@ -95,6 +95,7 @@ enum CommandId : WORD {
     // Ctrl+C is handled by the focused pane itself (it owns the selection);
     // this id exists so Edit ▸ Copy can reach the same code.
     IDC_COPY = 1080,
+    IDC_RESET_TOOLBAR_LAYOUT = 1081, // back to the BuildRebar default rows
     // Control ids live in a separate >= 2000 space so they can never collide
     // with command dispatch: 2001 page box, 2100+ Options dialog, 2201 goto
     // dialog, 2300+ the menu-band toolbar and its buttons (MenuBand.h), 2400+
@@ -163,8 +164,10 @@ private:
     void BuildRebar(HINSTANCE hinst);
     void UpdateRebarBandSizes();
     void SetRebarLocked(bool locked);
+    void ResetRebarLayout(); // View/context-menu command: BuildRebar default rows
     void ApplyPageBoxFixedSize();
     void ApplyRebarLayout(const std::wstring& layout);
+    void ApplyFullscreenBandLayout(); // forced one-row locked layout, page box right
     std::wstring SerializeRebarLayout() const;
     void ShowRebarContextMenu(POINT screenPt);
     void ShowChevronMenu(const NMREBARCHEVRON* nm);
@@ -298,9 +301,11 @@ private:
     // SC_KEYMENU suppression).
     bool m_altScrollGesture = false;
     // Window state captured when entering full screen; also what SaveSession
-    // persists while full screen (the live placement is the monitor rect).
+    // persists while full screen (the live placement is the monitor rect, the
+    // live band layout has the menu band hidden and its row merged away).
     WINDOWPLACEMENT m_fsRestorePlacement{};
     LONG m_fsRestoreStyle = 0;
+    std::wstring m_fsRestoreBands;
     // Vertical band left for the panes between the toolbar and the status bar.
     int m_contentTop = 0;
     int m_contentBottom = 0;

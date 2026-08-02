@@ -68,7 +68,10 @@ clipboard and PrintWindow captures. Rules for test scripts:
   file stays visible for a moment.
 - One instance at a time, and CHECK first: a foreign (user) instance receives FindWindow-posted
   commands, so abort if `Get-Process PdfSideViewer` is non-empty. The exe must exit with code 0
-  after CloseMainWindow. Restore the user's clipboard if a test touches it.
+  after a WM_CLOSE POSTED TO THE FRAME HWND - never `Process.CloseMainWindow()`: .NET picks the
+  first visible unowned top-level in z-order, and a transient tooltip SysShadow (TOPMOST, visible,
+  ownerless; keyboard focus parked on a toolbar keeps a tip up with no mouse) outranks the frame
+  and eats the WM_CLOSE. Restore the user's clipboard if a test touches it.
 - `scripts\test-sync-points.ps1` is the in-repo reference suite (sync points); it also encodes the
   PowerShell P/Invoke pitfalls: `$null` coerced to `""` for string parameters (declare NULL-able
   FindWindow arguments as IntPtr) and the startup/dialog races (poll for children after FindWindow,
@@ -121,7 +124,7 @@ maximum. Auto-generation matches hierarchical numeric bookmark keys via `util/Ou
 **Pane slots** (`PaneSlots.h`): the frame owns a FIXED array of three slots in visual order
 (`kSlotLeft`, `kSlotCenter`, `kSlotRight`) of which only some are ACTIVE. `m_paneCount` is 2 by
 default (active set {left, right}, centre pane never created) and 3 in the optional three-pane
-mode (`[window] paneCount`, View ▸ Panes, or implicitly from File ▸ Open Centre and from a third
+mode (`[window] paneCount`, View ▸ Two/Three Panes, or implicitly from File ▸ Open Centre and from a third
 command-line argument). `SetPaneCount` creates/destroys the centre pane, wires it through the same
 `ConfigurePane` used at startup, and CLEARS the sync map: a point tuple carrying a stale centre
 coordinate would break the all-coordinates monotonicity the gap arithmetic relies on. ORDER is
@@ -201,6 +204,11 @@ menu/toolbar checked state (`UpdateCommandUi`).
   re-opening the same file must not resurrect stale results. A search query is the
   `(needle, Document::SearchOptions)` PAIR, and `PaneWindow::StartSearch`'s unchanged-query
   early-out compares both: comparing the needle alone silently swallows every option toggle.
+- Toolbar `BTNS_AUTOSIZE` label widths are measured ONCE, at `TB_ADDBUTTONSW` time, with the font
+  of that moment, and under PMv2 comctl32 swaps its per-DPI font in AFTER `WM_DPICHANGED` returns
+  (`TB_AUTOSIZE` does not re-measure): never patch a labeled toolbar in place on a DPI change -
+  the command toolbar is recreated (`RebuildToolbarInBand`) and the menu band re-adds its buttons
+  on every font change (`MenuBand::SetFont`).
 - `ID2D1RenderTarget::GetSize()` returns DIPs even in `D2D1_UNIT_MODE_PIXELS`; use the client rect
   or `GetPixelSize()`.
 - Device-loss recovery uses `DxResources::Generation()` so one pane never discards the device the
@@ -225,7 +233,16 @@ menu/toolbar checked state (`UpdateCommandUi`).
   only while row-last (ApplyPageBoxFixedSize); RBN_HEIGHTCHANGE re-runs Layout behind the
   m_layingOut guard; the menu chevron popup must RemoveMenu its shared submenus before DestroyMenu.
   USECHEVRON clips the CHILD under cxIdeal and band borders are exposed by no API: the menu band cx
-  is measured (UpdateRebarBandSizes), never ideal+constant.
+  is measured (UpdateRebarBandSizes), never ideal+constant. The measure needs the band VISIBLE (the
+  rebar never lays out a hidden band's child): full screen hides the menu band unconditionally, so
+  the measure is skipped there and re-run when full screen exits. Hiding a band also makes comctl32
+  MERGE its row into the next one (the next band's RBBS_BREAK is cleared for good): full screen
+  snapshots the band layout at entry, forces its own (ApplyFullscreenBandLayout: one locked row,
+  page box right-aligned via FIXEDSIZE, lock setting overridden - SetRebarLocked only records the
+  setting while full screen), restores the snapshot at exit (lock styles FIRST, then
+  ApplyRebarLayout: the snapshot cx values include the user's gripper state), and
+  SerializeRebarLayout returns the snapshot while full screen so a session saved there keeps the
+  real layout.
 - Cross-process E2E: `SetWindowText`/`GetWindowText` on another process's control DO NOT deliver
   WM_SETTEXT/WM_GETTEXT (SetWindowText even returns success, touching only the caption cache); test
   scripts must SEND `WM_SETTEXT` explicitly.

@@ -77,7 +77,11 @@ void MenuBand::SetFont(HFONT font) {
     if (!m_toolbar)
         return;
     SendMessageW(m_toolbar, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
-    SendMessageW(m_toolbar, TB_AUTOSIZE, 0, 0);
+    // BTNS_AUTOSIZE widths are measured when a button is ADDED, with the font
+    // of that moment; a font swapped in later (DPI change) draws wider text
+    // into the stale rects and every title truncates to an ellipsis.
+    // TB_AUTOSIZE alone does not re-measure: re-add the buttons.
+    RebuildButtons();
 }
 
 bool MenuBand::OnNotify(const NMHDR* hdr, LRESULT* result) {

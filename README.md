@@ -80,7 +80,8 @@ executable that starts instantly.
   IE's **text options** for the command toolbar: "Show text labels" (below the icons, the
   default), "Selective text on right" (labels beside the primary buttons only) or "No text
   labels". By default the bars are locked with the menu on its own row and the labeled
-  toolbar plus page box on a second row. The toolbar covers the whole Sync menu too (add
+  toolbar plus page box on a second row; "Reset the Toolbar Layout" (next to the lock in
+  both menus) returns to that arrangement. The toolbar covers the whole Sync menu too (add
   point, from bookmarks, points list, clear, alignment gaps, swap). The arrangement, the
   lock state and the text option are remembered.
 - **Options dialog**: reopen the last session or start empty, defaults for new documents
@@ -100,7 +101,7 @@ executable that starts instantly.
   it rotates them instead (left moves to centre, centre to right, right wraps around to left)
   and Shift+F8 rotates the other way. Sync points survive either way, permuted along with the
   documents.
-- **Three-pane mode** (optional; the app stays two-pane by default): View ▸ Panes ▸ Three Panes
+- **Three-pane mode** (optional; the app stays two-pane by default): View ▸ Three Panes
   adds a third document between the other two, and File ▸ Open Centre (Ctrl+Shift+M) switches to it
   on the spot. Each pane keeps its own splitter, page/zoom cell in the status bar and view state;
   going back to two panes closes the centre document and remembers it for the next switch. The

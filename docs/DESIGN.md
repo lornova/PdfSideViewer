@@ -163,7 +163,7 @@ MainWindow (frame, menu bar, toolbar, status bar, accelerators, find bar, fullsc
 **Pane slots** (`PaneSlots.h`): the frame owns a FIXED array of three pane slots in visual order
 (`kSlotLeft`, `kSlotCenter`, `kSlotRight`), of which only a subset is ACTIVE: the two-pane
 default is the active set {left, right} (the centre pane is never created), and the optional
-three-pane mode (`[window] paneCount`, View ▸ Panes, File ▸ Open Centre, a third command-line
+three-pane mode (`[window] paneCount`, View ▸ Two/Three Panes, File ▸ Open Centre, a third command-line
 file, a three-document Recent Sessions entry or a three-file drop) activates all three. Slot
 indices never move when the count changes, which is what keeps everything keyed by slot
 meaningful across a mode switch with no remapping or migration: the settings sections
@@ -213,11 +213,29 @@ toolbar, so a mode (or language) change recreates the toolbar and re-childs the 
 (labels size their own buttons via `BTNS_AUTOSIZE` + `TB_SETMAXTEXTROWS`). Defaults: locked,
 "Show text labels", and the toolbar band starts on its OWN row (`RBBS_BREAK` at the default
 insert; the break survives lock toggles via SetRebarLocked's per-band snapshot and is
-overridden by a saved `rebarBands` layout). The full-screen icon is COMPOSED: MDL2 ships no
+overridden by a saved `rebarBands` layout). "Reset the Toolbar Layout" (View menu and rebar
+context menu, next to the lock) rebuilds that default through ApplyRebarLayout; invoked while
+full screen it retargets the exit snapshot instead, since the forced full-screen row is not
+the user's arrangement. The full-screen icon is COMPOSED: MDL2 ships no
 single 4-corner-arrows glyph, so `GlyphSpec::mirrorOverlay` draws E740 plus its horizontal
 mirror (GM_ADVANCED world transform; the cell rect maps onto itself). Full screen normally
-hides all chrome, but two Options ([window] fsToolbar / fsStatusbar) keep the rebar and/or
-the status bar on screen; when the real full-screen button is not visible there, a floating
+hides all chrome, but two Options ([window] fsToolbar / fsStatusbar) keep the COMMAND toolbar
+bands and/or the status bar on screen - never the menu band, which full screen always hides
+(Alt/F10 still track the popups): the rebar therefore shows only while the kept toolbar band
+is itself visible per View > Toolbar. The kept chrome uses a FORCED layout
+(ApplyFullscreenBandLayout), overriding the user's lock setting and arrangement: one locked row
+(no grippers, no dragging), toolbar stretched, page box right-aligned via RBBS_FIXEDSIZE at the
+row end - without the override, an unlocked page box band kept its own row and stretched to the
+full screen width. "Lock the toolbars" stays reachable in full screen (Alt menu, rebar context
+menu): SetRebarLocked then only records the setting and refreshes the checkmark, and the exit
+path applies it. Hiding a band makes comctl32 MERGE its row into the next
+one - the following band's RBBS_BREAK is cleared for good, re-showing does not restore it - so
+ToggleFullScreen snapshots the band layout at entry, restores it at exit (SetRebarLocked for
+the real gripper styles FIRST, then ApplyRebarLayout: the snapshot's cx values were captured in
+the user's own gripper state), and SerializeRebarLayout returns that snapshot while full screen
+(a session saved there must not persist the forced row, mirroring the pre-full-screen placement
+rule). A hidden band's child is also not laid out by the rebar, so UpdateRebarBandSizes skips
+the menu-band width measure while it is hidden; the exit path re-measures. When the real full-screen button is not visible, a floating
 one-button mini toolbar (child of the frame, top-right, NOT flat: the frame clips children
 and paints nothing beneath them) provides the exit. The menu band clips
 into its own chevron popup listing the hidden top-level menus. Ownership split: MainWindow owns the `HMENU` (built by
@@ -245,7 +263,8 @@ English is the default, the choice persists in settings as a two-letter code and
 switch rebuilds the `HMENU` and retitles the band).
 Full screen (F11 / Alt+Enter, Esc exits) strips `WS_OVERLAPPEDWINDOW` and hides the WHOLE
 rebar plus the status bar without touching their persisted visibility flags ("View > Toolbar"
-only hides bands 1-2; the menu band always stays). Explorer integration (optional, Options or
+only hides bands 1-2; outside full screen the menu band always stays, while full screen hides
+it even when `[window] fsToolbar` keeps the toolbar bands on screen). Explorer integration (optional, Options or
 `-register-shell`): three static verbs under `HKCU\...\SystemFileAssociations\.pdf\shell`
 (`MUIVerb`, `MultiSelectModel=Single`, per-verb `Icon` naming the exe's own resources by
 NEGATIVE resource id — the accent-filled page marks the pane the verb targets, three pages for
@@ -682,8 +701,9 @@ why it survived to 0.9.1.
   zoom `z → z'`: `s' = (s + c)·(z'/z) − c`. Continuous factor from accumulated delta.
 - **Keyboard**: PgUp/PgDn/Home/End/arrows per pane; Tab cycles the focused pane in visual order;
   F3/Shift+F3 next/previous match; Ctrl+F find; Ctrl+O / Ctrl+Shift+O / Ctrl+Shift+M open
-  left/right/centre (the centre one switches three-pane mode on, like the menu-only View ▸ Panes
-  commands that pick the arrangement directly); F7 toggle scroll sync; Ctrl+F7 zoom sync.
+  left/right/centre (the centre one switches three-pane mode on, like the menu-only View ▸
+  Two/Three Panes radio pair that picks the arrangement directly); F7 toggle scroll sync;
+  Ctrl+F7 zoom sync.
 - **Touch**: `WM_GESTURE` (`GID_ZOOM` centered at gesture location, `GID_PAN` with inertia) covers
   touchscreens in v1. Precision-touchpad pinch requires **DirectManipulation** (touchpads emit
   neither WM_POINTER nor WM_GESTURE); planned v1.x, one viewport per pane HWND.
@@ -695,6 +715,16 @@ why it survived to 0.9.1.
 - Per-Monitor V2 declared in the manifest (`<dpiAwareness>PerMonitorV2</dpiAwareness>`); handle
   `WM_DPICHANGED` by relayouting and re-rendering at `renderScale = zoom · monitorDPI / 96` so text
   is always rasterized for the actual device pixels, never bitmap-scaled.
+- comctl32 toolbars measure `BTNS_AUTOSIZE` label widths ONCE, at `TB_ADDBUTTONSW` time, with the
+  font installed at that moment, and under PMv2 the control swaps its own per-DPI font in only
+  AFTER the top-level `WM_DPICHANGED` handler returns (`WM_DPICHANGED_AFTERPARENT`): after a
+  monitor change the text is wider than the cached rects and every label truncates to an ellipsis
+  (`TB_AUTOSIZE` does not re-measure). So labeled toolbars are never patched in place on a DPI
+  change: the command toolbar is recreated in its band (`RebuildToolbarInBand`, the same path the
+  text-mode and language switches use, which also re-fetches per-DPI icons and band metrics), and
+  the menu band re-adds its buttons whenever its font changes (`MenuBand::SetFont`). The icon-only
+  bars (find bar, full-screen escape hatch) are DPI-keyed instead: explicit `TB_SETBUTTONSIZE`
+  plus a rebuilt imagelist, no text to re-measure.
 - Dark title bar via `DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)`; page background aside,
   chrome colors follow the system light/dark setting. MuPDF-rendered dark mode (color inversion)
   is out of scope for v1.

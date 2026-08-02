@@ -290,8 +290,12 @@ function Start-Viewer([string]$leftPdf, [string]$rightPdf, [string]$centerPdf = 
     return $v
 }
 function Stop-Viewer($v) {
-    [void]$v.Proc.CloseMainWindow()
-    if (-not $v.Proc.WaitForExit(10000)) { $v.Proc.Kill(); throw 'viewer did not exit after CloseMainWindow' }
+    # NOT Process.CloseMainWindow(): .NET picks the first visible unowned
+    # top-level in z-order as "main window", and a transient tooltip SysShadow
+    # (TOPMOST, visible, ownerless) outranks the frame, losing the WM_CLOSE.
+    # The frame HWND is already known: post WM_CLOSE to it directly.
+    [void][Win32.Native]::PostMessageW($v.Main, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+    if (-not $v.Proc.WaitForExit(10000)) { $v.Proc.Kill(); throw 'viewer did not exit after WM_CLOSE' }
     Assert ($v.Proc.ExitCode -eq 0) "exit code 0 (got $($v.Proc.ExitCode))"
 }
 # Fresh-sandbox defaults switch the sync locks ON; drive both OFF so every

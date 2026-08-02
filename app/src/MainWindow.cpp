@@ -956,17 +956,21 @@ HMENU MainWindow::BuildMenuBar() {
     append(lang, IDC_LANG_UKRAINIAN, StrId::MenuLangUkrainian);
 
     HMENU view = CreatePopupMenu();
+    // Bar chrome first (toolbar, status bar, their lock/reset), THEN the
+    // outline panel: the sidebar is a different kind of surface.
     append(view, IDC_TOGGLE_TOOLBAR, StrId::MenuToolbar);
     append(view, IDC_TOGGLE_STATUSBAR, StrId::MenuStatusBar);
-    append(view, IDC_TOGGLE_OUTLINE, StrId::MenuOutline);
     append(view, IDC_LOCK_TOOLBARS, StrId::MenuLockToolbars);
+    append(view, IDC_RESET_TOOLBAR_LAYOUT, StrId::MenuResetToolbarLayout);
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
-    // Own popup, not two flat items: the View popup has no free mnemonic left
-    // for a second entry in every language (Portuguese runs out).
-    HMENU panes = CreatePopupMenu();
-    append(panes, IDC_PANES_TWO, StrId::MenuPanesTwo);
-    append(panes, IDC_PANES_THREE, StrId::MenuPanesThree);
-    AppendMenuW(view, MF_POPUP, reinterpret_cast<UINT_PTR>(panes), Str(StrId::MenuPanes));
+    append(view, IDC_TOGGLE_OUTLINE, StrId::MenuOutline);
+    AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
+    // Flat radio pair (the old "Panes" popup is gone): the View popup had no
+    // free mnemonic left for two more entries in Portuguese and Dutch, so
+    // MenuZoomOut (pt) and MenuScrollPaged (nl) moved theirs to hand the
+    // freed letters to the pair - see the note in Strings.h.
+    append(view, IDC_PANES_TWO, StrId::MenuPanesTwo);
+    append(view, IDC_PANES_THREE, StrId::MenuPanesThree);
     AppendMenuW(view, MF_SEPARATOR, 0, nullptr);
     append(view, IDC_ZOOM_IN, StrId::MenuZoomIn);
     append(view, IDC_ZOOM_OUT, StrId::MenuZoomOut);
@@ -1390,6 +1394,15 @@ void MainWindow::UpdateRebarBandSizes() {
     if (menuIndex != -1) {
         REBARBANDINFOW band{};
         band.cbSize = sizeof(band);
+        // Full screen hides the menu band, and the rebar does NOT lay out a
+        // hidden band's child: the "resized synchronously" read below would
+        // see a stale client rect and persist a garbage cx. Keep the width
+        // as-is; ToggleFullScreen re-runs this on exit, band visible again.
+        band.fMask = RBBIM_STYLE;
+        if (SendMessageW(m_rebar, RB_GETBANDINFOW, static_cast<WPARAM>(menuIndex),
+                         reinterpret_cast<LPARAM>(&band)) &&
+            (band.fStyle & RBBS_HIDDEN))
+            return;
         band.fMask = RBBIM_SIZE;
         band.cx = static_cast<UINT>(menuSize.cx) + MulDiv(64, m_dpi, 96);
         SendMessageW(m_rebar, RB_SETBANDINFOW, static_cast<WPARAM>(menuIndex),
@@ -1408,6 +1421,14 @@ void MainWindow::SetRebarLocked(bool locked) {
     m_rebarLocked = locked;
     if (!m_rebar)
         return;
+    // Full screen overrides the lock with its forced one-row locked layout
+    // (ApplyFullscreenBandLayout); the toggle stays reachable there (Alt menu,
+    // rebar context menu), so record the setting and refresh the checkmark,
+    // but leave the live styles alone - the exit path applies the new state.
+    if (m_fullscreen) {
+        UpdateCommandUi();
+        return;
+    }
     const int count = static_cast<int>(SendMessageW(m_rebar, RB_GETBANDCOUNT, 0, 0));
     // Snapshot order and breaks FIRST: applying RBBS_FIXEDSIZE makes the
     // rebar RELOCATE that band behind its row sibling (observed, comctl32
@@ -1497,8 +1518,11 @@ void MainWindow::ApplyPageBoxFixedSize() {
     if (!SendMessageW(m_rebar, RB_GETBANDINFOW, static_cast<WPARAM>(index),
                       reinterpret_cast<LPARAM>(&band)))
         return;
-    const UINT want = (m_rebarLocked && rowLast) ? (band.fStyle | RBBS_FIXEDSIZE)
-                                                 : (band.fStyle & ~RBBS_FIXEDSIZE);
+    // Full screen counts as locked: its forced layout right-aligns the box
+    // with this very bit, whatever the user's setting says.
+    const bool locked = m_rebarLocked || m_fullscreen;
+    const UINT want = (locked && rowLast) ? (band.fStyle | RBBS_FIXEDSIZE)
+                                          : (band.fStyle & ~RBBS_FIXEDSIZE);
     if (want != band.fStyle) {
         band.fStyle = want;
         SendMessageW(m_rebar, RB_SETBANDINFOW, static_cast<WPARAM>(index),
@@ -1509,6 +1533,11 @@ void MainWindow::ApplyPageBoxFixedSize() {
 std::wstring MainWindow::SerializeRebarLayout() const {
     if (!m_rebar)
         return m_rebarBandsSaved;
+    // Full screen is a transient chrome state: the live layout has the menu
+    // band hidden and its row merged away. Persist the entry snapshot instead,
+    // exactly like SaveSession persists the pre-full-screen placement.
+    if (m_fullscreen)
+        return m_fsRestoreBands;
     std::wstring out;
     const int count = static_cast<int>(SendMessageW(m_rebar, RB_GETBANDCOUNT, 0, 0));
     for (int i = 0; i < count; ++i) {
@@ -1588,6 +1617,71 @@ void MainWindow::ApplyRebarLayout(const std::wstring& layout) {
     }
 }
 
+void MainWindow::ApplyFullscreenBandLayout() {
+    // Full screen forces one FIXED row for the kept chrome, overriding the
+    // user's lock setting and arrangement (both come back via the entry
+    // snapshot at exit): locked styles (no grippers, no dragging), no row
+    // breaks, page box last with RBBS_FIXEDSIZE at its ideal width - the
+    // toolbar band absorbs the row slack, which is exactly how the fixed bit
+    // right-aligns the box (comctl32 forces fixed bands to the row end).
+    // Styles first, positions last: writing RBBS_FIXEDSIZE can relocate the
+    // band mid-pass (see ApplyRebarLayout).
+    if (!m_rebar)
+        return;
+    const UINT order[] = {kBandMenu, kBandToolbar, kBandPageBox};
+    for (const UINT id : order) {
+        const LRESULT index = SendMessageW(m_rebar, RB_IDTOINDEX, id, 0);
+        if (index == -1)
+            continue;
+        REBARBANDINFOW band{};
+        band.cbSize = sizeof(band);
+        band.fMask = RBBIM_STYLE;
+        if (!SendMessageW(m_rebar, RB_GETBANDINFOW, static_cast<WPARAM>(index),
+                          reinterpret_cast<LPARAM>(&band)))
+            continue;
+        const UINT hidden = band.fStyle & RBBS_HIDDEN;
+        band.fStyle = BandStyle(id, /*locked=*/true) | hidden;
+        if (id == kBandPageBox) {
+            band.fStyle |= RBBS_FIXEDSIZE;
+            band.fMask |= RBBIM_SIZE;
+            band.cx = static_cast<UINT>(MulDiv(64, m_dpi, 96));
+        }
+        SendMessageW(m_rebar, RB_SETBANDINFOW, static_cast<WPARAM>(index),
+                     reinterpret_cast<LPARAM>(&band));
+    }
+    for (int target = 0; target < static_cast<int>(std::size(order)); ++target) {
+        const LRESULT current = SendMessageW(m_rebar, RB_IDTOINDEX, order[target], 0);
+        if (current != -1 && current != target)
+            SendMessageW(m_rebar, RB_MOVEBAND, static_cast<WPARAM>(current),
+                         static_cast<LPARAM>(target));
+    }
+}
+
+void MainWindow::ResetRebarLayout() {
+    // Back to the BuildRebar default: menu row on top, toolbar + page box on
+    // their own row. Built as a layout string so the one validated path
+    // (ApplyRebarLayout) does the work. In full screen the forced one-row
+    // chrome stays live and the reset RETARGETS the exit snapshot instead:
+    // the default is what comes back with the chrome.
+    if (!m_rebar)
+        return;
+    const SIZE menuSize = m_menuBand.IdealSize();
+    SIZE toolSize{};
+    SendMessageW(m_toolbar, TB_GETMAXSIZE, 0, reinterpret_cast<LPARAM>(&toolSize));
+    wchar_t buf[64];
+    swprintf_s(buf, L"%u,%u,0;%u,%u,1;%u,%u,0", kBandMenu, static_cast<UINT>(menuSize.cx),
+               kBandToolbar, static_cast<UINT>(toolSize.cx), kBandPageBox,
+               static_cast<UINT>(MulDiv(64, m_dpi, 96)));
+    if (m_fullscreen) {
+        m_fsRestoreBands = buf;
+        return;
+    }
+    ApplyRebarLayout(buf);
+    ApplyPageBoxFixedSize();
+    UpdateRebarBandSizes(); // menu cx: measured border overhead, not the ideal
+    Layout();
+}
+
 void MainWindow::ShowRebarContextMenu(POINT screenPt) {
     // IE-style bar context menu: the toolbar toggle plus the lock. No
     // TPM_RETURNCMD: the picked item posts an ordinary WM_COMMAND.
@@ -1608,6 +1702,8 @@ void MainWindow::ShowRebarContextMenu(POINT screenPt) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING | (m_rebarLocked ? MF_CHECKED : 0u), IDC_LOCK_TOOLBARS,
                 Str(StrId::MenuLockToolbars));
+    AppendMenuW(menu, MF_STRING, IDC_RESET_TOOLBAR_LAYOUT,
+                Str(StrId::MenuResetToolbarLayout));
     TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON, screenPt.x, screenPt.y,
                    0, m_hwnd, nullptr);
     DestroyMenu(menu);
@@ -3052,6 +3148,12 @@ void MainWindow::ToggleFullScreen() {
         if (!GetWindowPlacement(m_hwnd, &m_fsRestorePlacement))
             return;
         m_fsRestoreStyle = static_cast<LONG>(GetWindowLongW(m_hwnd, GWL_STYLE));
+        // Layout is about to hide the menu band, and comctl32 MERGES a hidden
+        // band's row into the next one by clearing that band's RBBS_BREAK for
+        // good (re-showing does not bring it back): snapshot the band layout
+        // while it is still intact. Must precede the m_fullscreen flip -
+        // SerializeRebarLayout returns this very snapshot once full screen.
+        m_fsRestoreBands = SerializeRebarLayout();
         // The menu lives in the rebar band; Layout's !m_fullscreen guard
         // hides the whole rebar, so no SetMenu dance is needed anymore.
         SetWindowLongW(m_hwnd, GWL_STYLE, m_fsRestoreStyle & ~WS_OVERLAPPEDWINDOW);
@@ -3061,6 +3163,7 @@ void MainWindow::ToggleFullScreen() {
         // Flag first: SetWindowPos delivers a synchronous WM_SIZE whose
         // Layout must already hide the bars.
         m_fullscreen = true;
+        ApplyFullscreenBandLayout(); // one locked row, page box right-aligned
         SetWindowPos(m_hwnd, HWND_TOP, mi.rcMonitor.left, mi.rcMonitor.top,
                      mi.rcMonitor.right - mi.rcMonitor.left,
                      mi.rcMonitor.bottom - mi.rcMonitor.top,
@@ -3072,6 +3175,24 @@ void MainWindow::ToggleFullScreen() {
         SetWindowPos(m_hwnd, nullptr, 0, 0, 0, 0,
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER |
                          SWP_FRAMECHANGED);
+        // Undo the forced full-screen chrome. The explicit Layout re-shows
+        // the bands even if the restored placement matched the monitor rect
+        // (no WM_SIZE, no cascade). SetRebarLocked puts the REAL lock styles
+        // back (full screen forced the locked look; the user may also have
+        // toggled the setting meanwhile - the guard in SetRebarLocked only
+        // recorded it). Then the entry snapshot restores the exact
+        // arrangement: order, row breaks (also munged by comctl32 when the
+        // hidden menu band's row was merged) and widths - the cx values were
+        // captured in the user's own gripper state, so they land after the
+        // style pass, not before it. Finally re-measure (the menu cx measure
+        // was skipped while the band was hidden - a DPI or language change
+        // may have landed in between) and lay the rows out again.
+        Layout();
+        SetRebarLocked(m_rebarLocked);
+        ApplyRebarLayout(m_fsRestoreBands);
+        ApplyPageBoxFixedSize();
+        UpdateRebarBandSizes();
+        Layout();
     }
     UpdateCommandUi();
 }
@@ -3167,10 +3288,17 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             fb.scrollY *= fbRatio;
         }
         m_dpi = HIWORD(wParam);
-        UpdateUiFont();
-        RebuildToolbarIcons();
+        UpdateUiFont(); // menu band: new font + re-measured button widths
+        // The command toolbar cannot be patched in place: comctl32 keeps the
+        // BTNS_AUTOSIZE label widths measured at TB_ADDBUTTONSW time and, under
+        // PMv2, swaps its own per-DPI font in AFTER this handler returns
+        // (WM_DPICHANGED_AFTERPARENT), truncating every label to an ellipsis.
+        // Recreate it at the new DPI instead (fresh font, icons, widths, band
+        // metrics, checked states) - the path text-mode/language switches use.
+        RebuildToolbarInBand();
+        if (m_fullscreen)
+            ApplyFullscreenBandLayout(); // refresh the page box's fixed cx
         EnsureFindBarToolbars(); // no-op unless the DPI really moved
-        UpdateRebarBandSizes();
         // Panes must know the new DPI before SetWindowPos: its synchronous
         // WM_SIZE cascade rebuilds and presents their targets immediately.
         for (int slot = 0; slot < kPaneSlots; ++slot)
@@ -3491,6 +3619,9 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_LOCK_TOOLBARS:
             SetRebarLocked(!m_rebarLocked);
             return 0;
+        case IDC_RESET_TOOLBAR_LAYOUT:
+            ResetRebarLayout();
+            return 0;
         case IDC_TOGGLE_STATUSBAR:
             m_statusVisible = !m_statusVisible;
             Layout();
@@ -3754,10 +3885,14 @@ void MainWindow::Layout() {
 
     // Full screen hides the bars without touching the persisted visibility
     // flags: the whole rebar (menu included) disappears, matching the old
-    // SetMenu(nullptr) behavior - unless the Options ask to keep the toolbar
-    // and/or the status bar on screen. "View > Toolbar" only hides the
-    // command toolbar and page box BANDS; the menu band always stays.
-    const bool rebarOn = m_rebar && (!m_fullscreen || m_fsShowToolbar);
+    // SetMenu(nullptr) behavior. The Options can keep the COMMAND toolbar
+    // and/or the status bar on screen - never the menu band: full screen
+    // always hides it (Alt/F10 still track the popups), so once the toolbar
+    // band is off too (View > Toolbar) nothing is left and the rebar hides
+    // entirely. "View > Toolbar" only hides the command toolbar and page box
+    // BANDS; outside full screen the menu band always stays.
+    const bool rebarOn =
+        m_rebar && (!m_fullscreen || (m_fsShowToolbar && m_toolbarVisible));
     const bool statusOn = m_status && m_statusVisible && (!m_fullscreen || m_fsShowStatus);
     if (m_rebar) {
         // Bands by id, not index: the user can reorder them when unlocked.
@@ -3766,6 +3901,7 @@ void MainWindow::Layout() {
             if (index != -1)
                 SendMessageW(m_rebar, RB_SHOWBAND, static_cast<WPARAM>(index), show);
         };
+        showBand(kBandMenu, m_fullscreen ? FALSE : TRUE);
         showBand(kBandToolbar, m_toolbarVisible ? TRUE : FALSE);
         showBand(kBandPageBox, m_toolbarVisible ? TRUE : FALSE);
         ShowWindow(m_rebar, rebarOn ? SW_SHOW : SW_HIDE);
@@ -3792,10 +3928,9 @@ void MainWindow::Layout() {
     }
     // Floating full-screen escape hatch: only when the real full-screen
     // button is NOT on screen (the kept toolbar must also be visible per
-    // View > Toolbar, or its band is hidden inside the shown rebar).
-    // Positioned only NOW, below the measured rebar: with "keep toolbar"
-    // enabled but View > Toolbar off, the rebar stays visible for its menu
-    // band and a top-anchored button would overlap it.
+    // View > Toolbar). The same condition just hid the whole rebar above
+    // (the menu band never survives full screen), so `top` is 0 here and
+    // the button anchors at the plain margin.
     if (m_fullscreen && !(m_fsShowToolbar && m_toolbarVisible)) {
         EnsureFsBar();
         if (m_fsBar) {
