@@ -3,6 +3,8 @@
 #include "engine/MupdfLib.h"
 #include "util/TextClass.h"
 
+#include <chrono>
+
 // fz_try is setjmp-based; its longjmp only ever jumps forward within the same
 // fz_try/fz_catch region, so C++ destructors in enclosing scopes still run.
 // We keep destructible objects out of the fz_try blocks themselves.
@@ -176,7 +178,12 @@ bool HitIsWholeWord(fz_stext_page* stext, const NeedleEdges& edges, const fz_qua
 } // namespace
 
 Document::~Document() {
-    Shutdown();
+    // By contract the owner has already called Shutdown() and, if it returned
+    // false, LEAKED this object instead of destroying it (PaneWindow does
+    // exactly that). Reaching here after an abandonment would free the
+    // detached worker's own state under its feet; the call below cannot time
+    // out a second time, because a detached thread is no longer joinable.
+    (void)Shutdown();
 }
 
 void Document::EnsureWorker() {
@@ -330,7 +337,24 @@ void Document::CancelSearch() {
     std::erase_if(m_jobs, [](const Job& j) { return j.type == Job::Type::Search; });
 }
 
-void Document::Shutdown() {
+bool Document::Shutdown() {
+    // Every long job the worker can be inside honours either m_quit or the
+    // abort cookie - except one: a regex match. mujs runs its matcher with no
+    // step budget and no cancellation hook of any kind, so a pattern with
+    // nested quantifiers ("(a+)+b" against a line that does not match) runs for
+    // an unbounded time and there is nothing to interrupt it with. An
+    // unconditional join() therefore hung the whole process on exit, and the
+    // only way out was the Task Manager - which also lost the session.
+    //
+    // So: wait a couple of seconds, then ABANDON the worker. The detached
+    // thread keeps its cloned fz_context (never dropped, and MupdfLib's base
+    // context is a leaked static, so it stays valid), keeps the fz_document and
+    // the display lists, and keeps every member of this object - which is why
+    // the caller must LEAK the Document rather than destroy it. That leak is
+    // deliberate and bounded: it takes a hostile pattern to trigger, it happens
+    // once, and it buys an application that exits and saves its session instead
+    // of one that has to be killed.
+    constexpr auto kGrace = std::chrono::seconds(2);
     {
         std::lock_guard lock(m_mutex);
         m_quit = true;
@@ -339,8 +363,25 @@ void Document::Shutdown() {
             m_activeCookie->abort = 1;
     }
     m_cv.notify_one();
-    if (m_worker.joinable())
-        m_worker.join();
+    if (!m_worker.joinable())
+        return true;
+    {
+        std::unique_lock lock(m_mutex);
+        if (!m_exitCv.wait_for(lock, kGrace, [this] { return m_workerDone; })) {
+            // Narrows, not closes, the window in which the abandoned worker
+            // could post to an HWND about to be destroyed (or worse, to one
+            // whose handle value has been recycled by a later window): the
+            // store is atomic but not ordered against the worker's next post.
+            // What closes it is that such a post FAILS once the window is
+            // gone, and PostOrDelete frees the payload when the post fails.
+            m_notify.store(nullptr);
+            lock.unlock();
+            m_worker.detach();
+            return false;
+        }
+    }
+    m_worker.join();
+    return true;
 }
 
 void Document::WorkerMain() {
@@ -436,6 +477,13 @@ void Document::WorkerMain() {
         }
         fz_drop_context(ctx);
     }
+    // Last thing the worker does: Shutdown's timed wait is what turns "the
+    // worker is wedged" into an abandonment instead of a hung process.
+    {
+        std::lock_guard lock(m_mutex);
+        m_workerDone = true;
+    }
+    m_exitCv.notify_all();
 }
 
 void Document::WorkerOpen(fz_context* ctx, const Job& job) {
@@ -862,16 +910,64 @@ void Document::WorkerSearch(fz_context* ctx, const Job& job) {
     // FZ_SEARCH_EXACT is case SENSITIVE; the historic fz_search_* family is
     // itself a shim over this one with FZ_SEARCH_IGNORE_CASE, so the
     // case-insensitive branch reproduces the previous behaviour bit for bit.
-    const fz_search_options options =
+    // REGEXP composes with either (stext-search.c picks REG_ICASE), and
+    // KEEP_LINES rides along with it: it puts a real '\n' at every line end of
+    // the haystack, and mujs's I_ANY refuses newlines, so the matcher's
+    // recursion is bounded by the LINE instead of by the whole page - the one
+    // mitigation that turns "." from a stack hazard into an ordinary atom. It
+    // also gives regex users the per-line ^ and $ they expect. Cost, in regex
+    // mode only: a match no longer crosses an implicit line break, so a
+    // wrapped phrase has to be written with an explicit \s.
+    fz_search_options options =
         job.searchOptions.matchCase ? FZ_SEARCH_EXACT : FZ_SEARCH_IGNORE_CASE;
+    if (job.searchOptions.regex)
+        options = static_cast<fz_search_options>(options | FZ_SEARCH_REGEXP |
+                                                 FZ_SEARCH_KEEP_LINES);
+
+    // Compile the needle ONCE per search, before any page work: a pattern that
+    // does not compile throws FZ_ERROR_ARGUMENT on the first fz_match_stext_page
+    // and the fz_catch below would file it under "damaged page" and report zero
+    // hits, silently. fz_new_search runs exactly the compile the matcher does.
+    if (job.searchOptions.regex && job.pageIndex == 0) {
+        fz_search* probe = nullptr;
+        bool ok = false;
+        fz_var(probe);
+        fz_var(ok);
+        fz_try(ctx) {
+            probe = fz_new_search(ctx, job.needleUtf8.c_str(), options);
+            ok = true;
+        }
+        fz_always(ctx) {
+            fz_drop_search(ctx, probe); // null-safe
+        }
+        fz_catch(ctx) {
+            ok = false;
+        }
+        if (!ok) {
+            result->badPattern = true;
+            result->done = true;
+            result->pagesScanned = m_pageCount;
+            PostOrDelete(m_notify, WM_PSV_SEARCH, std::move(result));
+            return; // no continuation: every page would fail the same way
+        }
+    }
+
     // The stext model fz_match_page builds internally (source/fitz/util.c).
     // Built here instead so the whole-word filter looks at the SAME page the
     // matcher ran on: a second extraction with different flags would classify
     // boundaries against text the hits do not come from.
     fz_stext_options stextOpts{};
     stextOpts.flags = FZ_STEXT_DEHYPHENATE;
-    const NeedleEdges edges = EdgesOf(job.needleUtf8);
+    // In regex mode the needle's own first and last characters say nothing
+    // about what the pattern matches ("(a+)" starts with a parenthesis), so
+    // both sides are constrained unconditionally - the \b...\b that "whole
+    // word" means everywhere else.
+    NeedleEdges edges = EdgesOf(job.needleUtf8);
+    if (job.searchOptions.regex)
+        edges = {true, true};
+    int found = job.searchFound;
 
+    int lastPage = end;
     for (int page = job.pageIndex; page < end; ++page) {
         {
             std::lock_guard lock(m_mutex);
@@ -900,9 +996,12 @@ void Document::WorkerSearch(fz_context* ctx, const Job& job) {
         const auto flush = [&] {
             if (current.rects.empty())
                 return;
-            if (!job.searchOptions.wholeWord ||
-                HitIsWholeWord(stext, edges, firstQuad, lastQuad))
+            if ((!job.searchOptions.wholeWord ||
+                 HitIsWholeWord(stext, edges, firstQuad, lastQuad)) &&
+                found < kMaxMatches) {
                 result->matches.push_back(std::move(current));
+                ++found;
+            }
             current = SearchMatch{};
             current.pageIndex = page;
         };
@@ -925,10 +1024,18 @@ void Document::WorkerSearch(fz_context* ctx, const Job& job) {
         flush();
         if (stext)
             fz_drop_stext_page(ctx, stext);
+        // Checked per page, not per hit: the page in hand is finished (its own
+        // quads are already capped at kMaxHitQuads) so the count can overshoot
+        // by at most one page's worth, and no match is reported half-scanned.
+        if (found >= kMaxMatches) {
+            result->truncated = true;
+            lastPage = page + 1;
+            break;
+        }
     }
 
-    result->pagesScanned = end;
-    result->done = end >= m_pageCount;
+    result->pagesScanned = lastPage;
+    result->done = result->truncated || lastPage >= m_pageCount;
     const bool done = result->done;
     PostOrDelete(m_notify, WM_PSV_SEARCH, std::move(result));
 
@@ -936,7 +1043,8 @@ void Document::WorkerSearch(fz_context* ctx, const Job& job) {
         std::lock_guard lock(m_mutex);
         if (!m_quit && job.searchId == m_currentSearchId) {
             Job cont = job; // copies the needle
-            cont.pageIndex = end;
+            cont.pageIndex = lastPage;
+            cont.searchFound = found; // the cap spans the whole document
             m_jobs.push_back(std::move(cont)); // back: renders keep priority
         }
     }

@@ -89,7 +89,12 @@ PaneWindow::~PaneWindow() {
         }
         DestroyWindow(m_hwnd);
     }
-    m_doc.Shutdown();
+    // WM_DESTROY already ran Shutdown (and may have abandoned the worker); this
+    // covers a pane that never got a window. Abandoned = the detached worker
+    // still owns every member of that Document: release the pointer and let it
+    // leak, deliberately (see Document::Shutdown).
+    if (m_docAbandoned || (m_doc && !m_doc->Shutdown()))
+        (void)m_doc.release();
 }
 
 void PaneWindow::Create(HWND parent, int childId) {
@@ -119,6 +124,8 @@ void PaneWindow::ResetDocumentState() {
     m_matches.clear();
     m_activeMatch = -1;
     m_searchDone = true;
+    m_searchBadPattern = false;
+    m_searchTruncated = false;
     NotifySearchStatus();
     m_layout.Clear();
     m_scrollX = 0;
@@ -151,13 +158,13 @@ void PaneWindow::OpenDocument(std::wstring path) {
     // the PREVIOUS document.
     if (m_onViewChanged)
         m_onViewChanged(*this, ViewEvent::DocumentOpening, 1.0f);
-    m_doc.CancelSearch();
+    m_doc->CancelSearch();
     ResetDocumentState();
     // Watch from Opening on (not from success): a failed open self-heals when
     // the file changes again (e.g. the next LaTeX run produces a valid PDF),
     // and an old watch must never outlive a path switch.
     m_watcher.Watch(m_hwnd, WM_PSV_FILE_CHANGED, m_docPath);
-    m_openGen = m_doc.OpenAsync(std::move(path));
+    m_openGen = m_doc->OpenAsync(std::move(path));
     UpdateScrollBars();
     Invalidate();
 }
@@ -172,7 +179,7 @@ void PaneWindow::CloseDocument() {
     // queue purge; 0 never matches a real generation, so it cannot land.
     m_openGen = 0;
     m_watcher.Stop();
-    m_doc.CloseAsync();
+    m_doc->CloseAsync();
     ResetDocumentState();
     UpdateScrollBars();
     Invalidate();
@@ -382,7 +389,7 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
     case WM_CREATE:
         m_dpi = GetDpiForWindow(m_hwnd);
-        m_doc.SetNotificationTarget(m_hwnd);
+        m_doc->SetNotificationTarget(m_hwnd);
         DragAcceptFiles(m_hwnd, TRUE);
         UpdateScrollBars(); // hide the default WS_*SCROLL bars until a document needs them
         return 0;
@@ -407,7 +414,11 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     }
 
     case WM_DESTROY: {
-        m_doc.Shutdown();
+        // A worker wedged on a regex cannot be stopped; the pane records the
+        // abandonment so its destructor leaks the Document instead of freeing
+        // state the detached thread is still using.
+        if (!m_doc->Shutdown())
+            m_docAbandoned = true;
         // The worker is gone; free any results still sitting in the queue.
         // Beware: PeekMessage returns WM_QUIT REGARDLESS of the hwnd/range
         // filter once the quit flag is set and the queue is empty, so during
@@ -1072,7 +1083,7 @@ void PaneWindow::EnsureRequested(CachedBitmap& entry, int page, float scale, int
         return;
     entry.pendingId = m_nextRequestId++;
     entry.pendingScale = scale;
-    m_doc.RequestRender(page, scale, entry.pendingId, res, row, col, urgent);
+    m_doc->RequestRender(page, scale, entry.pendingId, res, row, col, urgent);
 }
 
 void PaneWindow::DrawDocument(ID2D1SolidColorBrush* brush) {
@@ -1112,7 +1123,7 @@ void PaneWindow::DrawDocument(ID2D1SolidColorBrush* brush) {
         wantLo = m_layout.PrevRealPage(firstSlot);
         wantHi = m_layout.NextRealPage(lastSlot);
     }
-    m_doc.SetWantedRange(wantLo, wantHi);
+    m_doc->SetWantedRange(wantLo, wantHi);
 
     // Device texture cap (16384 px at FL11 down to 2048 at FL9): previews and
     // small whole pages must stay uploadable.
@@ -2323,6 +2334,10 @@ void PaneWindow::OnSearchResult(std::unique_ptr<Document::SearchResult> result) 
     for (auto& match : result->matches)
         m_matches.push_back(std::move(match));
     m_searchDone = result->done;
+    m_searchBadPattern = result->badPattern;
+    // Sticky for the rest of the query: the cap is reported by the chunk that
+    // hits it, and that chunk is the last one.
+    m_searchTruncated = m_searchTruncated || result->truncated;
     // Deliberately does NOT select or scroll to anything: results arrive while
     // the reader is still typing, and yanking the view to page 1 loses the
     // place they were reading. The highlights appear where they are; moving is
@@ -2331,12 +2346,15 @@ void PaneWindow::OnSearchResult(std::unique_ptr<Document::SearchResult> result) 
     Invalidate();
 }
 
-void PaneWindow::StartSearch(const std::wstring& needle, Document::SearchOptions options) {
-    if (needle == m_searchNeedle && options == m_searchOptions)
+void PaneWindow::StartSearch(const std::wstring& needle, Document::SearchOptions options,
+                             bool force) {
+    if (!force && needle == m_searchNeedle && options == m_searchOptions)
         return; // unchanged (debounce echo)
     ++m_searchSeq;
     m_matches.clear();
     m_activeMatch = -1;
+    m_searchBadPattern = false;
+    m_searchTruncated = false;
     if (needle.empty() || m_state != State::Open) {
         // Never latch a query that did not run: the same-query guard would
         // block it forever once the document opens. Park it instead and
@@ -2346,14 +2364,14 @@ void PaneWindow::StartSearch(const std::wstring& needle, Document::SearchOptions
         m_pendingSearch = needle;
         m_pendingOptions = options;
         m_searchDone = true;
-        m_doc.CancelSearch();
+        m_doc->CancelSearch();
     } else {
         m_pendingSearch.clear();
         m_pendingOptions = {};
         m_searchNeedle = needle;
         m_searchOptions = options;
         m_searchDone = false;
-        m_doc.StartSearch(needle, options, m_searchSeq);
+        m_doc->StartSearch(needle, options, m_searchSeq);
     }
     NotifySearchStatus();
     Invalidate();
@@ -2368,7 +2386,9 @@ void PaneWindow::ClearSearch() {
     m_matches.clear();
     m_activeMatch = -1;
     m_searchDone = true;
-    m_doc.CancelSearch();
+    m_searchBadPattern = false;
+    m_searchTruncated = false;
+    m_doc->CancelSearch();
     NotifySearchStatus();
     Invalidate();
 }
@@ -2402,8 +2422,15 @@ void PaneWindow::GotoMatch(int delta) {
 }
 
 void PaneWindow::NotifySearchStatus() {
-    if (m_onSearchStatus)
-        m_onSearchStatus(*this, m_activeMatch, static_cast<int>(m_matches.size()), m_searchDone);
+    if (!m_onSearchStatus)
+        return;
+    SearchStatus status;
+    status.activeMatch = m_activeMatch;
+    status.totalMatches = static_cast<int>(m_matches.size());
+    status.done = m_searchDone;
+    status.badPattern = m_searchBadPattern;
+    status.truncated = m_searchTruncated;
+    m_onSearchStatus(*this, status);
 }
 
 void PaneWindow::ScrollToMatch(const Document::SearchMatch& match) {
@@ -2575,7 +2602,7 @@ void PaneWindow::EnsureTextPage(int page, bool urgent) {
     if (m_textPages.count(page) != 0 || m_textPending.count(page) != 0)
         return;
     m_textPending.insert(page);
-    m_doc.RequestTextPage(page, urgent);
+    m_doc->RequestTextPage(page, urgent);
 }
 
 void PaneWindow::EnsureLinks(int page) {
@@ -2584,7 +2611,7 @@ void PaneWindow::EnsureLinks(int page) {
     if (m_links.count(page) != 0 || m_linksPending.count(page) != 0)
         return;
     m_linksPending.insert(page);
-    m_doc.RequestLinks(page);
+    m_doc->RequestLinks(page);
 }
 
 bool PaneWindow::TextAt(int page, float px, float py) const {
@@ -2822,7 +2849,7 @@ void PaneWindow::EvictStale(int firstKeep, int lastKeep) {
     for (auto it = m_tiles.begin(); it != m_tiles.end();) {
         if (it->second.lastUsed != m_frame) {
             if (it->second.pendingId != 0)
-                m_doc.CancelRender(it->first.page, it->first.res, it->first.row, it->first.col);
+                m_doc->CancelRender(it->first.page, it->first.res, it->first.row, it->first.col);
             it = m_tiles.erase(it);
         } else {
             ++it;

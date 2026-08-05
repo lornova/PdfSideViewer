@@ -1,8 +1,9 @@
 # E2E test for the find bar's search options and its icon toolbars: Match Case,
 # Match Whole Word (including the ACCENTED case the regex route could never have
-# handled), the options-are-part-of-the-query guard, the latched button state,
-# persistence in [find], the tooltip ids, the width-shedding order and the
-# keyboard tab order.
+# handled), Regex (confirmed with Enter, never live - not even by reopening the
+# bar; the dense-page recursion case; a pattern that does not compile), the
+# options-are-part-of-the-query guard, the latched button state, persistence in
+# [find], the tooltip ids, the width-shedding order and the keyboard tab order.
 #
 # CLAUDE.md testing rules: DPI-aware thread FIRST (the dev monitor is 175% and
 # PowerShell is DPI-unaware), PSV_SETTINGS_DIR sandbox (never touch the user's
@@ -64,6 +65,7 @@ $IDC_FIND_CLOSE = 1009
 $IDC_FIND_EDIT = 1010
 $IDC_FIND_MATCH_CASE = 1078
 $IDC_FIND_WHOLE_WORD = 1079
+$IDC_FIND_REGEX = 1082   # NOT 1080/1081: those were taken while this was built
 $kFindOptsBarId = 2501
 $kFindNavBarId = 2502
 $kFindCountId = 2503
@@ -235,6 +237,31 @@ function Wait-Active($v) {
 function Get-Checked($v, [int]$id) {
     [Win32.Find]::SendMessageW($v.Opts, $TB_ISBUTTONCHECKED, [IntPtr]$id, [IntPtr]::Zero) -ne [IntPtr]::Zero
 }
+# --- regex mode: no live search, so the helpers above do not apply ---------
+# Typing arms nothing (EN_CHANGE returns early while the regex toggle is on):
+# the query is CONFIRMED with Enter, which the find edit turns into
+# IDC_FIND_NEXT. That first Enter executes; the next one steps.
+function Set-Needle($v, [string]$needle) {
+    [void][Win32.Find]::SendMessageW($v.Edit, $WM_SETTEXT, [IntPtr]::Zero, $needle)
+    if ((Get-CtrlText $v.Edit) -ne $needle) { throw "find edit did not take '$needle'" }
+}
+function Send-FindEnter($v) {
+    [void][Win32.Find]::PostMessageW($v.Main, $WM_COMMAND, [IntPtr]$IDC_FIND_NEXT, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 150
+}
+# Same "observe the reset in between" discipline as Get-MatchCount, except the
+# reset itself needs an Enter: an empty query parks and the counter reads "0".
+function Get-RegexMatchCount($v, [string]$needle) {
+    Set-Needle $v ''
+    Send-FindEnter $v
+    if (-not (Poll { (Get-CtrlText $v.Count) -in '0', '' } 5000)) {
+        throw "the counter did not reset (reads '$(Get-CtrlText $v.Count)')"
+    }
+    Set-Needle $v $needle
+    $was = Get-CtrlText $v.Count
+    Send-FindEnter $v
+    Wait-Count $v $was
+}
 
 Write-Host "find-bar options E2E ($Config)"
 $v = Start-Viewer
@@ -349,9 +376,89 @@ try {
                                      $SWP_NOMOVE -bor $SWP_NOZORDER)
     Start-Sleep -Milliseconds 250
 
-    Write-Host '--- phase 8: persistence'
+    Write-Host '--- phase 8: regex, a valid pattern'
+    Show-FindBar $v
+    Assert (-not (Get-Checked $v $IDC_FIND_REGEX)) 'regex starts off'
+    [void](Toggle-Option $v $IDC_FIND_REGEX)
+    Assert (Get-Checked $v $IDC_FIND_REGEX) 'regex latched on'
+    Assert ((Get-RegexMatchCount $v '(teorema|lemma)') -eq 3) 'alternation finds the 3 "teorema"'
+
+    Write-Host '--- phase 9: in regex mode typing does NOT run the query'
+    $before = Get-CtrlText $v.Count
+    Set-Needle $v 'Pagina'   # one hit per page: a DIFFERENT count, so a stale
+    Start-Sleep -Milliseconds 1200   # counter cannot pass for the right answer
+    Assert ((Get-CtrlText $v.Count) -eq $before) `
+        "typing left the counter on the previous query ('$before')"
+    Send-FindEnter $v
+    Assert ((Wait-Count $v $before) -eq 4) 'and Enter runs it: one "Pagina" per page'
+    Assert ((Get-ActiveIndex $v) -eq 0) 'the confirming Enter executes, it does not step'
+    Send-FindEnter $v
+    # -ge 1, not -eq 1: Get-ActiveIndex reads 0 for "no match selected", and
+    # WHICH match the first step lands on depends on the page the reader is
+    # parked on (phase 7 resized the window, which relayouts under fit zoom).
+    # What is being asserted is that a step happened at all.
+    Assert ((Wait-Active $v) -ge 1) `
+        "the NEXT Enter steps, as it does for a live search (counter '$(Get-CtrlText $v.Count)')"
+    # Reopening the bar is not a confirmation either. The edit box keeps its
+    # text across an Esc, so a Ctrl+F used to run a pattern that had been typed
+    # and abandoned: exactly the live search this mode exists to prevent, and
+    # one keystroke short of what the reader meant.
+    Set-Needle $v 'teorema'   # 3 hits: distinct from the 4 above AND from 0
+    [void][Win32.Find]::PostMessageW($v.Main, $WM_COMMAND, [IntPtr]$IDC_FIND_CLOSE, [IntPtr]::Zero)
+    if (-not (Poll { -not [Win32.Find]::IsWindowVisible($v.Bar) } 5000)) {
+        throw 'the find bar did not close'
+    }
+    Show-FindBar $v
+    Start-Sleep -Milliseconds 1000   # long enough for a search to have settled
+    Assert ((Get-CtrlText $v.Count) -in '0', '') `
+        "reopening ran nothing (counter reads '$(Get-CtrlText $v.Count)')"
+    Send-FindEnter $v
+    Assert ((Wait-Count $v '0') -eq 3) 'and Enter still runs the pattern after the reopen'
+
+    Write-Host '--- phase 10: recursion depth on the dense page'
+    # find-a.pdf page 4 is >3000 characters. Neither case below can fail an
+    # assert if the mitigations regress: both take the WORKER's stack down, so
+    # what actually catches it is the process dying (Stop-Viewer's exit code)
+    # or the counter never settling.
+    #
+    # ".*" is the FZ_SEARCH_KEEP_LINES case: with real newlines in the haystack
+    # mujs's I_ANY refuses to cross one, so the recursion is one line deep
+    # instead of one page deep, and there is a hit per line.
+    $dotStar = Get-RegexMatchCount $v '.*'
+    Write-Host "        '.*' matched $dotStar lines"
+    # 57 today (4 pages of chrome plus page 4's 40 dense lines); asserted as a
+    # floor, because the exact grouping into stext lines is MuPDF's business.
+    Assert ($dotStar -ge 40) '".*" survived the dense page (one hit per line)'
+    # "[^Z]*" is the /STACK case, and the one KEEP_LINES does NOT cover: a
+    # negated class DOES accept newlines, so this consumes the whole page in one
+    # go - ~3000 frames of ~320 bytes, which is ~1 MB and therefore right at the
+    # old default reserve, while still under mujs's REG_MAXREC of 4096 (the
+    # guard cannot save it). No 'Z' or 'z' occurs in find-a.pdf, so it is one
+    # whole-page hit per page.
+    $noZ = Get-RegexMatchCount $v '[^Z]*'
+    Write-Host "        '[^Z]*' matched $noZ whole pages"
+    Assert ($noZ -ge 1) '"[^Z]*" survived a page-deep recursion (8 MB /STACK)'
+    Assert (-not $v.Proc.HasExited) 'the viewer is still running'
+
+    Write-Host '--- phase 11: a pattern that does not compile'
+    Set-Needle $v '('
+    Send-FindEnter $v
+    [void](Poll { (Get-CtrlText $v.Count) -notin '', '0' } 5000)
+    $bad = Get-CtrlText $v.Count
+    Write-Host "        the counter reads '$bad'"
+    Assert ($bad -eq 'Error') 'the counter shows the error state, not a silent "0"'
+
+    Write-Host '--- phase 12: leaving regex mode re-reads the same text literally'
+    Assert ((Get-RegexMatchCount $v 'teorema.') -eq 3) '"teorema." as a regex: 3 (any char after)'
+    $was = Toggle-Option $v $IDC_FIND_REGEX
+    Assert ((Wait-Count $v $was) -eq 0) 'as a literal: 0 (no "teorema." in the text)'
+    Assert (-not (Get-Checked $v $IDC_FIND_REGEX)) 'regex latched off'
+
+    Write-Host '--- phase 13: persistence'
     [void](Toggle-Option $v $IDC_FIND_MATCH_CASE)
+    [void](Toggle-Option $v $IDC_FIND_REGEX)
     Assert (Get-Checked $v $IDC_FIND_MATCH_CASE) 'match case on before the restart'
+    Assert (Get-Checked $v $IDC_FIND_REGEX) 'regex on before the restart'
     [void][Win32.Find]::PostMessageW($v.Main, $WM_COMMAND, [IntPtr]$IDC_FIND_CLOSE, [IntPtr]::Zero)
     if ($Capture) {
         Show-FindBar $v
@@ -377,12 +484,17 @@ $iniText = if (Test-Path $ini) { Get-Content -LiteralPath $ini -Raw } else { '' 
 Assert ($iniText -match '(?m)^\[find\]') '[find] section written'
 Assert ($iniText -match '(?m)^matchCase=1') '[find] matchCase=1 persisted'
 Assert ($iniText -match '(?m)^wholeWord=0') '[find] wholeWord=0 persisted'
+Assert ($iniText -match '(?m)^regex=1') '[find] regex=1 persisted'
 
 $v = Start-Viewer
 try {
     Show-FindBar $v
     Assert (Get-Checked $v $IDC_FIND_MATCH_CASE) 'match case restored from settings.ini'
     Assert (-not (Get-Checked $v $IDC_FIND_WHOLE_WORD)) 'whole word restored off'
+    Assert (Get-Checked $v $IDC_FIND_REGEX) 'regex restored from settings.ini'
+    # Back to live search for the literal assertion below, which is the one that
+    # proves a RESTORED option reaches the engine and not just the button.
+    [void](Toggle-Option $v $IDC_FIND_REGEX)
     Assert ((Get-MatchCount $v 'teorema') -eq 1) 'the restored option really applies to the search'
 } finally {
     Stop-Viewer $v

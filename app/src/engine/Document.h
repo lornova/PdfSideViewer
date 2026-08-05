@@ -3,6 +3,7 @@
 #include "engine/Mupdf.h"
 #include "framework.h"
 
+#include <atomic>
 #include <climits>
 #include <condition_variable>
 #include <deque>
@@ -95,16 +96,26 @@ public:
     struct SearchOptions {
         bool matchCase = false;
         bool wholeWord = false;
+        bool regex = false;
         bool operator==(const SearchOptions&) const = default;
     };
+    // A regex can match far more than a literal ever would (".*" alone is one
+    // hit per line); past this many hits per document the scan stops and says
+    // so, rather than growing the pane's match list without bound.
+    static constexpr int kMaxMatches = 10000;
     struct SearchMatch {
         int pageIndex = 0;
         std::vector<RectPt> rects; // one logical hit may span several boxes
     };
     struct SearchResult {
         uint64_t searchId = 0;
-        bool done = false;    // whole document scanned
+        bool done = false;    // whole document scanned (or stopped at the cap)
         int pagesScanned = 0; // cumulative
+        // The needle is not a valid regular expression. Distinct from "no
+        // hits": nothing was searched at all, and distinct from a damaged page,
+        // which is skipped silently and leaves the rest of the scan running.
+        bool badPattern = false;
+        bool truncated = false; // kMaxMatches reached; the scan stopped early
         std::vector<SearchMatch> matches; // this chunk's hits, page order
     };
 
@@ -148,7 +159,11 @@ public:
     // Queued renders for pages outside [first,last] are dropped (fast scroll).
     void SetWantedRange(int first, int last);
 
-    void Shutdown(); // idempotent; joins the worker
+    // Idempotent. Returns false when the worker did NOT stop within the grace
+    // period and was detached instead: it still owns every member of this
+    // object, so the caller MUST leak it (never run the destructor). See the
+    // definition for why the wait can time out at all.
+    [[nodiscard]] bool Shutdown();
 
 private:
     struct Job {
@@ -164,6 +179,7 @@ private:
         std::string needleUtf8; // Search jobs only
         SearchOptions searchOptions;
         uint64_t searchId = 0;
+        int searchFound = 0; // hits accepted so far, carried by the continuation
     };
 
     void EnsureWorker();
@@ -176,12 +192,17 @@ private:
     fz_display_list* AcquireDisplayList(fz_context* ctx, int pageIndex); // worker only
     void DropDisplayLists(fz_context* ctx);                             // worker only
 
-    HWND m_notify = nullptr;
+    // Atomic because Shutdown clears it from the UI thread when it abandons a
+    // wedged worker: that worker may still post, and the HWND is already gone.
+    std::atomic<HWND> m_notify{nullptr};
     std::thread m_worker;
     std::mutex m_mutex;
     std::condition_variable m_cv;
+    std::condition_variable m_exitCv;    // worker signals m_workerDone (own CV:
+                                         // m_cv's waiter is the worker itself)
     std::deque<Job> m_jobs;              // guarded by m_mutex
     bool m_quit = false;                 // guarded by m_mutex
+    bool m_workerDone = false;           // guarded by m_mutex; WorkerMain is returning
     fz_cookie* m_activeCookie = nullptr; // guarded by m_mutex; points into worker stack
     int m_activePage = -1;               // guarded by m_mutex (with res/row/col below)
     int m_activeRes = -1;

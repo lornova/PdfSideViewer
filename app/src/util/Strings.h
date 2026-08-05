@@ -121,6 +121,11 @@
       L"&Mot entier", L"&Csak teljes szó", L"&Лише слово цілком", L"Numai cuvinte &întregi",       \
       L"Apenas palavras &inteiras", L"&Μόνο ολόκληρες λέξεις", L"Solo palabras comple&tas",        \
       L"Tylko &całe wyrazy", L"Volledi&g woord", L"Pouze &celá slova", L"Matcha &hela ord")        \
+    X(MenuRegex, L"Use &Regular Expression", L"Espressione &regolare", L"Regulärer &Ausdruck",     \
+      L"E&xpression régulière", L"Reguláris kife&jezés", L"&Регулярний вираз",                     \
+      L"Expresie re&gulată", L"Expressão re&gular", L"Κανονική έκ&φραση",                          \
+      L"Expresión re&gular", L"Wyrażenie re&gularne", L"&Reguliere expressie",                     \
+      L"Regulární &výraz", L"Reguljärt &uttryck")                                                  \
     X(MenuView, L"&View", L"&Visualizza", L"&Ansicht", L"&Affichage", L"&Nézet", L"&Вигляд",       \
       L"&Vizualizare", L"&Ver", L"&Προβολή", L"&Ver", L"&Widok", L"B&eeld", L"&Zobrazit",          \
       L"&Visa")                                                                                    \
@@ -446,6 +451,10 @@
       L"Mot entier", L"Csak teljes szó", L"Лише слово цілком", L"Numai cuvinte întregi",           \
       L"Apenas palavras inteiras", L"Μόνο ολόκληρες λέξεις", L"Solo palabras completas",           \
       L"Tylko całe wyrazy", L"Volledig woord", L"Pouze celá slova", L"Matcha hela ord")            \
+    X(TipRegex, L"Use regular expression", L"Espressione regolare", L"Regulärer Ausdruck",         \
+      L"Expression régulière", L"Reguláris kifejezés", L"Регулярний вираз",                        \
+      L"Expresie regulată", L"Expressão regular", L"Κανονική έκφραση", L"Expresión regular",       \
+      L"Wyrażenie regularne", L"Reguliere expressie", L"Regulární výraz", L"Reguljärt uttryck")    \
     X(TipFindNext, L"Next match (F3)", L"Risultato successivo (F3)", L"Nächster Treffer (F3)",     \
       L"Résultat suivant (F3)", L"Következő találat (F3)", L"Наступний збіг (F3)",                 \
       L"Rezultatul următor (F3)", L"Ocorrência seguinte (F3)", L"Επόμενο αποτέλεσμα (F3)",         \
@@ -465,6 +474,12 @@
       L"Κλείσιμο γραμμής εύρεσης (Esc)", L"Cerrar la barra de búsqueda (Esc)",                     \
       L"Zamknij pasek wyszukiwania (Esc)", L"Zoekbalk sluiten (Esc)",                              \
       L"Zavřít panel hledání (Esc)", L"Stäng sökfältet (Esc)")                                     \
+    /* Shown IN the match counter when a regex does not compile, so it has to                      \
+       fit a ~76 DIP box in fourteen languages: one word, and the context (the                     \
+       regex toggle is latched, the pattern is in the box next to it) carries                      \
+       the rest. A silent "0" would read as "no matches", which is a lie. */                       \
+    X(FindBadPattern, L"Error", L"Errore", L"Fehler", L"Erreur", L"Hiba", L"Помилка",              \
+      L"Eroare", L"Erro", L"Σφάλμα", L"Error", L"Błąd", L"Fout", L"Chyba", L"Fel")                 \
     X(TipOutline, L"Outline (F9)", L"Segnalibri (F9)", L"Lesezeichen (F9)", L"Signets (F9)",       \
       L"Könyvjelzők (F9)", L"Закладки (F9)", L"Marcaje (F9)", L"Marcadores (F9)",                  \
       L"Σελιδοδείκτες (F9)", L"Marcadores (F9)", L"Zakładki (F9)", L"Bladwijzers (F9)",            \

@@ -82,6 +82,7 @@ public:
     // focus, so a per-pane option would silently change under the user.
     bool findMatchCase = false;
     bool findWholeWord = false;
+    bool findRegex = false;
     // Rebar band layout in visual order, "id,cx,break;..." per band (empty =
     // default). Parsed leniently: anything malformed keeps the default row.
     std::wstring rebarBands;

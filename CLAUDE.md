@@ -204,6 +204,24 @@ menu/toolbar checked state (`UpdateCommandUi`).
   re-opening the same file must not resurrect stale results. A search query is the
   `(needle, Document::SearchOptions)` PAIR, and `PaneWindow::StartSearch`'s unchanged-query
   early-out compares both: comparing the needle alone silently swallows every option toggle.
+  In REGEX mode typing runs nothing (every prefix of a pattern is a pattern, and mujs has no step
+  budget): the query is confirmed with Enter, which needs `StartSearch`'s `force` to get past that
+  same latch. Never make Enter force UNCONDITIONALLY - it would reset the match list on every
+  step. `m_findRegexPending` is what tells "typed but never run" from "already run", and only an
+  actual run clears it: the edit box keeps its text when the bar closes, so `ShowFindBar`'s
+  re-issue (which exists to move the highlights on a retarget) must skip an unconfirmed pattern.
+- Regex search is mujs, which recurses once per character consumed and cannot be cancelled. Three
+  things keep it standing and none is optional: `FZ_SEARCH_KEEP_LINES` (bounds `.` to a line),
+  `/STACK 8388608` in the vcxproj (bounds the atoms that DO cross newlines, and lets mujs's
+  `REG_MAXREC` fire instead of being overrun - at the 1 MB default `[^Z]*` on a dense page is a
+  STATUS_STACK_OVERFLOW that `fz_try` cannot catch), and confirm-on-Enter. `dumpbin /headers` must
+  read `800000`. An invalid pattern is probed ONCE per search with `fz_new_search`, worker-side:
+  the per-page `fz_catch` exists to skip DAMAGED pages and would otherwise report "0 hits".
+- `Document::Shutdown` returns false when it gave up waiting for the worker (a nested-quantifier
+  pattern runs unbounded with nothing to abort it). The detached thread still owns every member of
+  that `Document`, so the owner must LEAK it - `PaneWindow` holds it by `unique_ptr` and
+  `release()`s it on `m_docAbandoned`. Destroying it instead is a use-after-free; the leak is the
+  price of exiting and saving the session instead of hanging on `join()`.
 - Toolbar `BTNS_AUTOSIZE` label widths are measured ONCE, at `TB_ADDBUTTONSW` time, with the font
   of that moment, and under PMv2 comctl32 swaps its per-DPI font in AFTER `WM_DPICHANGED` returns
   (`TB_AUTOSIZE` does not re-measure): never patch a labeled toolbar in place on a DPI change -

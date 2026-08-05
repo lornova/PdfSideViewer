@@ -669,14 +669,65 @@ Design:
     input). A side whose own needle edge is not a word character is left unconstrained, so "(a"
     and "3.14" still match. A run the geometry cannot locate is KEPT: a visible false positive is
     correctable, a silently missing match is not.
-- Regex (`FZ_SEARCH_REGEXP`) is deliberately NOT shipped. mujs has a recursion-depth guard
-  (`REG_MAXREC 4096`) but no step budget, and its matcher recurses once per character consumed;
-  with the exe's 1 MB stack reserve the guard needs ~1.25 MB and therefore can never fire, so a
-  pattern as ordinary as `Cap.*olo` stack-overflows the worker on a dense page - uncatchable by
-  `fz_try`, which is setjmp-based. Nested quantifiers additionally run in exponential time with no
-  cookie or abort anywhere in `stext-search.c`, which would wedge `Document::Shutdown`'s
-  unconditional `join()`. Reviving it needs, at minimum, `FZ_SEARCH_KEEP_LINES` (which bounds `.`
-  to a line, `I_ANY` refusing newlines), an 8 MB `/STACK`, and no live search in regex mode.
+  - **Regex** (`FZ_SEARCH_REGEXP | FZ_SEARCH_KEEP_LINES`). The engine underneath is mujs
+    (`thirdparty/mujs/regexp.c`), a backtracking matcher that recurses once per character consumed
+    (a `match()` frame is ~320 bytes) and whose only brake is `REG_MAXREC = 4096` frames. It has no
+    step budget and no cancellation hook of any kind, and `stext-search.c` passes it no cookie, so
+    what follows are mitigations, not fixes - each load-bearing, and the last entry is what is
+    left uncovered:
+    - `FZ_SEARCH_KEEP_LINES` puts a real `\n` at every line end of the haystack
+      (`source/fitz/util.c`, `do_flatten`) and mujs's `I_ANY` refuses to cross one
+      (`regexp.c`), so `.` is bounded by the LINE instead of by the page. It also gives regex
+      users the per-line `^` and `$` they expect. Cost, in regex mode only: a match no longer
+      crosses an implicit line break, so a wrapped phrase needs an explicit `\s`.
+    - `/STACK 8388608` in the vcxproj, applying to every thread (`std::thread` passes
+      `dwStackSize` 0, so the workers inherit the PE header value). This covers the atoms
+      `KEEP_LINES` does NOT bound - a negated class or `\s` happily crosses newlines - and it is
+      what lets `REG_MAXREC` actually fire instead of being overrun first. Measured, not
+      estimated: at the old 1 MB reserve `[^Z]*` over `testdata/find-a.pdf` page 4 (>3000
+      characters) kills the process with `0xC00000FD`, STATUS_STACK_OVERFLOW, which `fz_try`
+      cannot catch because it is setjmp-based and this is an SEH fault; at 8 MB the same pattern
+      returns one hit per page. Both cases are `scripts/test-find-options.ps1` phase 10.
+    - **No live search in regex mode**: every prefix of a pattern is itself a pattern, and the
+      debounce would run `(a+`, then `(a+)`, then `(a+)+` one keystroke apart. The query is
+      confirmed with Enter (or by toggling an option, which is also a confirmation); the counter
+      deliberately keeps showing the previous query's result meanwhile, so nothing suggests a
+      search has run. `MainWindow::m_findRegexPending` records the unexecuted query, which is why
+      Enter must be able to FORCE a re-run past the pane's `(needle, options)` latch. That flag
+      outlives the bar: the edit box keeps its text when the bar is closed, so REOPENING it is not
+      a confirmation either, and `ShowFindBar`'s re-issue of the box's contents (there to move the
+      highlights when the bar changes pane) runs only a query that has already been executed once.
+    - A needle that does not compile is caught ONCE per search, worker-side, by an
+      `fz_new_search`/`fz_drop_search` probe before any page work: `fz_match_stext_page` throws
+      `FZ_ERROR_ARGUMENT` on the first page and the per-page `fz_catch` - which exists to skip
+      DAMAGED pages - would file it as "zero hits", silently. `SearchResult::badPattern` reaches
+      the counter as a localized one-word error state instead.
+    - `Document::kMaxMatches` (10000) caps the hits per document, checked per page and carried
+      across chunks by the continuation job. The counter marks it with `≥`, never with another
+      `+`: `+` already means "the scan is still running, more may arrive", and the cap is the
+      opposite statement.
+    - Whole word composes with regex (the boundary filter is independent of the matcher), and
+      there both needle edges are constrained unconditionally: `(a+)` starting with a parenthesis
+      says nothing about what the pattern matches.
+    - What stays UNFIXED, by construction: nested quantifiers (`(a+)+b`, `(\w+\s+)+end`) run in
+      exponential time inside `js_regexec`, with nothing to abort them. The pane's worker also
+      serves renders, so that pane freezes. The containment is `Document::Shutdown`: it waits two
+      seconds for the worker and then DETACHES it, so the application exits and saves its session
+      instead of hanging on `join()` until the Task Manager. The detached thread still owns every
+      member of its `Document`, so `PaneWindow` leaks the object rather than destroying it
+      (`m_docAbandoned`); the cloned `fz_context` is never dropped and `MupdfLib`'s base context
+      is a leaked static, so nothing it touches goes away underneath it. That leak is deliberate
+      and one-shot. The timed wait does not ask WHY the worker is late, so the same path also
+      catches an ordinary slow job that ignores the abort cookie (a first `fz_open_document` on a
+      huge file or a stalled network share, if a pane is closed right then): harmless, because the
+      abandoned worker's posts fail once the window is gone and the thread dies with the process,
+      but it is why the timeout is a supported state and not an assertion. Both halves are
+      reported upstream (Artifex Bugzilla, 2026-08-06): [709616](https://bugs.ghostscript.com/show_bug.cgi?id=709616)
+      asks mujs for a work budget in `match()` (it bounds recursion DEPTH but not work, which is
+      the wrong axis: measured against the bundled 1.28.0 mujs, `(a+)+b` over N `a` characters
+      doubles per character, 0.050 s at N=20 and 25.3 s at N=29, with `js_regexec` returning "no
+      match" rather than the depth error), and [709617](https://bugs.ghostscript.com/show_bug.cgi?id=709617)
+      asks MuPDF for an `fz_cookie` on the search API, which no entry point currently takes.
 
 **Selection & links**: mouse selection via `fz_snap_selection` (char/word/line on click count) +
 `fz_highlight_selection` for quads; Ctrl+C via `fz_copy_selection(ctx, stext, a, b, crlf=1)` →
@@ -968,7 +1019,8 @@ Each milestone leaves the tree buildable and the app usable.
 | Risk | Mitigation |
 | --- | --- |
 | MuPDF VS projects target v142 | retarget to v143 is routine and documented; pin the MuPDF tag |
-| `fz_match_*` search API experimental | adopted at 1.28: the "stable" `fz_search_*` is a shim over it, so the label never described a second engine. Its REGEXP branch stays out (mujs has no step budget and no abort; see the Search section) |
+| `fz_match_*` search API experimental | adopted at 1.28: the "stable" `fz_search_*` is a shim over it, so the label never described a second engine |
+| Regex search runs mujs: no step budget, no abort | `FZ_SEARCH_KEEP_LINES`, an 8 MB `/STACK`, confirm-with-Enter, a compile probe and a 10000-hit cap; a worker wedged on a nested quantifier is detached (and leaked), so the app still exits. See the Search section |
 | Memory blow-up on huge documents / deep zoom | shared 256 MB `fz_store` budget + byte-budgeted RenderCache + tiling + display lists instead of pixmaps as the durable cache |
 | Sync feedback loops / drift | reentrancy guard; anchor recapture on re-lock; relative mode as documented fallback |
 | Touchpad pinch not delivered via WM_GESTURE | accepted v1 gap; DirectManipulation planned, design keeps one viewport per pane HWND |

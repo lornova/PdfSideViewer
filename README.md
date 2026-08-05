@@ -46,9 +46,15 @@ executable that starts instantly.
   points are remembered across sessions: reopening the same two documents brings its manual
   points back and re-derives the generated ones.
 - Full-document **text search** (Ctrl+F) with live highlighting and F3 navigation, plus
-  **Match case** and **Match whole word** toggles in the find bar (remembered across sessions).
-  Whole-word boundaries are Unicode-aware, so "perché" is a whole word too. Typing never moves
-  the view: the highlights appear where you are, and F3 steps from the page you are on.
+  **Match case**, **Match whole word** and **Regular expression** toggles in the find bar
+  (remembered across sessions). Whole-word boundaries are Unicode-aware, so "perché" is a whole
+  word too, and whole word can be combined with a pattern. Typing never moves the view: the
+  highlights appear where you are, and F3 steps from the page you are on.
+  In **regex** mode the pattern is run when you press Enter, not while you type, so a half-typed
+  pattern is never executed; `^` and `$` match per line, a match does not cross a line break
+  (write `\s` for one), a pattern that does not compile says so instead of reporting no matches,
+  and results are capped at 10000 per document (shown as `≥10000`). Patterns with nested
+  quantifiers such as `(a+)+b` can still take unbounded time on the pane that runs them.
 - **Text selection** with the mouse (double-click = word), Ctrl+C copies Unicode text. Copy and
   the whole find family also live in the **Edit menu**.
 - Clickable **links** (internal destinations and web URLs) and an **outline sidebar** (F9).
@@ -133,6 +139,7 @@ executable that starts instantly.
 | Shift+F7 / Ctrl+Shift+F7 | Add a sync point at the current alignment / clear sync points |
 | Alt + scroll | Adjust one pane while synced (re-anchors; with sync points the tweak is transient) |
 | Ctrl+F, F3, Shift+F3 | Find, next match, previous match (Esc closes the find bar) |
+| Enter, F3 (regex mode) | The first one runs the pattern, the next one steps through the matches |
 | Ctrl+C | Copy selected text |
 | F9 | Outline (bookmarks) sidebar |
 | Ctrl+wheel, Ctrl +/− | Zoom (anchored at the cursor) |

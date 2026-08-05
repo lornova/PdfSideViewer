@@ -169,14 +169,27 @@ public:
     D2D1_SIZE_F PageSizePt(int page) const { return m_layout.PageSizePt(page); }
 
     // ---------------------------------------------------------- text search --
-    using SearchStatusHandler =
-        std::function<void(PaneWindow&, int activeMatch, int totalMatches, bool done)>;
+    // Everything the find bar's counter needs, in one struct: the flags below
+    // are states the bare "m of n" cannot express, and each new one as a
+    // separate bool would make the callback unreadable.
+    struct SearchStatus {
+        int activeMatch = -1;  // -1 = nothing selected yet
+        int totalMatches = 0;
+        bool done = true;      // the whole document has been scanned
+        bool badPattern = false; // regex mode: the needle does not compile
+        bool truncated = false;  // Document::kMaxMatches reached; more exist
+    };
+    using SearchStatusHandler = std::function<void(PaneWindow&, const SearchStatus&)>;
     void SetSearchStatusHandler(SearchStatusHandler handler) {
         m_onSearchStatus = std::move(handler);
     }
     // The options are part of the query: toggling one with the text unchanged
-    // must re-run the search, so both are latched together.
-    void StartSearch(const std::wstring& needle, Document::SearchOptions options);
+    // must re-run the search, so both are latched together. force re-runs a
+    // query the latch would swallow - what Enter does in regex mode, where
+    // typing never runs anything and the guard has no other way to tell an
+    // already-executed query from one that has only ever been typed.
+    void StartSearch(const std::wstring& needle, Document::SearchOptions options,
+                     bool force = false);
     void ClearSearch();
     void GotoMatch(int delta); // +1 next, -1 previous; wraps around
     int MatchCount() const { return static_cast<int>(m_matches.size()); }
@@ -435,7 +448,12 @@ private:
     ComPtr<ID2D1StrokeStyle> m_dashStroke;
 
     State m_state = State::Empty;
-    Document m_doc;
+    // By pointer, not by value, for one reason: Document::Shutdown can fail to
+    // stop a worker wedged inside a regex match, and the only sound answer is
+    // to leak the whole Document (the detached thread owns every member of it).
+    // A by-value member could not be leaked.
+    std::unique_ptr<Document> m_doc = std::make_unique<Document>();
+    bool m_docAbandoned = false; // Shutdown timed out: release, never destroy
     FileWatcher m_watcher; // auto-reload: watches m_docPath while a document is open
     UINT m_reloadRetries = 0;
     SyncTexIndex m_synctex; // lazy; reset with the document (auto-reload included)
@@ -501,6 +519,8 @@ private:
     std::vector<Document::SearchMatch> m_matches; // page order
     int m_activeMatch = -1;
     bool m_searchDone = true;
+    bool m_searchBadPattern = false; // latched from the result, cleared per query
+    bool m_searchTruncated = false;
 
     bool m_hasRestoreView = false; // view to apply when the pending open lands
     float m_restoreZoom = 1.0f;

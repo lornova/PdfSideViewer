@@ -57,6 +57,14 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
+      <!-- 8 MB instead of the 1 MB default, on EVERY thread (std::thread passes
+           dwStackSize 0, so the workers inherit this header value). Regex search
+           runs mujs, whose matcher recurses once per character consumed and whose
+           only brake is REG_MAXREC = 4096 frames of ~320 bytes each: at 1 MB the
+           guard could never fire, so a deep pattern overflowed the worker stack
+           instead - uncatchable, since fz_try is setjmp-based and this is an SEH
+           fault. Verify with `dumpbin /headers` (800000). -->
+      <StackReserveSize>8388608</StackReserveSize>
       <!-- Release dir as fallback: libresources (pure data) has no Debug config. -->
       <AdditionalLibraryDirectories>$(SolutionDir)vendor\mupdf\platform\win32\$(Platform)\$(Configuration)\;$(SolutionDir)vendor\mupdf\platform\win32\$(Platform)\Release\;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <AdditionalDependencies>d3d11.lib;dxgi.lib;d2d1.lib;dwrite.lib;dwmapi.lib;comctl32.lib;shlwapi.lib;xmllite.lib;libmupdf.lib;libthirdparty.lib;libresources.lib;%(AdditionalDependencies)</AdditionalDependencies>

@@ -610,6 +610,7 @@ AppSettings AppSettings::Load() {
     s.headerShowPath = ReadInt(ini, kWindowSection, L"headerPath", 0) != 0;
     s.findMatchCase = ReadInt(ini, kFindSection, L"matchCase", 0) != 0;
     s.findWholeWord = ReadInt(ini, kFindSection, L"wholeWord", 0) != 0;
+    s.findRegex = ReadInt(ini, kFindSection, L"regex", 0) != 0;
     s.defPaneCount = ReadInt(ini, kDefaultsSection, L"paneCount", 2);
     s.defScrollMode = ReadInt(ini, kDefaultsSection, L"scrollMode", 0);
     s.defZoomMode = ReadInt(ini, kDefaultsSection, L"zoomMode", 2);
@@ -706,6 +707,7 @@ bool AppSettings::Save() const {
     ini.SetBool(kWindowSection, L"headerPath", s.headerShowPath);
     ini.SetBool(kFindSection, L"matchCase", s.findMatchCase);
     ini.SetBool(kFindSection, L"wholeWord", s.findWholeWord);
+    ini.SetBool(kFindSection, L"regex", s.findRegex);
     ini.SetInt(kDefaultsSection, L"paneCount", s.defPaneCount);
     ini.SetInt(kDefaultsSection, L"scrollMode", s.defScrollMode);
     ini.SetInt(kDefaultsSection, L"zoomMode", s.defZoomMode);

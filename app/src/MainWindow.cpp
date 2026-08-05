@@ -216,7 +216,9 @@ constexpr int kFindBarHeightDip = 34;
 constexpr int kFindPadDip = 6;
 constexpr int kFindGapDip = 4;
 constexpr int kFindButtonDip = 26;
-constexpr int kFindCountDip = 64;
+// 76, not 64: the regex cap makes five-digit totals reachable, so the widest
+// text the counter can hold is now "10000/10000" plus the "≥" cap marker.
+constexpr int kFindCountDip = 76;
 constexpr int kFindEditMinDip = 40;
 
 // Find-bar icons: TWO imagelists for the three toolbars (the nav and close
@@ -236,6 +238,7 @@ constexpr GlyphSpec kFindNavGlyphs[] = {
 constexpr LabelSpec kFindOptLabels[] = {
     {L"Aa", false},  // 0 match case
     {L"ab", true},   // 1 whole word (underlined, as in VS Code)
+    {L".*", false},  // 2 regular expression
 };
 // Posted to the (modal) sync-points dialog when the map changes underneath it:
 // the modal loop still dispatches WM_PSV_* messages, so an auto-reload can
@@ -428,6 +431,7 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> fil
     m_headerShowPath = session.headerShowPath;
     m_findOptions.matchCase = session.findMatchCase;
     m_findOptions.wholeWord = session.findWholeWord;
+    m_findOptions.regex = session.findRegex;
     // The per-pane pushes happen in ConfigurePane, below, once the handlers
     // exist: a pane created later by the mode switch must get the same set.
     // m_activePane defaults to the leftmost pane; mark it so the cue and the
@@ -559,18 +563,25 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> fil
             ShowStatusMessage(hadData ? StrId::SyncTexNoMatch : StrId::SyncTexNoData);
     };
 
-    m_onSearchStatus = [this](PaneWindow& pane, int active, int total, bool done) {
+    m_onSearchStatus = [this](PaneWindow& pane, const PaneWindow::SearchStatus& s) {
         if (&pane != m_findTarget || !m_findCount)
             return;
         wchar_t buffer[64];
-        if (total == 0)
-            wcscpy_s(buffer, done ? L"0" : L"…");
-        else if (active < 0)
+        // The cap marker is "≥" and NOT another "+": "+" already means "the
+        // scan is still running, more may arrive", and the two states are
+        // opposites - the scan STOPPED, and more do exist.
+        const wchar_t* tail = s.done ? L"" : L"+";
+        const wchar_t* capped = s.truncated ? L"\x2265" : L"";
+        if (s.badPattern)
+            wcscpy_s(buffer, Str(StrId::FindBadPattern));
+        else if (s.totalMatches == 0)
+            wcscpy_s(buffer, s.done ? L"0" : L"…");
+        else if (s.activeMatch < 0)
             // A fresh query selects nothing (the view must not move), so there
             // is no "m of n" to show yet: just how many there are.
-            swprintf_s(buffer, L"%d%s", total, done ? L"" : L"+");
+            swprintf_s(buffer, L"%s%d%s", capped, s.totalMatches, tail);
         else
-            swprintf_s(buffer, L"%d/%d%s", active + 1, total, done ? L"" : L"+");
+            swprintf_s(buffer, L"%d/%s%d%s", s.activeMatch + 1, capped, s.totalMatches, tail);
         SetWindowTextW(m_findCount, buffer);
     };
 
@@ -840,6 +851,7 @@ void MainWindow::SaveSession() const {
     s.headerShowPath = m_headerShowPath;
     s.findMatchCase = m_findOptions.matchCase;
     s.findWholeWord = m_findOptions.wholeWord;
+    s.findRegex = m_findOptions.regex;
     s.scrollMode = m_scrollMode == PaneWindow::ScrollMode::Paged ? 1 : 0;
     s.restoreSession = m_restoreSession;
     s.wheelLines = m_wheelLines;
@@ -935,6 +947,7 @@ HMENU MainWindow::BuildMenuBar() {
     AppendMenuW(edit, MF_SEPARATOR, 0, nullptr);
     append(edit, IDC_FIND_MATCH_CASE, StrId::MenuMatchCase);
     append(edit, IDC_FIND_WHOLE_WORD, StrId::MenuWholeWord);
+    append(edit, IDC_FIND_REGEX, StrId::MenuRegex);
 
     HMENU lang = CreatePopupMenu();
     // Alphabetical by native name (Greek and Cyrillic after Latin), NOT id
@@ -1779,6 +1792,8 @@ StrId MainWindow::CommandTipId(UINT id) {
         return StrId::TipMatchCase;
     case IDC_FIND_WHOLE_WORD:
         return StrId::TipWholeWord;
+    case IDC_FIND_REGEX:
+        return StrId::TipRegex;
     case IDC_FIND_PREV:
         return StrId::TipFindPrev;
     case IDC_FIND_NEXT:
@@ -2357,6 +2372,7 @@ void MainWindow::UpdateCommandUi() {
         check(IDC_TOGGLE_ALIGNMENT_GAPS, m_showAlignmentGaps);
         check(IDC_FIND_MATCH_CASE, m_findOptions.matchCase);
         check(IDC_FIND_WHOLE_WORD, m_findOptions.wholeWord);
+        check(IDC_FIND_REGEX, m_findOptions.regex);
         UINT fitId = IDC_ZOOM_ACTUAL;
         switch (FocusedPane()->GetZoomMode()) {
         case PaneWindow::ZoomMode::FitWidth:
@@ -2388,8 +2404,11 @@ void MainWindow::UpdateCommandUi() {
         enable(IDC_COPY, FocusedPane()->HasSelection());
         // Closing the find bar clears the search, so there is no "repeat the
         // last search" to offer once it is gone: grey rather than pretend.
+        // A pending regex query counts as steppable even with no matches yet:
+        // in that state these two commands RUN the query, and greying them
+        // would take away the only menu route to the thing they now do.
         const bool canStep = m_findBar && IsWindowVisible(m_findBar) && m_findTarget &&
-                             m_findTarget->MatchCount() > 0;
+                             (m_findTarget->MatchCount() > 0 || m_findRegexPending);
         enable(IDC_FIND_NEXT, canStep);
         enable(IDC_FIND_PREV, canStep);
     }
@@ -2419,6 +2438,8 @@ void MainWindow::UpdateCommandUi() {
                      MAKELPARAM(m_findOptions.matchCase ? TRUE : FALSE, 0));
         SendMessageW(m_findOptsBar, TB_CHECKBUTTON, IDC_FIND_WHOLE_WORD,
                      MAKELPARAM(m_findOptions.wholeWord ? TRUE : FALSE, 0));
+        SendMessageW(m_findOptsBar, TB_CHECKBUTTON, IDC_FIND_REGEX,
+                     MAKELPARAM(m_findOptions.regex ? TRUE : FALSE, 0));
     }
 }
 
@@ -3424,6 +3445,17 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
 
     case WM_COMMAND:
         if (LOWORD(wParam) == IDC_FIND_EDIT && HIWORD(wParam) == EN_CHANGE) {
+            // No live search in regex mode: every prefix of a pattern is itself
+            // a pattern, and mujs would happily run "(a+" ... "(a+)+" one
+            // keystroke at a time, the last of which can take exponential time
+            // with nothing able to abort it. The query waits for Enter, and the
+            // counter keeps showing the previous one's result meanwhile -
+            // deliberately, so nothing suggests a search has run.
+            if (m_findOptions.regex) {
+                KillTimer(m_hwnd, kFindDebounceTimer); // one may be armed from before the toggle
+                m_findRegexPending = true;
+                return 0;
+            }
             SetTimer(m_hwnd, kFindDebounceTimer, 350, nullptr); // debounce live search
             return 0;
         }
@@ -3573,12 +3605,18 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             ShowFindBar();
             return 0;
         case IDC_FIND_NEXT:
-            if (m_findTarget && m_findBar && IsWindowVisible(m_findBar))
-                m_findTarget->GotoMatch(+1);
-            return 0;
         case IDC_FIND_PREV:
-            if (m_findTarget && m_findBar && IsWindowVisible(m_findBar))
-                m_findTarget->GotoMatch(-1);
+            if (!m_findTarget || !m_findBar || !IsWindowVisible(m_findBar))
+                return 0;
+            // In regex mode this is the CONFIRMATION of a query nothing has run
+            // yet, so it executes instead of stepping: stepping through the
+            // previous pattern's matches would be answering a question the
+            // reader stopped asking. The step is the next Enter/F3, exactly as
+            // typing-then-F3 works when the search is live.
+            if (m_findRegexPending)
+                RestartFindSearch(/*force=*/true);
+            else
+                m_findTarget->GotoMatch(LOWORD(wParam) == IDC_FIND_NEXT ? +1 : -1);
             return 0;
         case IDC_FIND_CLOSE:
             CloseFindBar();
@@ -3590,11 +3628,17 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         case IDC_FIND_MATCH_CASE:
         case IDC_FIND_WHOLE_WORD:
+        case IDC_FIND_REGEX:
             if (LOWORD(wParam) == IDC_FIND_MATCH_CASE)
                 m_findOptions.matchCase = !m_findOptions.matchCase;
-            else
+            else if (LOWORD(wParam) == IDC_FIND_WHOLE_WORD)
                 m_findOptions.wholeWord = !m_findOptions.wholeWord;
+            else
+                m_findOptions.regex = !m_findOptions.regex;
             UpdateCommandUi();
+            // Changing an option IS a confirmation, in either direction: it
+            // runs the box's current text even in regex mode, which is also
+            // what makes leaving regex mode re-run the query as a literal.
             RestartFindSearch();
             return 0;
         case IDC_TOGGLE_OUTLINE: {
@@ -4123,7 +4167,8 @@ void MainWindow::CreateFindBar() {
             SendMessageW(bar, TB_ADDBUTTONSW, 1, reinterpret_cast<LPARAM>(&b));
         }
     };
-    const std::pair<int, WORD> optButtons[] = {{0, IDC_FIND_MATCH_CASE}, {1, IDC_FIND_WHOLE_WORD}};
+    const std::pair<int, WORD> optButtons[] = {
+        {0, IDC_FIND_MATCH_CASE}, {1, IDC_FIND_WHOLE_WORD}, {2, IDC_FIND_REGEX}};
     const std::pair<int, WORD> navButtons[] = {{0, IDC_FIND_PREV}, {1, IDC_FIND_NEXT}};
     const std::pair<int, WORD> closeButtons[] = {{2, IDC_FIND_CLOSE}};
     addButtons(m_findOptsBar, optButtons, BTNS_CHECK);
@@ -4309,7 +4354,7 @@ void MainWindow::LayoutFindBar() {
             return static_cast<int>(size.cx);
         return fallback;
     };
-    const int optsW = barWidth(m_findOptsBar, 2 * btn);
+    const int optsW = barWidth(m_findOptsBar, 3 * btn);
     const int navW = barWidth(m_findNavBar, 2 * btn);
     const int closeW = barWidth(m_findCloseBar, btn);
     // Each threshold is "everything from here rightwards, plus a usable edit".
@@ -4390,24 +4435,36 @@ void MainWindow::ShowFindBar() {
     SetFocus(m_findEdit);
     wchar_t text[256];
     GetWindowTextW(m_findEdit, text, ARRAYSIZE(text));
-    if (text[0] != L'\0')
+    // Showing the bar is NOT a confirmation, and in regex mode the box can hold
+    // a pattern nobody ever ran: Esc then Ctrl+F, or simply a second Ctrl+F
+    // while typing. Running it here would be the live search this mode exists
+    // to prevent, one keystroke short of the pattern that was meant. So the
+    // pending flag SURVIVES the close (RestartFindSearch is the only thing that
+    // clears it) and gates the re-issue below, which is otherwise wanted: it is
+    // what moves the highlights of an already-executed query to the new target.
+    const bool unconfirmed = m_findOptions.regex && m_findRegexPending;
+    if (text[0] != L'\0' && !unconfirmed)
         m_findTarget->StartSearch(text, m_findOptions); // retarget, previous query
 }
 
 // The needle lives in the edit box and the options in m_findOptions; either
 // changing means the same thing to the pane, which latches the PAIR.
-void MainWindow::RestartFindSearch() {
+void MainWindow::RestartFindSearch(bool force) {
     if (!m_findTarget || !m_findBar || !IsWindowVisible(m_findBar))
         return;
     wchar_t text[256];
     GetWindowTextW(m_findEdit, text, ARRAYSIZE(text));
-    m_findTarget->StartSearch(text, m_findOptions);
+    m_findRegexPending = false; // whatever is in the box has now been run
+    m_findTarget->StartSearch(text, m_findOptions, force);
 }
 
 void MainWindow::CloseFindBar() {
     if (m_findBar)
         ShowWindow(m_findBar, SW_HIDE);
     KillTimer(m_hwnd, kFindDebounceTimer);
+    // m_findRegexPending is deliberately NOT cleared: the edit box keeps its
+    // text across a close, so an unconfirmed pattern is still unconfirmed when
+    // the bar comes back (see ShowFindBar).
     if (m_findTarget) {
         m_findTarget->ClearSearch();
         SetFocus(m_findTarget->Hwnd());

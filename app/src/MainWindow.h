@@ -96,6 +96,10 @@ enum CommandId : WORD {
     // this id exists so Edit ▸ Copy can reach the same code.
     IDC_COPY = 1080,
     IDC_RESET_TOOLBAR_LAYOUT = 1081, // back to the BuildRebar default rows
+    // The third find-bar toggle. Appended here rather than beside the other two:
+    // 1081 was taken while this feature was being built, and ids are never
+    // renumbered (the E2E scripts and the accelerator table both name them).
+    IDC_FIND_REGEX = 1082,
     // Control ids live in a separate >= 2000 space so they can never collide
     // with command dispatch: 2001 page box, 2100+ Options dialog, 2201 goto
     // dialog, 2300+ the menu-band toolbar and its buttons (MenuBand.h), 2400+
@@ -218,7 +222,10 @@ private:
     void ShowFindBar();
     void CloseFindBar();
     void LayoutFindBar();
-    void RestartFindSearch(); // re-issues the current query with m_findOptions
+    // Re-issues the current query with m_findOptions. force runs it even when
+    // the pane's (needle, options) latch would call it unchanged: that is what
+    // Enter does in regex mode, where typing never executes anything.
+    void RestartFindSearch(bool force = false);
     void UpdateUiFont();
     void UpdateOutlineSidebar(PaneWindow* pane);
     static bool IsSystemDark();
@@ -381,7 +388,7 @@ private:
     HWND m_findBar = nullptr;
     HWND m_findEdit = nullptr;
     HWND m_findCount = nullptr;
-    HWND m_findOptsBar = nullptr;  // match case + whole word (BTNS_CHECK)
+    HWND m_findOptsBar = nullptr;  // match case + whole word + regex (BTNS_CHECK)
     HWND m_findNavBar = nullptr;   // previous + next match
     HWND m_findCloseBar = nullptr; // close; its own toolbar because the ladder
                                    // sheds the direction buttons before it
@@ -389,6 +396,14 @@ private:
     HIMAGELIST m_findGlyphIcons = nullptr; // MDL2, shared by the nav and close bars
     UINT m_findBarDpi = 0;        // DPI both find-bar imagelists were built at
     Document::SearchOptions m_findOptions; // persisted in [find]; global, not per pane
+    // Regex mode runs on Enter, never while typing: a half-typed pattern is
+    // both meaningless and, with mujs behind it, potentially expensive. This
+    // records that the box holds a query nobody has executed yet, so Enter (and
+    // F3) run it instead of stepping through the PREVIOUS query's matches.
+    // Cleared ONLY by RestartFindSearch, i.e. by an actual run: the edit box
+    // keeps its text when the bar is closed, so an unconfirmed pattern must
+    // still read as unconfirmed when the bar is shown again.
+    bool m_findRegexPending = false;
     HFONT m_uiFont = nullptr;
     PaneWindow* m_findTarget = nullptr;
 
