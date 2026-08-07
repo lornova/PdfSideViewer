@@ -26,6 +26,23 @@
     /* menu bar */                                                                                 \
     X(MenuFile, L"&File", L"&File", L"&Datei", L"&Fichier", L"&Fájl", L"&Файл", L"&Fișier",        \
       L"&Ficheiro", L"&Αρχείο", L"&Archivo", L"&Plik", L"&Bestand", L"&Soubor", L"&Arkiv")         \
+    /* Mnemonics: N is already taken in the File popup by half these languages                     \
+       (Ce&ntre, &Nedávné soubory), so each one uses the first letter of "new                      \
+       window" that its own File entries left free */                                              \
+    X(MenuNewWindow, L"Ne&w Window\tCtrl+N", L"Nuova &finestra\tCtrl+N",                           \
+      L"&Neues Fenster\tStrg+N", L"&Nouvelle fenêtre\tCtrl+N", L"Új &ablak\tCtrl+N",               \
+      L"&Нове вікно\tCtrl+N", L"&Fereastră nouă\tCtrl+N", L"Nova &janela\tCtrl+N",                 \
+      L"Νέο πα&ράθυρο\tCtrl+N", L"N&ueva ventana\tCtrl+N", L"No&we okno\tCtrl+N",                  \
+      L"&Nieuw venster\tCtrl+N", L"Nové &okno\tCtrl+N", L"&Nytt fönster\tCtrl+N")                  \
+    X(NewWindowFailed, L"Could not open a new window",                                             \
+      L"Impossibile aprire una nuova finestra",                                                    \
+      L"Neues Fenster konnte nicht geöffnet werden",                                               \
+      L"Impossible d'ouvrir une nouvelle fenêtre", L"Nem sikerült új ablakot nyitni",              \
+      L"Не вдалося відкрити нове вікно", L"Nu s-a putut deschide o fereastră nouă",                \
+      L"Não foi possível abrir uma nova janela",                                                   \
+      L"Δεν ήταν δυνατό το άνοιγμα νέου παραθύρου", L"No se pudo abrir una ventana nueva",         \
+      L"Nie można otworzyć nowego okna", L"Kan geen nieuw venster openen",                         \
+      L"Nepodařilo se otevřít nové okno", L"Det gick inte att öppna ett nytt fönster")             \
     X(MenuOpenLeft, L"Open &Left...\tCtrl+O", L"Apri a &sinistra...\tCtrl+O",                      \
       L"&Links öffnen...\tStrg+O", L"Ouvrir à &gauche...\tCtrl+O",                                 \
       L"Megnyitás &balra...\tCtrl+O", L"Відкрити &ліворуч...\tCtrl+O",                             \
@@ -297,20 +314,24 @@
       L"Sincronización del &zoom\tCtrl+F7", L"Synchronizacja po&większenia\tCtrl+F7",              \
       L"&Zoomsynchronisatie\tCtrl+F7", L"Synchronizace při&blížení\tCtrl+F7",                      \
       L"&Zoomsynk\tCtrl+F7")                                                                       \
-    X(MenuAddSyncPoint, L"&Add Sync Point Here\tShift+F7",                                         \
-      L"&Aggiungi punto di sync qui\tShift+F7",                                                    \
-      L"Sync-Punkt hier hinzu&fügen\tUmschalt+F7",                                                 \
-      L"&Ajouter un point de sync ici\tMaj+F7",                                                    \
-      L"Szinkronpont &hozzáadása itt\tShift+F7",                                                   \
-      L"&Додати точку синхронізації тут\tShift+F7",                                                \
-      L"&Adaugă punct de sincronizare aici\tShift+F7",                                             \
-      L"&Adicionar ponto de sincronização aqui\tShift+F7",                                         \
-      L"&Προσθήκη σημείου συγχρονισμού εδώ\tShift+F7",                                             \
-      L"&Añadir punto de sincronización aquí\tShift+F7",                                           \
-      L"&Dodaj punkt synchronizacji tutaj\tShift+F7",                                              \
-      L"Synchronisatiepunt &hier toevoegen\tShift+F7",                                             \
-      L"Přidat synchronizační bod &sem\tShift+F7",                                                 \
-      L"Lägg till synkpunkt &här\tShift+F7")                                                       \
+    /* Add AND remove: the command toggles the point on the pages in view, and                     \
+       the item is checked while one is there. Every mnemonic is the letter the                    \
+       add-only wording already owned in that language, so the Sync popup keeps                    \
+       its unique set */                                                                           \
+    X(MenuSyncPointHere, L"&Add/Remove Sync Point Here\tShift+F7",                                 \
+      L"&Aggiungi/togli punto di sync qui\tShift+F7",                                              \
+      L"Sync-Punkt hier setzen/ent&fernen\tUmschalt+F7",                                           \
+      L"&Ajouter/retirer un point de sync ici\tMaj+F7",                                            \
+      L"Szinkronpont &hozzáadása/eltávolítása itt\tShift+F7",                                      \
+      L"&Додати/вилучити точку синхронізації тут\tShift+F7",                                       \
+      L"&Adaugă/elimină punct de sincronizare aici\tShift+F7",                                     \
+      L"&Adicionar/remover ponto de sincronização aqui\tShift+F7",                                 \
+      L"&Προσθήκη/αφαίρεση σημείου συγχρονισμού εδώ\tShift+F7",                                    \
+      L"&Añadir/quitar punto de sincronización aquí\tShift+F7",                                    \
+      L"&Dodaj/usuń punkt synchronizacji tutaj\tShift+F7",                                         \
+      L"Synchronisatiepunt &hier toevoegen/verwijderen\tShift+F7",                                 \
+      L"Přidat/odebrat synchronizační bod &sem\tShift+F7",                                         \
+      L"Lägg till/ta bort synkpunkt &här\tShift+F7")                                               \
     X(MenuSyncFromBookmarks, L"Sync Points from &Bookmarks", L"Punti di sync dai se&gnalibri",     \
       L"Sync-Punkte aus &Lesezeichen", L"Points de sync depuis les &signets",                      \
       L"Szinkronpontok a &könyvjelzőkből", L"Точки синхронізації із &закладок",                    \
@@ -489,20 +510,20 @@
       L"Ecran complet (F11)", L"Ecrã inteiro (F11)", L"Πλήρης οθόνη (F11)",                        \
       L"Pantalla completa (F11)", L"Pełny ekran (F11)", L"Volledig scherm (F11)",                  \
       L"Celá obrazovka (F11)", L"Helskärm (F11)")                                                  \
-    X(TipAddSyncPoint, L"Add sync point here (Shift+F7)",                                          \
-      L"Aggiungi punto di sync qui (Shift+F7)",                                                    \
-      L"Sync-Punkt hier hinzufügen (Umschalt+F7)",                                                 \
-      L"Ajouter un point de sync ici (Maj+F7)",                                                    \
-      L"Szinkronpont hozzáadása itt (Shift+F7)",                                                   \
-      L"Додати точку синхронізації тут (Shift+F7)",                                                \
-      L"Adaugă punct de sincronizare aici (Shift+F7)",                                             \
-      L"Adicionar ponto de sincronização aqui (Shift+F7)",                                         \
-      L"Προσθήκη σημείου συγχρονισμού εδώ (Shift+F7)",                                             \
-      L"Añadir punto de sincronización aquí (Shift+F7)",                                           \
-      L"Dodaj punkt synchronizacji tutaj (Shift+F7)",                                              \
-      L"Synchronisatiepunt hier toevoegen (Shift+F7)",                                             \
-      L"Přidat synchronizační bod sem (Shift+F7)",                                                 \
-      L"Lägg till synkpunkt här (Shift+F7)")                                                       \
+    X(TipSyncPointHere, L"Add or remove a sync point here (Shift+F7)",                             \
+      L"Aggiungi o togli un punto di sync qui (Shift+F7)",                                         \
+      L"Sync-Punkt hier setzen oder entfernen (Umschalt+F7)",                                      \
+      L"Ajouter ou retirer un point de sync ici (Maj+F7)",                                         \
+      L"Szinkronpont hozzáadása vagy eltávolítása itt (Shift+F7)",                                 \
+      L"Додати або вилучити точку синхронізації тут (Shift+F7)",                                   \
+      L"Adaugă sau elimină un punct de sincronizare aici (Shift+F7)",                              \
+      L"Adicionar ou remover um ponto de sincronização aqui (Shift+F7)",                           \
+      L"Προσθήκη ή αφαίρεση σημείου συγχρονισμού εδώ (Shift+F7)",                                  \
+      L"Añadir o quitar un punto de sincronización aquí (Shift+F7)",                               \
+      L"Dodaj lub usuń punkt synchronizacji tutaj (Shift+F7)",                                     \
+      L"Synchronisatiepunt hier toevoegen of verwijderen (Shift+F7)",                              \
+      L"Přidat nebo odebrat synchronizační bod zde (Shift+F7)",                                    \
+      L"Lägg till eller ta bort synkpunkt här (Shift+F7)")                                         \
     X(TipSyncFromBookmarks, L"Sync points from bookmarks", L"Punti di sync dai segnalibri",        \
       L"Sync-Punkte aus Lesezeichen", L"Points de sync depuis les signets",                        \
       L"Szinkronpontok a könyvjelzőkből", L"Точки синхронізації із закладок",                      \
@@ -609,9 +630,11 @@
     X(LblFullScreen, L"Full screen", L"Schermo int.", L"Vollbild", L"Plein écran",                 \
       L"Teljes kép.", L"Весь екран", L"Ecran compl.", L"Ecrã inteiro", L"Πλήρης οθ.",              \
       L"Pant. compl.", L"Pełny ekran", L"Volledig sch.", L"Celá obraz.", L"Helskärm")              \
-    X(LblAddSyncPoint, L"Add point", L"Agg. punto", L"Punkt hinzuf.", L"Ajouter point",            \
-      L"Pont hozzáad.", L"Дод. точку", L"Adaugă punct", L"Adic. ponto", L"Προσθ. σημείου",         \
-      L"Añadir punto", L"Dodaj punkt", L"Punt toev.", L"Přidat bod", L"Ny punkt")                  \
+    /* A noun, like the check buttons around it: the label names the STATE the                     \
+       pressed button reports, not the action of one of its two directions */                      \
+    X(LblSyncPoint, L"Sync point", L"Punto sync", L"Sync-Punkt", L"Point sync",                    \
+      L"Szinkronpont", L"Точка синх.", L"Punct sinc.", L"Ponto sinc.", L"Σημείο συγχρ.",           \
+      L"Punto sinc.", L"Punkt synch.", L"Syncpunt", L"Synchr. bod", L"Synkpunkt")                  \
     X(LblSyncFromBookmarks, L"Bookmarks", L"Da segnalibri", L"Aus Lesezeichen",                    \
       L"Depuis signets", L"Könyvjelzőkből", L"Із закладок", L"Din marcaje",                        \
       L"Dos marcadores", L"Από σελιδοδ.", L"De marcadores", L"Z zakładek",                         \
@@ -625,6 +648,15 @@
     X(LblAlignmentGaps, L"Gaps", L"Spazi", L"Lücken", L"Espaces", L"Hézagok", L"Проміжки",         \
       L"Spații", L"Espaços", L"Κενά", L"Espacios", L"Odstępy", L"Ruimten", L"Mezery",              \
       L"Mellanrum")                                                                                \
+    /* nl: "vensters" would be 2/3 WINDOWS - the pane is a "deelvenster" here                      \
+       and in every other Dutch string, abbreviated only to keep the button                        \
+       narrow (the labels set BTNS_AUTOSIZE widths) */                                             \
+    X(LblPanesTwo, L"2 panes", L"2 pannelli", L"2 Bereiche", L"2 panneaux", L"2 panel",            \
+      L"2 панелі", L"2 panouri", L"2 painéis", L"2 πλαίσια", L"2 paneles", L"2 panele",            \
+      L"2 deelvenst.", L"2 panely", L"2 paneler")                                                  \
+    X(LblPanesThree, L"3 panes", L"3 pannelli", L"3 Bereiche", L"3 panneaux", L"3 panel",          \
+      L"3 панелі", L"3 panouri", L"3 painéis", L"3 πλαίσια", L"3 paneles", L"3 panele",            \
+      L"3 deelvenst.", L"3 panely", L"3 paneler")                                                  \
     X(LblSwapPanes, L"Swap", L"Scambia", L"Tauschen", L"Échanger", L"Csere", L"Обміняти",          \
       L"Inversează", L"Trocar", L"Εναλλαγή", L"Intercambiar", L"Zamień", L"Wisselen",              \
       L"Prohodit", L"Växla")                                                                       \
@@ -959,10 +991,12 @@
     X(OptDefPanes, L"Panes:", L"Pannelli:", L"Bereiche:", L"Panneaux :", L"Panelek:",              \
       L"Панелі:", L"Panouri:", L"Painéis:", L"Πλαίσια:", L"Paneles:", L"Panele:",                  \
       L"Deelvensters:", L"Panely:", L"Paneler:")                                                   \
-    X(OptPanesTwo, L"Two panes", L"Due pannelli", L"Zwei Bereiche", L"Deux panneaux",              \
+    /* shared with the toolbar pane-count buttons' tooltips: same two phrases,                     \
+       and one copy is what keeps them from drifting apart in 14 languages */                      \
+    X(PanesTwo, L"Two panes", L"Due pannelli", L"Zwei Bereiche", L"Deux panneaux",                 \
       L"Két panel", L"Дві панелі", L"Două panouri", L"Dois painéis", L"Δύο πλαίσια",               \
       L"Dos paneles", L"Dwa panele", L"Twee deelvensters", L"Dva panely", L"Två paneler")          \
-    X(OptPanesThree, L"Three panes", L"Tre pannelli", L"Drei Bereiche", L"Trois panneaux",         \
+    X(PanesThree, L"Three panes", L"Tre pannelli", L"Drei Bereiche", L"Trois panneaux",            \
       L"Három panel", L"Три панелі", L"Trei panouri", L"Três painéis", L"Τρία πλαίσια",            \
       L"Tres paneles", L"Trzy panele", L"Drie deelvensters", L"Tři panely", L"Tre paneler")        \
     X(OptDefScrollMode, L"Scrolling:", L"Scorrimento:", L"Bildlauf:", L"Défilement :",             \

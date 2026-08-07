@@ -100,6 +100,7 @@ enum CommandId : WORD {
     // 1081 was taken while this feature was being built, and ids are never
     // renumbered (the E2E scripts and the accelerator table both name them).
     IDC_FIND_REGEX = 1082,
+    IDC_NEW_WINDOW = 1083, // spawns a second PROCESS (SpawnNewWindow), Ctrl+N
     // Control ids live in a separate >= 2000 space so they can never collide
     // with command dispatch: 2001 page box, 2100+ Options dialog, 2201 goto
     // dialog, 2300+ the menu-band toolbar and its buttons (MenuBand.h), 2400+
@@ -127,8 +128,12 @@ public:
     ~MainWindow();
 
     // files is indexed by PaneSlot: an empty entry leaves that pane empty.
+    // startEmpty (-new-window) suppresses the session restore for THIS launch
+    // only, without touching the persisted preference that SaveSession writes
+    // back: the documents, the sync locks and the saved window placement are
+    // all skipped, while chrome and splitters still come from the settings.
     bool Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> files,
-                std::optional<ForwardSearchRequest> forward = std::nullopt);
+                std::optional<ForwardSearchRequest> forward, bool startEmpty);
     HWND Hwnd() const { return m_hwnd; }
 
     // For the message loop: Tab inside the find bar must cycle its controls
@@ -161,7 +166,13 @@ private:
     void SetOutlineWidthFromX(int x);
     void FitOutlineToContent();
     void OpenDocumentDialog(int slot);
+    void SpawnNewWindow(); // File ▸ New Window: another PROCESS, started empty
     void UpdateTheme();
+    // Re-probes high contrast and pushes it to the panes, which draw their whole
+    // canvas by hand. Runs on WM_SYSCOLORCHANGE and on WM_THEMECHANGED: the
+    // second is what the guidance names for CACHED colors, and switching
+    // between two HC themes need not change the on/off answer.
+    void UpdateHighContrast();
     void UpdateTitle();
     PaneWindow* FocusedPane() const;
     HMENU BuildMenuBar();
@@ -201,21 +212,35 @@ private:
     MruSession CurrentSession(std::vector<int>* slots = nullptr) const;
     void CreateToolbar(HINSTANCE hinst);
     void RebuildToolbarIcons();
+    // WM_SYSCOLORCHANGE: re-bake every imagelist that carries a system colour
+    // and forward the message to the common controls, as their contract requires.
+    void RebuildSystemColorAssets();
     void RebuildToolbarInBand();       // recreate the toolbar inside its rebar band
     void SetToolbarTextMode(int mode); // 0 none, 1 below, 2 selective right (IE)
     void EnsureFsBar();                // floating full-screen mini toolbar (lazy)
     void UpdateCommandUi();
+    // The one toolbar state that follows the SCROLL position (see m_atSyncPoint):
+    // re-evaluated per scroll tick, written only when it flips.
+    void UpdateSyncPointButton();
     void UpdateStatusBar();
     void ShowAboutBox();
     void ToggleFullScreen();
     void SwitchLanguage(Lang lang);
     void ApplyScrollMode(PaneWindow::ScrollMode mode);
     void SwapPanes(bool reverse); // rotation of the active slots; reverse = Shift+F8
+    // The pane already holding this (normalized) path, nullptr if none. Shared
+    // by the forward-search routing and by the multi-window claim probe.
+    PaneWindow* PaneShowingDocument(const std::wstring& path) const;
     void RouteForwardSearch(ForwardSearchRequest req);
     void LaunchInverseSearch(const SyncTexIndex::InverseHit& hit);
     void ShowStatusMessage(StrId id);
     void ShowStatusMessage(std::wstring text);
-    void ApplySession(const AppSettings& session);
+    // restore = the EFFECTIVE session restore for this launch (the preference
+    // ANDed with !startEmpty); startEmpty additionally suppresses the saved
+    // placement, which a restore-less launch would otherwise still apply - and
+    // a new window landing pixel-exactly on its parent reads as "the session
+    // just vanished".
+    void ApplySession(const AppSettings& session, bool restore, bool startEmpty);
     void SaveSession() const;
     void CreateFindBar();
     void EnsureFindBarToolbars(); // (re)builds both imagelists at the current DPI
@@ -229,6 +254,9 @@ private:
     void UpdateUiFont();
     void UpdateOutlineSidebar(PaneWindow* pane);
     static bool IsSystemDark();
+    // SPI_GETHIGHCONTRAST is the ONLY supported probe (no registry key, and the
+    // "is COLOR_WINDOW dark" guess is wrong for the HC-white themes).
+    static bool IsHighContrast();
 
     // Panes live in FIXED slots (PaneSlots.h); only the active ones exist.
     // Every "do it to all panes" walk is `for slot ... if (SlotOn(slot))`,
@@ -329,6 +357,15 @@ private:
     bool m_showHeader = true;        // Options: per-pane header strip ([window] header)
     bool m_headerShowPath = false;   // Options: header shows the path ([window] headerPath)
     uint64_t m_gapsEpoch = 0;        // bumped per ApplyAlignmentGaps; stamps both panes
+    // Cached answer of SyncController::PointIndexHere() >= 0, as 0/1 (-1 =
+    // unknown). Every other checked state depends on zoom mode, focus or a
+    // command, so UpdateCommandUi is deliberately skipped on scroll ticks; this
+    // one changes as the panes move, and re-pressing a button per wheel detent
+    // repaints it for nothing.
+    int m_atSyncPoint = -1;
+    // Windows spawned from THIS one: each is offset one more cascade step, so a
+    // second New Window does not land on the first.
+    unsigned m_spawnCount = 0;
     // Sync map parked across a pane swap: permuted per point (the swap is a
     // rotation of the active slots, and since the coordinates co-increase the
     // order survives), captured BEFORE the reopen storm (each swapped pane
@@ -373,6 +410,7 @@ private:
         bool zoomSync = true;
     } m_defaults;
     bool m_dark = false;
+    bool m_highContrast = false;
     bool m_destroying = false; // suppress focus forwarding during teardown
     bool m_startMaximized = false;
     // Last known good pane sessions (DPI-rescaled at load): SaveSession falls

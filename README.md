@@ -26,8 +26,10 @@ executable that starts instantly.
   the other shows empty **alignment gaps**, so both panes scroll (and page-flip) together 1:1
   (Sync ▸ Show Alignment Gaps, on by default; toggled off, the shorter side waits at the end
   of its section instead). Sync-point pages are flagged with an **anchor mark** next to the
-  page and **ticks** along the right edge (solid = manual, faded = generated). Add a point at
-  the current alignment (Shift+F7), review and remove them in a dialog, clear them all
+  page and **ticks** along the right edge (solid = manual, faded = generated). Shift+F7 adds a
+  point at the current alignment and removes it again when the pages in view already carry
+  one - the toolbar button shows which of the two it will do, staying pressed while you are on
+  a point. You can also review and remove points in a dialog, clear them all
   (Ctrl+Shift+F7), or **generate them from bookmarks**: numberings present in both documents
   become sync points ("1.2", "2.2.1", "A.1", or with a verbal prefix in Italian, English,
   German, French, Hungarian, Ukrainian, Romanian, Portuguese, Greek, Spanish, Polish,
@@ -87,12 +89,15 @@ executable that starts instantly.
   default), "Selective text on right" (labels beside the primary buttons only) or "No text
   labels". By default the bars are locked with the menu on its own row and the labeled
   toolbar plus page box on a second row; "Reset the Toolbar Layout" (next to the lock in
-  both menus) returns to that arrangement. The toolbar covers the whole Sync menu too (add
-  point, from bookmarks, points list, clear, alignment gaps, swap). The arrangement, the
-  lock state and the text option are remembered.
+  both menus) returns to that arrangement. In full screen the bars are locked to one row, so
+  the right-click menu offers only the text options there. The toolbar covers the whole Sync
+  menu too (sync point, from bookmarks, points list, clear, alignment gaps, swap) and the
+  two/three pane choice. The arrangement, the lock state and the text option are remembered.
 - **Options dialog**: reopen the last session or start empty, defaults for new documents
   (scroll mode, zoom, sync locks), sync-point anchor marks and scrollbar ticks on/off,
-  the pane header (off, or showing the file name or the full path),
+  the pane header (off, or showing the file name or the full path; hovering the strip shows the
+  full path when the strip is showing the file name, or a path it had to shorten, and
+  double-clicking it opens another document in that pane),
   keeping the toolbar and/or the status bar visible in full screen, wheel-scroll lines
   override, the SyncTeX inverse-search command, and the Explorer context-menu integration.
   When full screen hides the toolbar, a small floating button in the top-right corner exits
@@ -108,8 +113,9 @@ executable that starts instantly.
   and Shift+F8 rotates the other way. Sync points survive either way, permuted along with the
   documents.
 - **Three-pane mode** (optional; the app stays two-pane by default): View ▸ Three Panes
-  adds a third document between the other two, and File ▸ Open Centre (Ctrl+Shift+M) switches to it
-  on the spot. Each pane keeps its own splitter, page/zoom cell in the status bar and view state;
+  (also a pair of toolbar buttons) adds a third document between the other two, and
+  File ▸ Open Centre (Ctrl+Shift+M) switches to it on the spot. Each pane keeps its own
+  splitter, page/zoom cell in the status bar and view state;
   going back to two panes closes the centre document and remembers it for the next switch. The
   app stays two-pane unless you ask otherwise: a launch that does not reopen the last session
   starts from the pane count chosen in Options ▸ Defaults, which is two. Sync
@@ -117,7 +123,9 @@ executable that starts instantly.
   document shares, so a third document can only narrow the map, never distort it. Made for
   comparing three editions or translations of the same text side by side.
 - Drag & drop (drop two or three files at once to fill the panes; three of them turn the
-  three-pane mode on), double-click an empty pane to open a file there, close a document with
+  three-pane mode on), double-click an empty pane - or the header strip of a full one - to open
+  a file there (the Open dialog starts in the folder of the document that pane already holds),
+  close a document with
   Ctrl+W (or the whole session with File ▸ Close Session, which also returns to the default pane
   count), command line
   (`PdfSideViewer.exe left.pdf right.pdf [centre.pdf]` — Beyond Compare's argument order, so the
@@ -126,17 +134,27 @@ executable that starts instantly.
 - **Recent Sessions** (File menu) remembers the documents that were open together, two or three of
   them, and reopening one brings its layout back with it. Each remembered session also keeps its
   manual sync points.
+- **High contrast**: with a high-contrast theme active, the whole interface follows the system
+  palette, including the parts the app draws itself (pane header strips, sync-point anchors and
+  ticks, alignment gaps, text selection and search highlights). The page itself stays as the
+  document defines it; inverting the paper is a separate feature, not planned before 1.0.
+- **New Window** (File menu, Ctrl+N) opens a second viewer, empty and offset from the first one,
+  for comparing two unrelated pairs at once. It keeps your settings but not your documents, and
+  a SyncTeX forward search goes to the window that is already showing that PDF rather than to
+  whichever one happens to be on top. Both windows write their settings when they close, so the
+  one closed last has the final say on the recent lists and the sync-point memory.
 
 ## Keyboard
 
 | Key | Action |
 | --- | --- |
+| Ctrl+N | New window (empty) |
 | Ctrl+O / Ctrl+Shift+O | Open document in the left / right pane |
 | Ctrl+Shift+M | Open document in the centre pane (switches to three panes) |
 | Ctrl+W | Close the focused pane's document |
 | Tab | Switch pane (cycles through all of them) |
 | F7 / Ctrl+F7 | Toggle scroll sync / zoom sync |
-| Shift+F7 / Ctrl+Shift+F7 | Add a sync point at the current alignment / clear sync points |
+| Shift+F7 / Ctrl+Shift+F7 | Add or remove a sync point here / clear sync points |
 | Alt + scroll | Adjust one pane while synced (re-anchors; with sync points the tweak is transient) |
 | Ctrl+F, F3, Shift+F3 | Find, next match, previous match (Esc closes the find bar) |
 | Enter, F3 (regex mode) | The first one runs the pattern, the next one steps through the matches |

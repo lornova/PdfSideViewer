@@ -6,6 +6,7 @@
 #include <commctrl.h>
 #include <shellapi.h>
 
+#include <algorithm>
 #include <vector>
 
 namespace {
@@ -18,7 +19,7 @@ std::wstring Absolutize(PCWSTR path) {
 
 // One send for every XML IPC payload (util/IpcXml). An empty payload (builder
 // failure) reads as unhandled, so the caller's cold-start fallback kicks in.
-bool SendIpcPayload(HWND target, const std::vector<BYTE>& payload) {
+bool SendIpcPayload(HWND target, const std::vector<BYTE>& payload, DWORD timeoutMs = 5000) {
     if (payload.empty())
         return false;
     COPYDATASTRUCT cds{};
@@ -34,7 +35,7 @@ bool SendIpcPayload(HWND target, const std::vector<BYTE>& payload) {
 
     DWORD_PTR handled = 0;
     return SendMessageTimeoutW(target, WM_COPYDATA, 0, reinterpret_cast<LPARAM>(&cds),
-                               SMTO_ABORTIFHUNG, 5000, &handled) != 0 &&
+                               SMTO_ABORTIFHUNG, timeoutMs, &handled) != 0 &&
            handled != 0;
 }
 
@@ -42,6 +43,38 @@ bool SendIpcPayload(HWND target, const std::vector<BYTE>& payload) {
 // caller cold-starts on failure, so the request always lands somewhere.
 bool SendForwardSearch(HWND target, const ForwardSearchRequest& req) {
     return SendIpcPayload(target, IpcXml::BuildForward(req.tex, req.line, req.pdf));
+}
+
+// Offer the forward search to every window in z-order, taken only by one that
+// ALREADY shows that pdf. With a single window this changes nothing: it either
+// holds the document (and would have picked the same pane anyway) or declines
+// invisibly and the caller's ordinary send retargets it exactly as before.
+// With several, it stops a build from replacing the document of whichever
+// window happened to be on top - which, since the delivery raises that window,
+// would then keep winning every following build.
+// The per-send timeout is short (this is a query) and the whole round is capped
+// as well: a per-window timeout alone multiplies, and 32 wedged windows would
+// hold the editor for over half a minute before the ordinary handoff had even
+// started. Past the budget the round gives up and the normal path runs, which
+// is no worse than not having probed at all. A build older than forwardprobe
+// rejects the unknown element and is simply skipped here.
+bool ClaimForwardSearch(const ForwardSearchRequest& req) {
+    constexpr int kMaxWindows = 32;       // a runaway enumeration is not worth serving
+    constexpr ULONGLONG kBudgetMs = 2000; // total, across every window probed
+    const ULONGLONG deadline = GetTickCount64() + kBudgetMs;
+    HWND w = nullptr;
+    for (int i = 0; i < kMaxWindows; ++i) {
+        w = FindWindowExW(nullptr, w, MainWindow::kClassName, nullptr);
+        if (!w)
+            return false;
+        const ULONGLONG now = GetTickCount64();
+        if (now >= deadline)
+            return false;
+        const DWORD left = static_cast<DWORD>(std::min<ULONGLONG>(1000, deadline - now));
+        if (SendIpcPayload(w, IpcXml::BuildForwardProbe(req.tex, req.line, req.pdf), left))
+            return true;
+    }
+    return false;
 }
 
 // Hand an Explorer-verb open ("-open-left/right/center FILE") to the running
@@ -79,6 +112,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         constexpr int kCliSlotOrder[] = {kSlotLeft, kSlotRight, kSlotCenter};
         PerPane<std::wstring> files;
         std::optional<ForwardSearchRequest> forward;
+        bool startEmpty = false; // -new-window, see the branch below
         int argc = 0;
         if (LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
             std::wstring first = argc > 1 ? argv[1] : L"";
@@ -133,6 +167,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                     req.line = _wtoi(argv[3]);
                     req.pdf = Absolutize(argv[4]);
                     if (req.line >= 1 && !req.tex.empty() && !req.pdf.empty()) {
+                        // First the window that already shows this pdf, then
+                        // (nobody claimed it) the plain handoff to the topmost.
+                        if (ClaimForwardSearch(req)) {
+                            LocalFree(argv);
+                            return 0;
+                        }
                         if (HWND running = FindWindowW(MainWindow::kClassName, nullptr)) {
                             if (SendForwardSearch(running, req)) {
                                 LocalFree(argv);
@@ -149,6 +189,13 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
                         forward = std::move(req);
                     }
                 }
+            } else if (lstrcmpiW(first.c_str(), L"new-window") == 0) {
+                // File > New Window spawns us with this and nothing else. It is
+                // a LAUNCH-scoped suppression of the session restore, never the
+                // persisted preference: a second window must not come up on the
+                // documents the first one is already showing. No operands, so
+                // the positional branch below is skipped entirely.
+                startEmpty = true;
             } else {
                 for (int i = 0; i < static_cast<int>(std::size(kCliSlotOrder)); ++i)
                     if (argc > i + 1)
@@ -158,7 +205,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
         }
 
         MainWindow window;
-        if (!window.Create(hInstance, nCmdShow, std::move(files), std::move(forward)))
+        if (!window.Create(hInstance, nCmdShow, std::move(files), std::move(forward), startEmpty))
             return 1;
 
         const ACCEL accels[] = {
@@ -168,6 +215,7 @@ int APIENTRY wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE, _In_ LPWSTR,
             // languages several layouts type letters with it (Polish AltGr+O
             // = o-acute) - the accelerator would eat ordinary text input.
             {FCONTROL | FSHIFT | FVIRTKEY, 'M', IDC_OPEN_CENTER},
+            {FCONTROL | FVIRTKEY, 'N', IDC_NEW_WINDOW},
             {FCONTROL | FVIRTKEY, 'W', IDC_CLOSE_DOC},
             {FVIRTKEY, VK_TAB, IDC_FOCUS_NEXT_PANE},
             {FVIRTKEY, VK_F7, IDC_TOGGLE_SCROLL_SYNC},

@@ -47,6 +47,10 @@ public:
     // outline/status like any other document-state change.
     void CloseDocument();
     void SetDarkMode(bool dark);
+    // High contrast: every chrome color is then taken from the system palette
+    // instead of the built-in one (see Themed). Pushed by MainWindow, which owns
+    // the SPI_GETHIGHCONTRAST probe.
+    void SetHighContrast(bool on);
     // Live language switch: the other placeholder texts are composed at paint
     // time (so the repaint alone refreshes them), but the empty-state hint is
     // captured at construction.
@@ -153,6 +157,7 @@ public:
         m_showHeader = show;
         m_headerShowPath = showPath;
         HideAnchorTip();
+        HideHeaderTip(); // the strip may be gone, or now say something else
         RelayoutDocument();
         Invalidate();
     }
@@ -297,7 +302,21 @@ private:
     void DrawPlaceholder(ID2D1SolidColorBrush* brush);
     void DrawDocument(ID2D1SolidColorBrush* brush);
     void DrawPaneHeader(ID2D1SolidColorBrush* brush); // file name/path strip + active cue
+    // What the strip currently DRAWS (file name, or the width-compacted path).
+    // The hover tooltip compares it with m_docPath to decide whether it has
+    // anything to add, so both must come from here.
+    std::wstring HeaderStripText() const;
     void EnsureTextFormat();
+
+    // GetSysColor (a BGR COLORREF) as a D2D color. The canvas is drawn by hand,
+    // so there is no theme PART to ask uxtheme for: the documented fallback for
+    // an owner-drawn surface is exactly this.
+    static D2D1_COLOR_F SysColor(int index, float alpha = 1.0f);
+    // One chrome color: the system metric in high contrast, our own palette
+    // otherwise. NOT the system metric unconditionally - the classic colors do
+    // not follow the light/dark personalization, so they would flatten the dark
+    // theme back to Windows 95 grey.
+    D2D1_COLOR_F Themed(int sysIndex, UINT32 dark, UINT32 light, float alpha = 1.0f) const;
 
     // Document events (posted by the worker)
     void OnDocOpened(std::unique_ptr<Document::OpenResult> result);
@@ -332,6 +351,12 @@ private:
     void EnsureAnchorTip();
     void UpdateAnchorTip(POINT client); // hover tooltip: the point's numbering
     void HideAnchorTip();
+    void EnsureHeaderTip();
+    // Two halves on purpose: Update only ARMS the hover (the strip is too easy
+    // to cross for a tip on contact), Show runs on WM_MOUSEHOVER.
+    void UpdateHeaderTip(POINT client);
+    void ShowHeaderTip(POINT client); // hover tooltip: the document's full path
+    void HideHeaderTip();
     void NotifySearchStatus();
     void ScrollToMatch(const Document::SearchMatch& match);
 
@@ -352,6 +377,18 @@ private:
         return HeaderShown()
                    ? static_cast<float>(static_cast<int>(DipToPx(kHeaderHeightDip) + 0.5f))
                    : 0.0f;
+    }
+    // The strip is an opaque band painted OVER the top of the content, and the
+    // hit tests do not know that: ContentOrigin shifts by HeaderPx, so with the
+    // document scrolled a client point inside the strip maps to real content
+    // hidden underneath it (selecting invisible text, I-beam and hand cursors,
+    // clickable covered links). Every input entry point tests this first and
+    // does nothing; only an in-flight selection drag keeps using the strip, as
+    // its auto-scroll-up area, and a DOUBLE click on it asks the frame for
+    // another document (m_onOpenRequest), like the empty pane's placeholder.
+    bool InHeaderStrip(POINT client) const {
+        return HeaderShown() && client.y >= 0 && static_cast<float>(client.y) < HeaderPx() &&
+               client.x >= 0 && client.x < ViewportPx().cx;
     }
     // Sync sampling center in CONTENT space: the header pushes the content down
     // by HeaderPx, so the sites that pair SyncCenterY with raw scroll offsets
@@ -431,6 +468,7 @@ private:
     unsigned m_dxGeneration = 0; // DxResources::Generation() our resources were built on
     UINT m_recoveryAttempts = 0; // consecutive graphics failures, reset on successful present
     bool m_dark = false;
+    bool m_highContrast = false;
     bool m_active = false; // the current (last-active) pane; driven by MainWindow, persists
     std::wstring m_hint;
     std::wstring m_docPath;
@@ -485,6 +523,8 @@ private:
     HWND m_scrollTip = nullptr; // lazy tracking tooltip for scrollbar drags
     HWND m_anchorTip = nullptr; // lazy tracking tooltip for anchor-mark hovers
     int m_anchorTipPage = -1;   // page whose anchor the tip is showing; -1 = hidden
+    HWND m_headerTip = nullptr; // lazy tracking tooltip for header-strip hovers
+    bool m_headerTipUp = false; // latch: without it every WM_MOUSEMOVE re-shows it
     std::map<int, CachedBitmap> m_previews; // whole page, capped size; tile fallback
     std::map<TileKey, CachedBitmap> m_tiles; // exact-scale tiles when res > 0
     uint64_t m_frame = 0; // bumped per DrawDocument; drives tile eviction

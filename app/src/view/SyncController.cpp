@@ -98,16 +98,44 @@ void SyncController::NotifyMapChanged() {
         m_onMapChanged();
 }
 
+PerPane<int> SyncController::PagesHere() const {
+    PerPane<int> pages{};
+    for (int s = 0; s < kPaneSlots; ++s)
+        if (m_panes[static_cast<size_t>(s)])
+            pages[static_cast<size_t>(s)] =
+                static_cast<int>(m_panes[static_cast<size_t>(s)]->SyncPosition());
+    return pages;
+}
+
+int SyncController::PointIndexHere() const {
+    const int ref = RefSlot();
+    if (ref < 0 || !AllPanesReady())
+        return -1;
+    const PerPane<int> here = PagesHere();
+    const size_t r = static_cast<size_t>(ref);
+    // Points strictly increase in EVERY active coordinate, so the reference
+    // page can belong to at most one of them: find that one, then require the
+    // rest of the tuple to agree (a partial match is a different point, and
+    // AddPointHere would drop it as incomparable).
+    const auto at = std::lower_bound(m_points.begin(), m_points.end(), here[r],
+                                     [r](const SyncPoint& p, int v) { return p.page[r] < v; });
+    if (at == m_points.end() || at->page[r] != here[r])
+        return -1;
+    for (int s = 0; s < kPaneSlots; ++s) {
+        const size_t i = static_cast<size_t>(s);
+        if (m_panes[i] && at->page[i] != here[i])
+            return -1;
+    }
+    return static_cast<int>(at - m_points.begin());
+}
+
 bool SyncController::AddPointHere() {
     const int ref = RefSlot();
     if (ref < 0 || !AllPanesReady())
         return false;
     SyncPoint fresh;
     fresh.manual = true;
-    for (int s = 0; s < kPaneSlots; ++s)
-        if (m_panes[static_cast<size_t>(s)])
-            fresh.page[static_cast<size_t>(s)] =
-                static_cast<int>(m_panes[static_cast<size_t>(s)]->SyncPosition());
+    fresh.page = PagesHere();
     // The new point wins: drop every point not strictly on one side of it in
     // EVERY active coordinate (this also covers exact duplicates). With three
     // panes far more points are incomparable than with two, so this removes

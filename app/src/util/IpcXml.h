@@ -13,6 +13,13 @@
 //
 //   <psv v="1"><open slot="center" path="C:\doc\b.pdf"/></psv>
 //   <psv v="1"><forward tex="C:\doc\a.tex" line="123" pdf="C:\doc\a.pdf"/></psv>
+//   <psv v="1"><forwardprobe tex="…" line="123" pdf="…"/></psv>
+//
+// The third is the multi-window claim form of the second (see ForwardCommand).
+// Adding it as an ELEMENT rather than an attribute is what makes it safe
+// against older builds: they reject the unknown element, so the sender falls
+// through to <forward>, while an unknown attribute would have been ignored and
+// the probe would have been served as a real request.
 //
 // The slot travels as a WORD (kSlotKeys), never a PaneSlot integer: a word
 // cannot be reinterpreted if the enum ever renumbers. v versions the whole
@@ -43,6 +50,12 @@ struct ForwardCommand {
     std::wstring tex;
     int line = 0; // digits-only on the wire; the receiver range-checks
     std::wstring pdf;
+    // <forwardprobe/>: same request, but the receiver takes it ONLY if one of
+    // its panes already holds that pdf, and declines (invisibly, before any
+    // foregrounding) otherwise. With several windows open the sender offers the
+    // probe to each in z-order first, so a build lands in the window that is
+    // actually showing the document instead of retargeting an arbitrary pane.
+    bool onlyIfOpen = false;
 };
 
 // Exactly one member is engaged.
@@ -55,6 +68,11 @@ struct Command {
 // then skips the handoff and cold-starts, like an unhandled send).
 std::vector<BYTE> BuildOpen(int slot, const std::wstring& path);
 std::vector<BYTE> BuildForward(const std::wstring& tex, int line, const std::wstring& pdf);
+// The claim form of the above. A NEW command element, deliberately not an
+// attribute on <forward>: unknown attributes are IGNORED by design, so an older
+// receiver would take the probe as an ordinary forward search and hijack it,
+// while an unknown ELEMENT is rejected and the sender falls back.
+std::vector<BYTE> BuildForwardProbe(const std::wstring& tex, int line, const std::wstring& pdf);
 
 // Structural parse of a received payload. Everything is copied out before
 // returning: WM_COPYDATA buffers die when the handler returns.

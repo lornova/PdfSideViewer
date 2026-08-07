@@ -89,14 +89,28 @@ std::vector<BYTE> IpcXml::BuildOpen(int slot, const std::wstring& path) {
     return Build(L"open", {{L"slot", kSlotKeys[slot]}, {L"path", path.c_str()}});
 }
 
-std::vector<BYTE> IpcXml::BuildForward(const std::wstring& tex, int line,
-                                       const std::wstring& pdf) {
+namespace {
+
+std::vector<BYTE> BuildForwardAs(PCWSTR element, const std::wstring& tex, int line,
+                                 const std::wstring& pdf) {
     if (tex.empty() || tex.size() > kMaxAttrChars || pdf.empty() ||
         pdf.size() > kMaxAttrChars || line < 1)
         return {};
     const std::wstring lineText = std::to_wstring(line);
-    return Build(L"forward",
+    return Build(element,
                  {{L"tex", tex.c_str()}, {L"line", lineText.c_str()}, {L"pdf", pdf.c_str()}});
+}
+
+} // namespace
+
+std::vector<BYTE> IpcXml::BuildForward(const std::wstring& tex, int line,
+                                       const std::wstring& pdf) {
+    return BuildForwardAs(L"forward", tex, line, pdf);
+}
+
+std::vector<BYTE> IpcXml::BuildForwardProbe(const std::wstring& tex, int line,
+                                            const std::wstring& pdf) {
+    return BuildForwardAs(L"forwardprobe", tex, line, pdf);
 }
 
 std::optional<IpcXml::Command> IpcXml::Parse(const void* data, DWORD size) {
@@ -162,7 +176,8 @@ std::optional<IpcXml::Command> IpcXml::Parse(const void* data, DWORD size) {
                 return std::nullopt; // closed vocabulary, nothing to reinterpret
             out.open.emplace(OpenCommand{decoded, std::move(*path)});
             haveCommand = true;
-        } else if (wcscmp(name, L"forward") == 0) {
+        } else if (wcscmp(name, L"forward") == 0 || wcscmp(name, L"forwardprobe") == 0) {
+            const bool probe = wcscmp(name, L"forwardprobe") == 0;
             std::optional<std::wstring> tex = Attr(reader.Get(), L"tex");
             const std::optional<std::wstring> line = Attr(reader.Get(), L"line");
             std::optional<std::wstring> pdf = Attr(reader.Get(), L"pdf");
@@ -176,7 +191,7 @@ std::optional<IpcXml::Command> IpcXml::Parse(const void* data, DWORD size) {
             }
             if (value < 1)
                 return std::nullopt;
-            out.forward.emplace(ForwardCommand{std::move(*tex), value, std::move(*pdf)});
+            out.forward.emplace(ForwardCommand{std::move(*tex), value, std::move(*pdf), probe});
             haveCommand = true;
         } else {
             return std::nullopt; // unknown command: unhandled, sender cold-starts

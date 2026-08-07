@@ -16,6 +16,9 @@
 # map phase 6 saved. What a phase needs from the persisted state it FORCES
 # (ini edit or command) and asserts, rather than inheriting it silently.
 #
+# Phase 13's header-tooltip checks drive the REAL mouse pointer and need it to
+# rest: do not use the machine while the suite runs, or they skip themselves.
+#
 # CLAUDE.md testing rules: DPI-aware thread FIRST (the dev monitor is 175% and
 # PowerShell is DPI-unaware), PSV_SETTINGS_DIR sandbox (never touch the user's
 # settings.ini), abort if a foreign instance is running (posted commands would
@@ -25,7 +28,16 @@
 # manually. Assertions use the ENGLISH strings (sandbox settings = default
 # language) and the page box / status-cell text length (SB_GETTEXTW is not
 # marshaled cross-process; SB_GETTEXTLENGTHW is pointer-free and is).
-param([string]$Config = 'Debug')
+# -SysColorCheck adds the assertions that prove the painted COLOURS follow the
+# system palette (toolbar icons via COLOR_BTNTEXT, pane header strip via
+# COLOR_BTNFACE): it changes the value for the session, samples the pixels, and
+# puts the old one back (also from the failure path). OFF by default because
+# those values are global to the desktop: a hard kill between the two
+# SetSysColors calls leaves every application recoloured until the next theme
+# change. Everything else here only ever touches this app. The strip assertion
+# FLIPS with high contrast, which is the only mode in which the panes read the
+# system palette at all.
+param([string]$Config = 'Debug', [switch]$SysColorCheck)
 
 $ErrorActionPreference = 'Stop'
 # A command id that is not in the constants block below reads as $null, PowerShell
@@ -51,6 +63,35 @@ Add-Type -Namespace Win32 -Name Native -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint tid, ref GUITHREADINFO gui);
 [DllImport("user32.dll")] public static extern bool IsWindow(IntPtr h);
 [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+[DllImport("user32.dll")] public static extern bool GetClientRect(IntPtr h, out RECT r);
+[DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
+// The exit code of a process this script did NOT start: a Process object from
+// Get-Process leaves ExitCode empty, so hold a real handle (which also pins the
+// pid against reuse) and ask the kernel.
+[DllImport("kernel32.dll", SetLastError=true)] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool GetExitCodeProcess(IntPtr h, out uint code);
+[DllImport("kernel32.dll", SetLastError=true)] public static extern bool CloseHandle(IntPtr h);
+// The header-tip check moves the REAL cursor: a synthetic WM_MOUSEMOVE arms
+// TrackMouseEvent(TME_LEAVE), and with the physical pointer elsewhere Windows
+// answers with an immediate WM_MOUSELEAVE that takes the tip straight down.
+[DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
+[DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
+[DllImport("user32.dll")] public static extern bool GetCursorPos(out POINT p);
+// Mouse messages go to whatever is on TOP at that point, so the hover checks
+// have to raise the viewer above this console first and then verify it.
+[DllImport("user32.dll")] public static extern IntPtr WindowFromPoint(POINT p);
+[DllImport("user32.dll")] public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+// -SysColorCheck only: the icon ink lives in pixels, so proving it followed the
+// palette needs a capture. SetSysColors is session-scoped (no SPIF_UPDATEINIFILE).
+[DllImport("user32.dll")] public static extern uint GetSysColor(int index);
+[DllImport("user32.dll")] public static extern bool SetSysColors(int count, int[] indices, uint[] colors);
+[DllImport("user32.dll")] public static extern bool PrintWindow(IntPtr h, IntPtr dc, uint flags);
+[DllImport("user32.dll")] public static extern uint GetDpiForWindow(IntPtr h);
+// The panes take their colours from the system ONLY in high contrast, so the
+// strip assertion needs to know which claim it is proving. SPI_GETHIGHCONTRAST
+// is the only supported probe.
+[DllImport("user32.dll", CharSet=CharSet.Unicode, EntryPoint="SystemParametersInfoW")] public static extern bool SpiHighContrast(uint action, uint param, ref HIGHCONTRAST hc, uint winIni);
+[StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct HIGHCONTRAST { public uint cbSize, dwFlags; public IntPtr lpszDefaultScheme; }
 // Volume capability, so the ACL characterization can be skipped on a filesystem
 // that does not persist ACLs instead of failing for an environmental reason.
 // The mount point comes from GetVolumePathName, not from a lexical path root:
@@ -60,6 +101,7 @@ Add-Type -Namespace Win32 -Name Native -MemberDefinition @'
 [DllImport("kernel32.dll", CharSet=CharSet.Unicode, EntryPoint="GetVolumeInformationW", SetLastError=true)] public static extern bool GetVolumeInformationW(string root, System.Text.StringBuilder volName, uint volNameSize, out uint serial, out uint maxComponent, out uint flags, System.Text.StringBuilder fsName, uint fsNameSize);
 [StructLayout(LayoutKind.Sequential)] public struct SCROLLINFO { public uint cbSize, fMask; public int nMin, nMax; public uint nPage; public int nPos, nTrackPos; }
 [StructLayout(LayoutKind.Sequential)] public struct RECT { public int l, t, r, b; }
+[StructLayout(LayoutKind.Sequential)] public struct POINT { public int x, y; }
 [StructLayout(LayoutKind.Sequential)] public struct GUITHREADINFO { public uint cbSize, flags; public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret; public RECT rcCaret; }
 '@
 
@@ -73,6 +115,14 @@ $WM_KEYDOWN = 0x0100
 $VK_END = 0x23
 $SB_GETTEXTLENGTHW = 0x040C
 $SB_GETPARTS = 0x0406
+$TB_ISBUTTONCHECKED = 0x040A
+$TB_GETSTATE = 0x0412
+$TB_GETIMAGELIST = 0x0431
+$WM_SYSCOLORCHANGE = 0x0015
+$TBSTATE_ENABLED = 0x04
+$WM_LBUTTONDOWN = 0x0201
+$WM_LBUTTONDBLCLK = 0x0203
+$WM_LBUTTONUP = 0x0202
 $FILE_PERSISTENT_ACLS = 0x00000008
 $IDC_FOCUS_NEXT_PANE = 1003
 $IDC_TOGGLE_SCROLL_SYNC = 1004
@@ -89,10 +139,13 @@ $IDC_SWAP_PANES_BACK = 1077
 $IDC_OPTIONS = 1049
 $IDC_ADD_SYNC_POINT = 1051
 $IDC_SYNC_FROM_BOOKMARKS = 1052
+$IDC_SYNC_POINTS = 1053
 $IDC_CLEAR_SYNC_POINTS = 1054
 $IDC_TOGGLE_ALIGNMENT_GAPS = 1055
 $IDC_PANES_TWO = 1075
 $IDC_PANES_THREE = 1076
+$IDC_FULLSCREEN = 1020
+$IDC_NEW_WINDOW = 1083
 $IDOK = 1
 $SB_VERT = 1
 $SIF_ALL = 0x17
@@ -140,7 +193,16 @@ New-Item -ItemType Directory -Force $docs | Out-Null
 $workA = Join-Path $docs 'sync-a.pdf'
 Copy-Item $pdfA $workA
 
+Write-Host 'note: phase 13 drives the REAL mouse pointer (hover tooltips). Leave the machine' `
+    -ForegroundColor DarkYellow
+Write-Host '      alone while it runs; those checks skip themselves if the pointer is moved.' `
+    -ForegroundColor DarkYellow
+
 $script:failures = 0
+# Declared even when -SysColorCheck is off: the finally reads it, and strict
+# mode turns an unset variable into a throw.
+$script:sysColor13 = $null
+$script:sysFace13 = $null
 function Assert([bool]$cond, [string]$what) {
     if ($cond) { Write-Host "  ok:   $what" }
     else { Write-Host "  FAIL: $what" -ForegroundColor Red; $script:failures++ }
@@ -237,6 +299,140 @@ function Assert-PaneAt($v, [IntPtr]$pane, [string]$expected, [string]$what) {
 }
 function Send-Command($v, [int]$id) {
     [void][Win32.Native]::PostMessageW($v.Main, $WM_COMMAND, [IntPtr]$id, [IntPtr]::Zero)
+}
+# The command toolbar is a rebar child, not a frame child: its id (102) is the
+# same number the RIGHT pane uses under the frame, which is why the parent
+# matters here.
+function Get-Toolbar([IntPtr]$main) {
+    $rebar = [Win32.Native]::FindWindowExByClass($main, [IntPtr]::Zero, 'ReBarWindow32',
+                                                 [IntPtr]::Zero)
+    if ($rebar -eq [IntPtr]::Zero) { return [IntPtr]::Zero }
+    [Win32.Native]::GetDlgItem($rebar, 102)
+}
+function Test-ButtonPressed([IntPtr]$toolbar, [int]$id) {
+    [Win32.Native]::SendMessageW($toolbar, $TB_ISBUTTONCHECKED, [IntPtr]$id,
+                                 [IntPtr]::Zero) -ne [IntPtr]::Zero
+}
+function Test-ButtonEnabled([IntPtr]$toolbar, [int]$id) {
+    ([Win32.Native]::SendMessageW($toolbar, $TB_GETSTATE, [IntPtr]$id,
+                                  [IntPtr]::Zero).ToInt64() -band $TBSTATE_ENABLED) -ne 0
+}
+# The frame of a given process, and how many frames exist at all. Both walk the
+# top-level windows: with more than one instance the class name alone no longer
+# identifies a window.
+function Get-FrameFor([int]$procId) {
+    $h = [IntPtr]::Zero
+    while ($true) {
+        $h = [Win32.Native]::FindWindowExByClass([IntPtr]::Zero, $h, 'PsvMainWindow',
+                                                 [IntPtr]::Zero)
+        if ($h -eq [IntPtr]::Zero) { return [IntPtr]::Zero }
+        $owner = [uint32]0
+        [void][Win32.Native]::GetWindowThreadProcessId($h, [ref]$owner)
+        if ($owner -eq $procId) { return $h }
+    }
+}
+function Get-FrameCount() {
+    $n = 0
+    $h = [IntPtr]::Zero
+    while ($true) {
+        $h = [Win32.Native]::FindWindowExByClass([IntPtr]::Zero, $h, 'PsvMainWindow',
+                                                 [IntPtr]::Zero)
+        if ($h -eq [IntPtr]::Zero) { return $n }
+        $n++
+    }
+}
+# Strongly red pixels in a window's own painting: the sampling the icon-colour
+# check counts, and nothing else in the chrome can produce them.
+function Measure-RedPixels([IntPtr]$hwnd) {
+    Add-Type -AssemblyName System.Drawing
+    $r = New-Object Win32.Native+RECT
+    [void][Win32.Native]::GetWindowRect($hwnd, [ref]$r)
+    $w = $r.r - $r.l; $h = $r.b - $r.t
+    if ($w -le 0 -or $h -le 0) { return 0 }
+    $bmp = New-Object System.Drawing.Bitmap([int]$w, [int]$h)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $hdc = $g.GetHdc()
+    [void][Win32.Native]::PrintWindow($hwnd, $hdc, 0)
+    $g.ReleaseHdc($hdc); $g.Dispose()
+    $n = 0
+    for ($y = 0; $y -lt $h; $y += 2) {
+        for ($x = 0; $x -lt $w; $x += 2) {
+            $p = $bmp.GetPixel($x, $y)
+            if ($p.R -gt 180 -and $p.G -lt 80 -and $p.B -lt 80) { $n++ }
+        }
+    }
+    $bmp.Dispose()
+    $n
+}
+# Is a high-contrast theme active? The panes swap their whole palette for the
+# system one exactly then, so the -SysColorCheck assertion below flips with it.
+function Test-HighContrast() {
+    $hc = New-Object Win32.Native+HIGHCONTRAST
+    $hc.cbSize = [uint32][Runtime.InteropServices.Marshal]::SizeOf($hc)
+    if (-not [Win32.Native]::SpiHighContrast(0x0042, $hc.cbSize, [ref]$hc, 0)) { return $false }
+    ($hc.dwFlags -band 1) -ne 0 # HCF_HIGHCONTRASTON
+}
+# The pane header strip's BACKGROUND, sampled clear of the file name (which is
+# left-aligned) and clear of the active pane's accent underline. PW_RENDERFULLCONTENT
+# is what captures a DirectX swap chain; plain PrintWindow returns black.
+function Get-HeaderStripColor([IntPtr]$pane) {
+    Add-Type -AssemblyName System.Drawing
+    $r = New-Object Win32.Native+RECT
+    [void][Win32.Native]::GetClientRect($pane, [ref]$r)
+    if ($r.r -le 0 -or $r.b -le 0) { return '' }
+    $bmp = New-Object System.Drawing.Bitmap([int]$r.r, [int]$r.b)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    $hdc = $g.GetHdc()
+    [void][Win32.Native]::PrintWindow($pane, $hdc, 2)
+    $g.ReleaseHdc($hdc); $g.Dispose()
+    $dpi = [Win32.Native]::GetDpiForWindow($pane)
+    if ($dpi -eq 0) { $dpi = 96 }
+    $p = $bmp.GetPixel([int]($r.r - 5), [int](24 * $dpi / 96 / 2)) # kHeaderHeightDip / 2
+    $bmp.Dispose()
+    '#{0:X2}{1:X2}{2:X2}' -f $p.R, $p.G, $p.B
+}
+function Get-CursorPoint() {
+    $p = New-Object Win32.Native+POINT
+    [void][Win32.Native]::GetCursorPos([ref]$p)
+    $p
+}
+function Get-CaptureHwnd([IntPtr]$main) {
+    $procId = [uint32]0
+    $tid = [Win32.Native]::GetWindowThreadProcessId($main, [ref]$procId)
+    $gui = New-Object Win32.Native+GUITHREADINFO
+    $gui.cbSize = [Runtime.InteropServices.Marshal]::SizeOf($gui)
+    if ([Win32.Native]::GetGUIThreadInfo($tid, [ref]$gui)) { return $gui.hwndCapture }
+    return [IntPtr]::Zero
+}
+# Client point packed the way Windows packs it into a mouse message's lParam.
+function Get-MouseLParam([int]$x, [int]$y) {
+    [IntPtr](($y -shl 16) -bor ($x -band 0xFFFF))
+}
+# Parks the physical pointer on a client point of $hwnd, nudging it by a pixel
+# so a WM_MOUSEMOVE is guaranteed even if it was already there.
+function Move-CursorToClient([IntPtr]$hwnd, [int]$x, [int]$y) {
+    $p = New-Object Win32.Native+POINT
+    $p.x = $x; $p.y = $y
+    [void][Win32.Native]::ClientToScreen($hwnd, [ref]$p)
+    [void][Win32.Native]::SetCursorPos($p.x, $p.y)
+    Start-Sleep -Milliseconds 60
+    [void][Win32.Native]::SetCursorPos($p.x + 1, $p.y)
+}
+# Every VISIBLE tooltip owned by the viewer process. Compared as a SET across an
+# action, never as a count: a stray tip (the real mouse resting on a toolbar
+# button) would otherwise turn an environmental accident into a failure.
+function Get-VisibleTips([int]$procId) {
+    # Emits the handles one by one: a collection returned whole would reach the
+    # callers' pipelines as a SINGLE object.
+    $h = [IntPtr]::Zero
+    while ($true) {
+        $h = [Win32.Native]::FindWindowExByClass([IntPtr]::Zero, $h, 'tooltips_class32',
+                                                 [IntPtr]::Zero)
+        if ($h -eq [IntPtr]::Zero) { break }
+        $owner = [uint32]0
+        [void][Win32.Native]::GetWindowThreadProcessId($h, [ref]$owner)
+        if ($owner -eq $procId -and [Win32.Native]::IsWindowVisible($h)) { $h }
+    }
 }
 
 function Start-Viewer([string]$leftPdf, [string]$rightPdf, [string]$centerPdf = '') {
@@ -1233,7 +1429,320 @@ try {
     Stop-Viewer $v
     Assert (-not (Test-Path -LiteralPath $guardTmp12b)) `
         'an own-id temp IS swept by the next save, once the canonical file exists again'
+
+    # --------------------------------------------------------------- phase 13
+    # Toolbar state that no other button has: the sync-point button reports
+    # whether the pages IN VIEW already carry a point, so it follows the scroll
+    # (UpdateCommandUi is skipped on scroll ticks; a dedicated change-guarded
+    # updater owns this one), and pressing it there REMOVES that point instead
+    # of replacing it with an identical manual one. The pane-count pair is the
+    # View menu's radio group mirrored onto the toolbar. Last phase: the count
+    # switch clears the live map, so nothing may depend on it afterwards.
+    Write-Host 'phase 13: the sync-point toggle, the pane-count pair and the header strip'
+    # Forced with no viewer running: the full-screen assertions need the toolbar
+    # KEPT there (fsToolbar), and the header tooltip needs the strip in file-NAME
+    # mode, where the path is never on screen (phase 7 left headerPath=1, and in
+    # path mode a short fixture path is not compacted, so no tip is owed).
+    $ini13 = Join-Path $scratch 'settings.ini'
+    $ini13Text = (Get-Content $ini13 -Raw) -replace '(?m)^fsToolbar=0\r?$', 'fsToolbar=1' `
+        -replace '(?m)^headerPath=1\r?$', 'headerPath=0'
+    Set-Content $ini13 -Value $ini13Text -Encoding Unicode
+    $ini13After = Get-Content $ini13 -Raw
+    Assert (($ini13After -match '(?m)^fsToolbar=1\r?$') -and
+            ($ini13After -match '(?m)^headerPath=0\r?$') -and
+            ($ini13After -match '(?m)^header=1\r?$')) `
+        'the sandbox ini forces the kept full-screen toolbar and the file-name header'
+    $v = Start-Viewer $pdfA $pdfB
+    Reset-SyncLocks $v
+    $tb = Get-Toolbar $v.Main
+    Assert ($tb -ne [IntPtr]::Zero) 'the command toolbar answers under the rebar'
+    # Explicit pages, never the ones the launch happened to restore.
+    Invoke-GotoPage $v $v.Left 2
+    Invoke-GotoPage $v $v.Right 2
+    Assert (-not (Test-ButtonPressed $tb $IDC_ADD_SYNC_POINT)) `
+        'no point on these pages yet: the button is up'
+    Send-Command $v $IDC_ADD_SYNC_POINT
+    Assert (Poll { Test-ButtonPressed $tb $IDC_ADD_SYNC_POINT } 5000) `
+        'adding a point here presses the button'
+    Assert (Poll { (Get-StatusLen $v.Status 3) -eq ($lenOff + " $mid 1 pts".Length) } 5000) `
+        'and the map really holds one point'
+    Invoke-GotoPage $v $v.Left 5
+    Assert (Poll { -not (Test-ButtonPressed $tb $IDC_ADD_SYNC_POINT) } 5000) `
+        'scrolling off the tuple releases it (no command involved, only Scrolled)'
+    Invoke-GotoPage $v $v.Left 2
+    Assert (Poll { Test-ButtonPressed $tb $IDC_ADD_SYNC_POINT } 5000) `
+        'scrolling back onto the tuple presses it again'
+    # The toggle: pressed + command = removal, not a duplicate manual point.
+    Send-Command $v $IDC_ADD_SYNC_POINT
+    Assert (Poll { -not (Test-ButtonPressed $tb $IDC_ADD_SYNC_POINT) } 5000) `
+        'the command on a pressed button releases it'
+    Assert (Poll { (Get-StatusLen $v.Status 3) -eq $lenOff } 5000) `
+        'and the point is GONE (the map is empty, not carrying a replacement)'
+    Assert (-not (Test-ButtonEnabled $tb $IDC_SYNC_POINTS)) `
+        'the points dialog button greys out with the emptied map'
+    # The pane-count pair, pressed from the same UpdateCommandUi pass.
+    Assert ((Test-ButtonPressed $tb $IDC_PANES_TWO) -and
+            -not (Test-ButtonPressed $tb $IDC_PANES_THREE)) 'two panes: the pair reads 2'
+    Send-Command $v $IDC_PANES_THREE
+    Assert (Poll { [Win32.Native]::GetDlgItem($v.Main, 101) -ne [IntPtr]::Zero } 5000) `
+        'the toolbar button created the centre pane'
+    Assert (Poll { (Test-ButtonPressed $tb $IDC_PANES_THREE) -and
+                   -not (Test-ButtonPressed $tb $IDC_PANES_TWO) } 5000) 'and the pair reads 3'
+    Send-Command $v $IDC_PANES_TWO
+    Assert (Poll { [Win32.Native]::GetDlgItem($v.Main, 101) -eq [IntPtr]::Zero } 5000) `
+        'and back: the centre pane is destroyed again'
+    Assert (Poll { (Test-ButtonPressed $tb $IDC_PANES_TWO) -and
+                   -not (Test-ButtonPressed $tb $IDC_PANES_THREE) } 5000) 'and the pair reads 2'
+
+    # A system-colour change must re-bake the glyph imagelists: their ink is
+    # GetSysColor(COLOR_BTNTEXT), premultiplied into the pixels, and every cache
+    # is keyed on the DPI alone. Observable from here because the rebuild
+    # INSTALLS the new list before destroying the old, so the handle cannot come
+    # back the same. What this does NOT prove is the colour: with high contrast
+    # off the query answers the same value either way, and switching the theme
+    # from a test would take over the whole desktop.
+    $iml13 = [Win32.Native]::SendMessageW($tb, $TB_GETIMAGELIST, [IntPtr]::Zero, [IntPtr]::Zero)
+    Assert ($iml13 -ne [IntPtr]::Zero) 'the command toolbar has a glyph imagelist'
+    [void][Win32.Native]::PostMessageW($v.Main, $WM_SYSCOLORCHANGE, [IntPtr]::Zero, [IntPtr]::Zero)
+    Assert (Poll {
+            [Win32.Native]::SendMessageW($tb, $TB_GETIMAGELIST, [IntPtr]::Zero,
+                                         [IntPtr]::Zero) -ne $iml13
+        } 5000) 'and a system-colour change rebuilds it'
+    if ($SysColorCheck) {
+        # The rebuild above is only half the claim. This half changes the palette
+        # for real and reads the ink back out of the pixels.
+        $script:sysColor13 = [Win32.Native]::GetSysColor(18) # COLOR_BTNTEXT
+        Assert ((Measure-RedPixels $tb) -eq 0) 'no red ink in the toolbar to begin with'
+        [void][Win32.Native]::SetSysColors(1, @(18), @([uint32]0x000000FF)) # BGR
+        $reddened = Poll { (Measure-RedPixels $tb) -gt 20 } 5000
+        [void][Win32.Native]::SetSysColors(1, @(18), @([uint32]$script:sysColor13))
+        $script:sysColor13 = $null # restored; the finally has nothing left to do
+        Assert $reddened 'and the glyphs are re-baked in the NEW colour, not just rebuilt'
+        Assert (Poll { (Measure-RedPixels $tb) -eq 0 } 5000) 'and follow it back again'
+
+        # Same claim for the panes, which paint their chrome themselves - but
+        # with the opposite expectation outside high contrast, where taking the
+        # classic system colours would flatten the app's own dark/light palette.
+        $hcOn13 = Test-HighContrast
+        $strip13 = Get-HeaderStripColor $v.Right
+        $script:sysFace13 = [Win32.Native]::GetSysColor(15) # COLOR_BTNFACE
+        [void][Win32.Native]::SetSysColors(1, @(15), @([uint32]0x000000FF)) # BGR
+        $stripFollowed = Poll { (Get-HeaderStripColor $v.Right) -eq '#FF0000' } 5000
+        [void][Win32.Native]::SetSysColors(1, @(15), @([uint32]$script:sysFace13))
+        $script:sysFace13 = $null # restored; the finally has nothing left to do
+        if ($hcOn13) {
+            Assert $stripFollowed 'high contrast: the header strip follows COLOR_BTNFACE'
+        } else {
+            Assert (-not $stripFollowed) `
+                'outside high contrast the header strip keeps the built-in palette'
+        }
+        Assert (Poll { (Get-HeaderStripColor $v.Right) -eq $strip13 } 5000) `
+            "and the strip is back to what it was ($strip13)"
+    }
+
+    # The full-screen button reports the STATE, like the View menu item does.
+    Assert (-not (Test-ButtonPressed $tb $IDC_FULLSCREEN)) 'windowed: the full-screen button is up'
+    Send-Command $v $IDC_FULLSCREEN
+    Assert (Poll { Test-ButtonPressed $tb $IDC_FULLSCREEN } 5000) `
+        'full screen presses it (the toolbar is kept there by fsToolbar)'
+    Send-Command $v $IDC_FULLSCREEN
+    Assert (Poll { -not (Test-ButtonPressed $tb $IDC_FULLSCREEN) } 5000) `
+        'and leaving full screen releases it'
+
+    # The header strip: hovering it offers the full path, which the strip does
+    # not show in file-name mode. The tooltip TEXT is unreadable across
+    # processes (TTM_GETTEXT takes a pointer), so this asserts the tip WINDOW,
+    # identified as one that was not visible before the hover - never as a
+    # count, or a stray tip elsewhere in the app would decide the result.
+    # The PHYSICAL pointer has to move, for two reasons. The tip arms
+    # TrackMouseEvent(TME_LEAVE), and with the real cursor outside the pane
+    # Windows answers instantly with WM_MOUSELEAVE, taking the tip down before
+    # it can be observed. And the show waits on WM_MOUSEHOVER (the strip is too
+    # easy to cross for a tip on contact), which hover tracking only ever
+    # delivers for real mouse input that then RESTS: a synthetic WM_MOUSEMOVE
+    # arms the request and nothing more comes of it.
+    $rc13 = New-Object Win32.Native+RECT
+    [void][Win32.Native]::GetClientRect($v.Left, [ref]$rc13)
+    $cursor13 = New-Object Win32.Native+POINT
+    [void][Win32.Native]::GetCursorPos([ref]$cursor13) # restored at the end
+    # Park the pointer in the page area FIRST. The check below wants a tip that
+    # was not there before, and the real cursor may well be sitting on the strip
+    # already (the window comes up wherever it comes up): the correct behaviour
+    # would then raise no NEW window and the phase would fail for the one reason
+    # that is not a defect.
+    # And raise the viewer: mouse messages go to whatever window is on top at
+    # that point, and by now this console may well be. HWND_TOP with
+    # SWP_NOACTIVATE, not SetForegroundWindow, which a background process does
+    # not get to call.
+    [void][Win32.Native]::SetWindowPos($v.Main, [IntPtr]::Zero, 0, 0, 0, 0, 0x13)
+    Move-CursorToClient $v.Left 40 ([int]($rc13.b / 2))
+    Start-Sleep -Milliseconds 300
+    $tipsBefore = @(Get-VisibleTips $v.Proc.Id)
+    # y = 5 is inside the strip at every DPI (24 DIP is 24 px at the smallest).
+    Move-CursorToClient $v.Left 40 5
+    $parked13 = Get-CursorPoint
+    $script:tip13 = [IntPtr]::Zero
+    # Hover tracking needs the PHYSICAL pointer to rest on a pane that is on TOP
+    # for SPI_GETMOUSEHOVERTIME. Someone using the machine breaks both, and the
+    # result is indistinguishable from a broken tooltip - so the conditions are
+    # sampled THROUGHOUT the wait (checking them only at the end misses a
+    # pointer that wandered off and came back), and a disturbed run SKIPS
+    # instead of reporting a defect that is not there. Same treatment as the ACL
+    # characterization on a filesystem that cannot keep ACLs.
+    $script:disturbed13 = $false
+    [void](Poll {
+        $at = Get-CursorPoint
+        if ($at.x -ne $parked13.x -or $at.y -ne $parked13.y -or
+            [Win32.Native]::WindowFromPoint($parked13) -ne $v.Left) {
+            $script:disturbed13 = $true
+            return $true # stop waiting: nothing observable can come of this
+        }
+        $fresh = @(Get-VisibleTips $v.Proc.Id | Where-Object { $tipsBefore -notcontains $_ })
+        if ($fresh.Count -gt 0) { $script:tip13 = $fresh[0]; return $true }
+        $false
+    } 5000)
+    if ($script:disturbed13 -and $script:tip13 -eq [IntPtr]::Zero) {
+        Write-Host '  skip: the pointer was disturbed during the hover (machine in use?)'
+    } else {
+        Assert ($script:tip13 -ne [IntPtr]::Zero) 'hovering the header strip raises a tooltip'
+        # And it comes down when the pointer moves off the strip, which is also
+        # the regression guard for the latch (a tip that never hides passes above).
+        Move-CursorToClient $v.Left 40 ([int]($rc13.b / 2))
+        Assert ($script:tip13 -ne [IntPtr]::Zero -and
+                (Poll { -not [Win32.Native]::IsWindowVisible($script:tip13) } 5000)) `
+            'and it drops when the pointer leaves the strip'
+    }
+
+    # The strip is a label, not a window onto the content it covers: a press
+    # inside it must not start a text selection (no capture), while the same
+    # press over the page does.
+    $stripPt13 = Get-MouseLParam 40 5
+    [void][Win32.Native]::PostMessageW($v.Left, $WM_LBUTTONDOWN, [IntPtr]1, $stripPt13)
+    Start-Sleep -Milliseconds 250
+    $capStrip = Get-CaptureHwnd $v.Main
+    [void][Win32.Native]::PostMessageW($v.Left, $WM_LBUTTONUP, [IntPtr]::Zero, $stripPt13)
+    Assert ($capStrip -eq [IntPtr]::Zero) 'a press on the strip starts no selection (no capture)'
+    $mid13 = Get-MouseLParam ([int]($rc13.r / 2)) ([int]($rc13.b / 2))
+    [void][Win32.Native]::PostMessageW($v.Left, $WM_LBUTTONDOWN, [IntPtr]1, $mid13)
+    $capPage = Poll { (Get-CaptureHwnd $v.Main) -eq $v.Left } 3000
+    [void][Win32.Native]::PostMessageW($v.Left, $WM_LBUTTONUP, [IntPtr]::Zero, $mid13)
+    Assert $capPage 'the same press over the page DOES (the check discriminates)'
+    # And a DOUBLE click on the strip asks for another document, the gesture an
+    # empty pane already offers on its placeholder. The dialog is MODAL - it
+    # blocks the app's UI thread - so it has to be cancelled here or everything
+    # after this, Stop-Viewer included, hangs.
+    [void][Win32.Native]::PostMessageW($v.Left, $WM_LBUTTONDBLCLK, [IntPtr]1, $stripPt13)
+    $openDlg13 = [IntPtr]::Zero
+    $opened13 = Poll {
+        $script:openDlg13 = [Win32.Native]::FindWindowByTitle([IntPtr]::Zero,
+                                                              'Open document in left pane')
+        $script:openDlg13 -ne [IntPtr]::Zero
+    } 10000
+    Assert $opened13 'double-clicking the strip opens the Open dialog for that pane'
+    if ($opened13) {
+        [void][Win32.Native]::PostMessageW($script:openDlg13, $WM_COMMAND, [IntPtr]2,
+                                           [IntPtr]::Zero) # IDCANCEL
+        Assert (Poll { -not [Win32.Native]::IsWindow($script:openDlg13) } 10000) `
+            'and it closes again on cancel (the modal loop must not outlive the phase)'
+    }
+    [void][Win32.Native]::SetCursorPos($cursor13.x, $cursor13.y)
+    Stop-Viewer $v
+
+    # --------------------------------------------------------------- phase 14
+    # File > New Window: a second PROCESS, started EMPTY, that does not land on
+    # top of the first, does not take the session away from it, and does not
+    # steal a forward search for a document it is not showing. Self-contained
+    # and LAST on purpose: while it runs there are two frames of the same class,
+    # which every FindWindowByClass in the suite would resolve arbitrarily.
+    Write-Host 'phase 14: File > New Window'
+    $ini14 = Join-Path $scratch 'settings.ini'
+    Set-Content $ini14 -Encoding Unicode `
+        -Value ((Get-Content $ini14 -Raw) -replace '(?m)^restoreSession=0\r?$', 'restoreSession=1')
+    Assert ((Get-Content $ini14 -Raw) -match '(?m)^restoreSession=1\r?$') `
+        'the sandbox restores sessions, which the survival check below reads'
+    $v = Start-Viewer $pdfA $pdfB
+    Assert ((Get-FrameCount) -eq 1) 'one frame to begin with'
+    Send-Command $v $IDC_NEW_WINDOW
+    Assert (Poll { (@(Get-Process PdfSideViewer -ErrorAction SilentlyContinue)).Count -eq 2 } 20000) `
+        'the command started a second process'
+    $child14 = @(Get-Process PdfSideViewer | Where-Object { $_.Id -ne $v.Proc.Id })[0]
+    $parentOf14 = (Get-CimInstance Win32_Process -Filter "ProcessId=$($child14.Id)").ParentProcessId
+    Assert ($parentOf14 -eq $v.Proc.Id) 'and it is OUR child, not a stray instance'
+    # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, taken while it is alive.
+    $childHandle14 = [Win32.Native]::OpenProcess(0x00101000, $false, [uint32]$child14.Id)
+    $childMain14 = [IntPtr]::Zero
+    Assert (Poll {
+            $script:childMain14 = Get-FrameFor $child14.Id
+            $script:childMain14 -ne [IntPtr]::Zero -and
+                [Win32.Native]::GetDlgItem($script:childMain14, 100) -ne [IntPtr]::Zero
+        } 15000) 'the child put up its own frame'
+    $childLeft14 = [Win32.Native]::GetDlgItem($script:childMain14, 100)
+    $childRight14 = [Win32.Native]::GetDlgItem($script:childMain14, 102)
+    # An empty pane has no scroll range, ever - the same predicate Start-Viewer
+    # waits on to know a document arrived, read the other way round. Given a
+    # moment first, so "empty" is not just "has not opened yet".
+    Start-Sleep -Milliseconds 1500
+    Assert ((Get-VScroll $childLeft14).nMax -eq 0 -and (Get-VScroll $childRight14).nMax -eq 0) `
+        'the new window is EMPTY: it did not reopen the session'
+    Assert ((Get-VScroll $v.Left).nMax -gt 0) 'while the first window keeps its documents'
+    $rParent14 = New-Object Win32.Native+RECT
+    $rChild14 = New-Object Win32.Native+RECT
+    [void][Win32.Native]::GetWindowRect($v.Main, [ref]$rParent14)
+    [void][Win32.Native]::GetWindowRect($script:childMain14, [ref]$rChild14)
+    # ORIGIN only: the exact cascade step depends on DPI and theme metrics.
+    Assert (($rParent14.l -ne $rChild14.l) -or ($rParent14.t -ne $rChild14.t)) `
+        'and it does not come up exactly on top of the first'
+    # Forward search with two windows. This is only a test if the plain z-order
+    # handoff WOULD have picked the wrong one, so pin that first: FindWindowEx
+    # walks top-level windows in z-order, and its first answer is exactly what
+    # FindWindowW hands the sender.
+    Assert (([Win32.Native]::FindWindowExByClass([IntPtr]::Zero, [IntPtr]::Zero, 'PsvMainWindow',
+                                                 [IntPtr]::Zero)) -eq $script:childMain14) `
+        'the new window is the topmost frame: without the claim round it would take the request'
+    $tex14 = Join-Path $docs 'paper.tex'
+    $fwd14 = Start-Process -FilePath $exe -ArgumentList '-forward-search', "`"$tex14`"", '1',
+        "`"$pdfA`"" -PassThru
+    if (-not $fwd14.WaitForExit(20000)) { $fwd14.Kill(); throw 'forward-search instance hung' }
+    Assert ($fwd14.ExitCode -eq 0) "forward-search instance exit code 0 (got $($fwd14.ExitCode))"
+    Start-Sleep -Milliseconds 1200
+    Assert ((Get-VScroll $childLeft14).nMax -eq 0 -and (Get-VScroll $childRight14).nMax -eq 0) `
+        'the forward search left the empty window alone (it went to the one holding the pdf)'
+    # Parent first, then the EMPTY child: the LAST close is the one that decides
+    # what settings.ini ends up holding, so the empty window has to be it or the
+    # check below proves nothing (the populated window would simply rewrite its
+    # own session over any damage).
+    Stop-Viewer $v
+    [void][Win32.Native]::PostMessageW($script:childMain14, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)
+    if (-not $child14.WaitForExit(15000)) { $child14.Kill(); throw 'the new window did not close' }
+    $code14 = [uint32]0
+    $gotCode14 = [Win32.Native]::GetExitCodeProcess($childHandle14, [ref]$code14)
+    [void][Win32.Native]::CloseHandle($childHandle14)
+    Assert ($gotCode14 -and $code14 -eq 0) "new-window exit code 0 (got $code14)"
+    $back14 = Start-Process -FilePath $exe -PassThru # no arguments: pure restore
+    try {
+        Assert (Poll { (Get-FrameFor $back14.Id) -ne [IntPtr]::Zero } 15000) 'the plain relaunch came up'
+        $backMain14 = Get-FrameFor $back14.Id
+        $backLeft14 = [Win32.Native]::GetDlgItem($backMain14, 100)
+        $backRight14 = [Win32.Native]::GetDlgItem($backMain14, 102)
+        Assert (Poll { (Get-VScroll $backLeft14).nMax -gt 0 -and
+                       (Get-VScroll $backRight14).nMax -gt 0 } 15000) `
+            'and both documents came back: the empty window, closing LAST, wrote them back'
+    } finally {
+        [void][Win32.Native]::PostMessageW((Get-FrameFor $back14.Id), 0x0010, [IntPtr]::Zero,
+                                           [IntPtr]::Zero)
+        if (-not $back14.WaitForExit(15000)) { $back14.Kill() }
+    }
 } finally {
+    # A throw between the two SetSysColors calls must not leave the desktop
+    # recoloured (see -SysColorCheck).
+    if ($null -ne $script:sysColor13) {
+        [void][Win32.Native]::SetSysColors(1, @(18), @([uint32]$script:sysColor13))
+        Write-Host '  (system colour restored on the way out)'
+    }
+    if ($null -ne $script:sysFace13) {
+        [void][Win32.Native]::SetSysColors(1, @(15), @([uint32]$script:sysFace13))
+        Write-Host '  (3D-objects colour restored on the way out)'
+    }
     Get-Process PdfSideViewer -ErrorAction SilentlyContinue | ForEach-Object {
         [void]$_.CloseMainWindow()
         if (-not $_.WaitForExit(5000)) { $_.Kill() }

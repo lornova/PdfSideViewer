@@ -90,6 +90,12 @@ public:
     // point wins: existing points that would break the all-coordinates
     // monotonicity are removed. False unless every active pane has a document.
     bool AddPointHere();
+    // Index of the point whose tuple is exactly the pages the active panes are
+    // showing right now, -1 if there is none (and whenever AddPointHere would
+    // refuse, so one call answers both "is the button pressed" and "does the
+    // command add or remove"). Cheap enough for the frame to poll it per scroll
+    // tick: a binary search on the reference coordinate, then one comparison.
+    int PointIndexHere() const;
     void RemovePoint(size_t index); // emptying the map resumes the plain anchor
     void ClearPoints();
     // Replaces the generated points; manual points are kept and win on
@@ -156,6 +162,9 @@ private:
     void NotifyMapChanged();
     void DriveFollowers(PaneWindow& leader); // caller holds m_applying
     bool AllPanesReady() const;              // every active pane has a document
+    // The whole page every active pane is showing, by slot (inactive slots stay
+    // 0). One definition of "the pages here" for both the add and the lookup.
+    PerPane<int> PagesHere() const;
     // Every active pane carries the same NONZERO alignment-gap epoch, so the
     // slot grids are known to be mutually consistent. All-or-nothing on
     // purpose: driving one follower in slot units and another in real-page

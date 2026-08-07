@@ -148,9 +148,16 @@ component, no COM init, DTD prohibited plus a depth cap on hostile input): the s
 simply UNHANDLED, so the sender cold-starts and a mixed-version handoff degrades to a new window
 instead of mis-slotting. Structural checks (shape, caps, closed vocabulary) live in
 `IpcXml::Parse`; SEMANTIC checks (rooted paths, line range, active-set slot) stay in
-`MainWindow::HandleCopyData`. The ONE exception is the command line's POSITIONAL order, which is Beyond Compare's
-`left right [center]` and therefore needs `kCliSlotOrder` in main.cpp; nothing else may reuse that
-order. The two-pane and three-pane splits are stored SEPARATELY (`splitRatio` vs
+`MainWindow::HandleCopyData`. With several windows up (File ▸ New Window) `FindWindowW` names
+only the topmost, which is the right convention for the verbs but not for forward search (it
+RETARGETS a pane, so the wrong window loses its document, and the delivery raises that window so
+the next build picks it again): the sender therefore offers `<forwardprobe/>` to each frame in
+z-order first, taken only by a window whose pane already holds that pdf and declined before any
+foregrounding, then falls back to the plain `<forward/>`. It is a new ELEMENT, never an attribute
+on `<forward>`: unknown attributes are IGNORED by design (v1's extension point), so an older
+receiver would take a probe for a real request. The ONE exception is the command line's
+POSITIONAL order, which is Beyond Compare's `left right [center]` and therefore needs
+`kCliSlotOrder` in main.cpp; nothing else may reuse that order. The two-pane and three-pane splits are stored SEPARATELY (`splitRatio` vs
 `splitRatio3Left`/`splitRatio3Center`): one shared value would drag a 50/50 split into the
 three-pane layout as 50/33/17 on the first switch. `MatchOutlineNumberings` takes N outlines and returns rows of indices for the
 keys present in ALL of them (a join on a canonical key, so more documents just means a smaller
@@ -196,6 +203,26 @@ menu/toolbar checked state (`UpdateCommandUi`).
 
 ## Invariants that came from real bugs (see also docs/DESIGN.md)
 
+- `UpdateCommandUi` is NOT called on `ViewEvent::Scrolled` (menu/toolbar churn per wheel
+  detent). Every checked state must therefore depend on zoom mode, focus or a command - with
+  ONE exception, the sync-point toggle, which asks "are the pages in view a point of the map"
+  and so moves with the scroll: it has its own `UpdateSyncPointButton`, change-guarded against
+  a cached 0/1 so an unchanged answer sends no `TB_CHECKBUTTON`. Anything else that needs the
+  scroll position in the chrome belongs there too, never in `UpdateCommandUi`.
+- A launch-scoped suppression of the session restore (File ▸ New Window, `-new-window`) must
+  NEVER reuse `m_restoreSession`: `SaveSession` persists that member, so the suppression would
+  turn into the user's preference. `Create` takes `startEmpty` and derives a local effective
+  flag. The saved WINDOWPLACEMENT is skipped on `startEmpty` specifically, not on the effective
+  flag: a restore-less launch still applies it today, and a second window landing pixel-exactly
+  on the first reads as "New Window closed my documents".
+- The pane header strip is painted OVER content that hit testing still reaches (`ContentOrigin`
+  shifts by `HeaderPx`, `PageLayout::HitTest` has no viewport clip), so every input entry point
+  tests `InHeaderStrip` first and does nothing there. Only the in-flight selection drag keeps
+  reading the band, as its auto-scroll-up area, and the DOUBLE click, which fires the pane's
+  `m_onOpenRequest` (the empty pane's placeholder gesture, on a loaded one). Its hover tooltip
+  shows the full path exactly when `HeaderStripText()` differs from the path; that function is
+  also what the strip DRAWS, and it must stay the single source or the tip starts lying about
+  whether anything was cut.
 - Any `PeekMessage` drain loop must re-post a swallowed `WM_QUIT` (it bypasses ALL filters).
 - Publish `Document::SetWantedRange` BEFORE issuing render requests; every request/latch
   (`pendingId`, `failedScale`) must be released by a posted result or reset on device loss, or pages
@@ -227,6 +254,17 @@ menu/toolbar checked state (`UpdateCommandUi`).
   (`TB_AUTOSIZE` does not re-measure): never patch a labeled toolbar in place on a DPI change -
   the command toolbar is recreated (`RebuildToolbarInBand`) and the menu band re-adds its buttons
   on every font change (`MenuBand::SetFont`).
+- The pane canvas takes its colors from `GetSysColor` ONLY under high contrast
+  (`PaneWindow::Themed`): the classic system colors do not follow the light/dark personalization,
+  so reading them unconditionally would flatten the dark theme to grey. Probed with
+  `SPI_GETHIGHCONTRAST` (no registry key exists), refreshed on `WM_SYSCOLORCHANGE` AND
+  `WM_THEMECHANGED`, and `SetHighContrast` repaints unconditionally: switching between two HC
+  themes changes every color without changing the on/off answer. The page slab stays WHITE in
+  every mode, so the three overlays drawn ON it (selection, search, SyncTeX flash) keep their
+  alpha in HC and change only hue - an opaque fill would erase the glyphs it exists to emphasize.
+  Everything else in HC is flat: both stock HC themes give `COLOR_BTNFACE` and `COLOR_WINDOW` the
+  same value, so the header/tick hairlines ARE the separation and they (and the page border) must
+  land on WHOLE pixels, or a half-covered line is exactly the blending HC rules out.
 - `ID2D1RenderTarget::GetSize()` returns DIPs even in `D2D1_UNIT_MODE_PIXELS`; use the client rect
   or `GetPixelSize()`.
 - Device-loss recovery uses `DxResources::Generation()` so one pane never discards the device the

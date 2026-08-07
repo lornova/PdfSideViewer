@@ -135,6 +135,7 @@ void PaneWindow::ResetDocumentState() {
     m_wheelAccum = 0;
     m_syncMarkers.clear();
     HideAnchorTip();
+    HideHeaderTip();
     m_gapsVersion = 0; // the layout loses its gaps with the document
     // The .synctex regenerates with every build; auto-reload funnels through
     // here too, so the index lazily re-parses on the first query afterwards.
@@ -316,6 +317,28 @@ void PaneWindow::SetDarkMode(bool dark) {
     Invalidate();
 }
 
+void PaneWindow::SetHighContrast(bool on) {
+    // No early-out on an unchanged flag: the system colors THEMSELVES change
+    // while high contrast stays on (switching between the four HC themes), and
+    // this is the only repaint hook the frame has into a pane.
+    m_highContrast = on;
+    Invalidate();
+}
+
+D2D1_COLOR_F PaneWindow::SysColor(int index, float alpha) {
+    const COLORREF c = GetSysColor(index);
+    return D2D1::ColorF((static_cast<UINT32>(GetRValue(c)) << 16) |
+                            (static_cast<UINT32>(GetGValue(c)) << 8) |
+                            static_cast<UINT32>(GetBValue(c)),
+                        alpha);
+}
+
+D2D1_COLOR_F PaneWindow::Themed(int sysIndex, UINT32 dark, UINT32 light, float alpha) const {
+    if (m_highContrast)
+        return SysColor(sysIndex, alpha);
+    return D2D1::ColorF(m_dark ? dark : light, alpha);
+}
+
 void PaneWindow::OnDpiChanged(UINT dpi) {
     if (dpi == 0 || dpi == m_dpi)
         return;
@@ -324,6 +347,11 @@ void PaneWindow::OnDpiChanged(UINT dpi) {
     if (m_scrollTip) { // metrics/font change: recreated lazily at the new DPI
         DestroyWindow(m_scrollTip);
         m_scrollTip = nullptr;
+    }
+    if (m_headerTip) { // same reason
+        DestroyWindow(m_headerTip);
+        m_headerTip = nullptr;
+        m_headerTipUp = false;
     }
     if (m_hasRestoreView) { // pending session-restore offsets are device px too
         m_restoreScrollX *= ratio;
@@ -562,6 +590,13 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         m_dragStart = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
         m_suppressLinkClick = false;
         m_clickActivatedLink = false;
+        // After the latches above, never before: the strip must not leave one
+        // of them set for the next real click. It keeps any selection, though -
+        // clicking a label is not clicking in the document.
+        if (InHeaderStrip(m_dragStart)) {
+            HideHeaderTip(); // tips go away on a click, like every other one
+            return 0;        // the strip is a label, not a window onto what it covers
+        }
         const bool hadSelection = m_hasSelection;
         ClearSelection();
         if (const auto caret = CaretAt(m_dragStart, false)) {
@@ -585,6 +620,16 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         }
         const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        // The strip names the document, so double-clicking it asks for another
+        // one: the same gesture the placeholder branch above offers on an empty
+        // or failed pane, extended to a loaded one. The frame owns the dialog,
+        // and opens it in THIS document's folder. Never a word selection: the
+        // text under the band is not even visible.
+        if (InHeaderStrip(pt)) {
+            if (m_onOpenRequest)
+                m_onOpenRequest();
+            return 0;
+        }
         // The double-click's second WM_LBUTTONUP must not re-activate a link,
         // and after an internal-link scroll the same client point now hits
         // destination content: do not word-select there.
@@ -645,11 +690,28 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
         }
-        UpdateAnchorTip({GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
+        {
+            const POINT pt{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+            // The header strip first, and the anchor hit test gated on the
+            // STRIP, not on whether the header tip is up: between arming the
+            // hover and the tip appearing there is a delay, and anchor markers
+            // scrolled under the band would be hoverable throughout it.
+            UpdateHeaderTip(pt);
+            if (InHeaderStrip(pt))
+                HideAnchorTip();
+            else
+                UpdateAnchorTip(pt);
+        }
+        break;
+
+    case WM_MOUSEHOVER:
+        // Armed by UpdateHeaderTip; the pointer has rested on the strip.
+        ShowHeaderTip({GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)});
         break;
 
     case WM_MOUSELEAVE:
         HideAnchorTip();
+        HideHeaderTip();
         break;
 
     case WM_LBUTTONUP: {
@@ -662,6 +724,12 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         const LONG dy = pt.y - m_dragStart.y;
         const bool suppress = m_suppressLinkClick;
         m_suppressLinkClick = false;
+        // A release inside the strip activates nothing. After the latch above,
+        // so a drag that started in the content and ended here still consumes
+        // it. (Such a drag also left m_hasSelection set, which the click test
+        // below rejects on its own.)
+        if (InHeaderStrip(pt))
+            return 0;
         if (!suppress && !m_hasSelection && dx * dx + dy * dy <= 9) { // click, not drag
             if (wParam & MK_CONTROL) { // Ctrl+click = SyncTeX inverse search
                 InverseSearchAt(pt);
@@ -686,6 +754,8 @@ LRESULT PaneWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(m_hwnd, &pt);
+            if (InHeaderStrip(pt))
+                break; // plain arrow: nothing under the strip is reachable
             if (const auto pp = PagePointAt(pt)) {
                 if (LinkAt(pp->page, pp->x, pp->y)) {
                     SetCursor(LoadCursorW(nullptr, IDC_HAND));
@@ -945,7 +1015,10 @@ void PaneWindow::Render() {
 // ----------------------------------------------------------------- drawing --
 
 void PaneWindow::DrawContent() {
-    const D2D1_COLOR_F background = m_dark ? D2D1::ColorF(0x202020) : D2D1::ColorF(0xF3F3F3);
+    // COLOR_WINDOW, paired with COLOR_WINDOWTEXT for the placeholder text and
+    // the page border: high contrast defines colors in PAIRS, and mixing one
+    // pair's background with another's foreground is how HC bugs are born.
+    const D2D1_COLOR_F background = Themed(COLOR_WINDOW, 0x202020, 0xF3F3F3);
     m_d2dContext->Clear(background);
 
     ComPtr<ID2D1SolidColorBrush> brush;
@@ -966,11 +1039,27 @@ void PaneWindow::DrawContent() {
         const float top = HeaderPx(); // strip spans the document viewport, below the header
         const float stripW = DipToPx(6.0f);
         const float x0 = static_cast<float>(vp.cx) - stripW;
-        brush->SetColor(m_dark ? D2D1::ColorF(0xFFFFFF, 0.06f) : D2D1::ColorF(0x000000, 0.06f));
+        // High contrast has no notion of a 6% wash (it would be invisible on
+        // either HC background), so the strip becomes the flat control surface.
+        brush->SetColor(m_highContrast
+                            ? SysColor(COLOR_BTNFACE)
+                            : D2D1::ColorF(m_dark ? 0xFFFFFF : 0x000000, 0.06f));
         m_d2dContext->FillRectangle(
             D2D1::RectF(x0, top, static_cast<float>(vp.cx), top + static_cast<float>(vp.cy)),
             brush.Get());
-        const float tickH = std::max(2.0f, DipToPx(3.0f));
+        if (m_highContrast) {
+            // BTNFACE and WINDOW are the SAME color in both stock HC themes, so
+            // the fill above delimits nothing: high contrast separates regions
+            // with hairlines, which is what Windows itself does everywhere.
+            // FLOORED: x0 is fractional at most DPIs and a hairline straddling
+            // two pixel columns is 50% blending, which is what HC rules out.
+            const float hx = std::floor(x0);
+            brush->SetColor(SysColor(COLOR_BTNTEXT));
+            m_d2dContext->FillRectangle(
+                D2D1::RectF(hx, top, hx + 1.0f, top + static_cast<float>(vp.cy)), brush.Get());
+        }
+        // Whole pixels for the same reason (the tick's y is integral already).
+        const float tickH = std::max(2.0f, std::floor(DipToPx(3.0f)));
         for (const SyncMarker& m : m_syncMarkers) {
             if (m.page < 0 || m.page >= m_layout.PageCount())
                 continue;
@@ -978,8 +1067,13 @@ void PaneWindow::DrawContent() {
                                                  m_layout.TotalHeight() *
                                                  static_cast<float>(vp.cy) +
                                              0.5f);
-            brush->SetColor(m_dark ? D2D1::ColorF(0x4CC2FF, m.manual ? 1.0f : 0.45f)
-                                   : D2D1::ColorF(0x0067C0, m.manual ? 1.0f : 0.45f));
+            // The manual/generated distinction is an ALPHA outside high
+            // contrast and a distinct system color inside it (GRAYTEXT is HC's
+            // "de-emphasized", and a blended tick would not read at all).
+            brush->SetColor(m_highContrast
+                                ? SysColor(m.manual ? COLOR_HIGHLIGHT : COLOR_GRAYTEXT)
+                                : D2D1::ColorF(m_dark ? 0x4CC2FF : 0x0067C0,
+                                               m.manual ? 1.0f : 0.45f));
             m_d2dContext->FillRectangle(
                 D2D1::RectF(x0, y, static_cast<float>(vp.cx), y + tickH), brush.Get());
         }
@@ -992,7 +1086,7 @@ void PaneWindow::DrawContent() {
         // which shrinks the rect by the DPI factor on scaled monitors.
         const SIZE vp = ViewportPx();
         const float w = DipToPx(2.0f);
-        brush->SetColor(m_dark ? D2D1::ColorF(0x4CC2FF) : D2D1::ColorF(0x0067C0));
+        brush->SetColor(Themed(COLOR_HIGHLIGHT, 0x4CC2FF, 0x0067C0));
         m_d2dContext->DrawRectangle(
             D2D1::RectF(w / 2, w / 2, static_cast<float>(vp.cx) - w / 2,
                         static_cast<float>(vp.cy) - w / 2),
@@ -1024,13 +1118,28 @@ void PaneWindow::DrawPlaceholder(ID2D1SolidColorBrush* brush) {
         text = Str(StrId::PaneEmptyDoc);
         break;
     }
-    brush->SetColor(m_dark ? D2D1::ColorF(0x9D9D9D) : D2D1::ColorF(0x605E5C));
+    brush->SetColor(Themed(COLOR_WINDOWTEXT, 0x9D9D9D, 0x605E5C));
     const float pad = DipToPx(12.0f);
     const float top = HeaderPx(); // Opening/Error keep a path, so the strip shows
     const D2D1_RECT_F rect =
         D2D1::RectF(pad, top + pad, size.width - pad, top + size.height - pad);
     m_d2dContext->DrawText(text.c_str(), static_cast<UINT32>(text.size()), m_textFormat.Get(),
                            rect, brush);
+}
+
+std::wstring PaneWindow::HeaderStripText() const {
+    // Shared by the draw and the hover tooltip, which shows the full path
+    // exactly when this differs from it: two copies of the budget formula would
+    // drift apart at the first tweak and the tip would then lie about whether
+    // anything was cut.
+    const float pad = DipToPx(8.0f);
+    if (!m_headerShowPath)
+        return FileNameOf(m_docPath);
+    // Char budget from the strip width (~6.5 DIP average advance at 12.5px);
+    // DirectWrite's tail ellipsis mops up the residue.
+    const float w = static_cast<float>(ViewportPx().cx);
+    const UINT cch = static_cast<UINT>(std::max(0.0f, (w - 2.0f * pad) / DipToPx(6.5f)));
+    return CompactPathChars(m_docPath, cch);
 }
 
 void PaneWindow::DrawPaneHeader(ID2D1SolidColorBrush* brush) {
@@ -1041,26 +1150,30 @@ void PaneWindow::DrawPaneHeader(ID2D1SolidColorBrush* brush) {
     const float h = HeaderPx();
     // Neutral strip always; the active-pane cue is a thin accent underline along
     // the bottom edge (browser-tab style). A full accent fill read as too heavy
-    // with two panes.
-    brush->SetColor(m_dark ? D2D1::ColorF(0x2D2D2D) : D2D1::ColorF(0xEAEAEA));
+    // with two panes. The strip is a control SURFACE, not document canvas, so
+    // its high-contrast pair is BTNFACE/BTNTEXT, the one the toolbar and the
+    // status bar already use.
+    brush->SetColor(Themed(COLOR_BTNFACE, 0x2D2D2D, 0xEAEAEA));
     m_d2dContext->FillRectangle(D2D1::RectF(0, 0, w, h), brush);
 
     const float pad = DipToPx(8.0f);
-    // Char budget from the strip width (~6.5 DIP average advance at 12.5px);
-    // DirectWrite's tail ellipsis mops up the residue.
-    const UINT cch = static_cast<UINT>(std::max(0.0f, (w - 2.0f * pad) / DipToPx(6.5f)));
-    const std::wstring text =
-        m_headerShowPath ? CompactPathChars(m_docPath, cch) : FileNameOf(m_docPath);
-    // The active pane's name reads at full strength; the inactive one is muted.
-    brush->SetColor(m_active ? (m_dark ? D2D1::ColorF(0xE8E8E8) : D2D1::ColorF(0x1F1F1F))
-                             : (m_dark ? D2D1::ColorF(0x9D9D9D) : D2D1::ColorF(0x8A8A8A)));
+    const std::wstring text = HeaderStripText();
+    // The active pane's name reads at full strength; the inactive one is muted
+    // (GRAYTEXT, which is precisely what high contrast means by "muted").
+    brush->SetColor(m_active ? Themed(COLOR_BTNTEXT, 0xE8E8E8, 0x1F1F1F)
+                             : Themed(COLOR_GRAYTEXT, 0x9D9D9D, 0x8A8A8A));
     m_d2dContext->DrawText(text.c_str(), static_cast<UINT32>(text.size()), m_headerFormat.Get(),
                            D2D1::RectF(pad, 0, w - pad, h), brush);
 
     if (m_active) {
         const float barH = DipToPx(2.0f);
-        brush->SetColor(m_dark ? D2D1::ColorF(0x4CC2FF) : D2D1::ColorF(0x0067C0));
+        brush->SetColor(Themed(COLOR_HIGHLIGHT, 0x4CC2FF, 0x0067C0));
         m_d2dContext->FillRectangle(D2D1::RectF(0, h - barH, w, h), brush);
+    } else if (m_highContrast) {
+        // Same reason as the tick strip: with BTNFACE == WINDOW the strip has no
+        // edge of its own, and only the active pane gets the accent underline.
+        brush->SetColor(SysColor(COLOR_BTNTEXT));
+        m_d2dContext->FillRectangle(D2D1::RectF(0, h - 1.0f, w, h), brush);
     }
 }
 
@@ -1091,8 +1204,13 @@ void PaneWindow::DrawDocument(ID2D1SolidColorBrush* brush) {
     const SIZE vp = ViewportPx();
     const D2D1_POINT_2F origin = ContentOrigin();
     const float desired = DesiredScale();
+    // The page slab stays WHITE in every mode: it is document content, not
+    // chrome, and inverting it is the separate "dark reading mode" feature. Its
+    // border is what keeps it apart from the canvas, so in high contrast it
+    // must be WINDOWTEXT: an HC-white theme paints the canvas white too, and a
+    // themed border is then the only edge the page has.
     const D2D1_COLOR_F pageColor = D2D1::ColorF(D2D1::ColorF::White);
-    const D2D1_COLOR_F borderColor = m_dark ? D2D1::ColorF(0x000000) : D2D1::ColorF(0xB8B8B8);
+    const D2D1_COLOR_F borderColor = Themed(COLOR_WINDOWTEXT, 0x000000, 0xB8B8B8);
 
     // The wanted range must be published BEFORE any render request: an idle
     // worker pops fresh jobs immediately and would judge them against the
@@ -1143,9 +1261,11 @@ void PaneWindow::DrawDocument(ID2D1SolidColorBrush* brush) {
             // Alignment gap: no page slab, no renders, no overlays - just a
             // subtle dashed outline marking the counterpart's missing page.
             // NOT the page-border colors: dark mode's black border works on
-            // white slabs, but a gap sits on the 0x202020 clear.
-            brush->SetColor(m_dark ? D2D1::ColorF(0x808080, 0.5f)
-                                   : D2D1::ColorF(0xB8B8B8, 0.5f));
+            // white slabs, but a gap sits on the 0x202020 clear. In high
+            // contrast the half-alpha becomes a solid GRAYTEXT outline, the
+            // "there is nothing here" color.
+            brush->SetColor(m_highContrast ? SysColor(COLOR_GRAYTEXT)
+                                           : D2D1::ColorF(m_dark ? 0x808080 : 0xB8B8B8, 0.5f));
             m_d2dContext->DrawRectangle(D2D1::RectF(dest.left + 0.5f, dest.top + 0.5f,
                                                     dest.right - 0.5f, dest.bottom - 0.5f),
                                         brush, 1.0f, m_dashStroke.Get());
@@ -1214,7 +1334,18 @@ void PaneWindow::DrawDocument(ID2D1SolidColorBrush* brush) {
                         /*urgent=*/res == 0 || !preview.bitmap);
 
         brush->SetColor(borderColor);
-        m_d2dContext->DrawRectangle(dest, brush, 1.0f);
+        if (m_highContrast) {
+            // Centred on an integral edge, a 1px stroke covers TWO pixel columns
+            // at half coverage each. That reads as a soft border elsewhere, but
+            // in high contrast it is blending, and under an HC-white theme this
+            // border is the only edge a white page has against a white canvas:
+            // inset by half a pixel so it lands on exactly one column.
+            m_d2dContext->DrawRectangle(D2D1::RectF(dest.left + 0.5f, dest.top + 0.5f,
+                                                    dest.right - 0.5f, dest.bottom - 0.5f),
+                                        brush, 1.0f);
+        } else {
+            m_d2dContext->DrawRectangle(dest, brush, 1.0f);
+        }
 
         DrawOverlays(brush, i, dest, desired);
         if (m_showAnchorMarks && !m_syncMarkers.empty()) {
@@ -1270,8 +1401,11 @@ void PaneWindow::DrawAnchorMarker(ID2D1SolidColorBrush* brush, const SyncMarker&
     const D2D1_RECT_F rect = AnchorMarkerRect(dest);
     if (dest.left < DipToPx(20.0f)) {
         // Inside the page corner: alpha backing keeps the glyph readable on
-        // page content.
-        brush->SetColor(m_dark ? D2D1::ColorF(0x000000, 0.55f) : D2D1::ColorF(0xFFFFFF, 0.75f));
+        // page content. High contrast wants an OPAQUE plate instead, and
+        // COLOR_WINDOW is the one that pairs with the glyph colors below.
+        brush->SetColor(m_highContrast ? SysColor(COLOR_WINDOW)
+                                       : D2D1::ColorF(m_dark ? 0x000000 : 0xFFFFFF,
+                                                      m_dark ? 0.55f : 0.75f));
         m_d2dContext->FillRectangle(D2D1::RectF(rect.left - pad, rect.top - pad,
                                                 rect.right + pad, rect.bottom + pad),
                                     brush);
@@ -1281,7 +1415,9 @@ void PaneWindow::DrawAnchorMarker(ID2D1SolidColorBrush* brush, const SyncMarker&
     // would sink into the 0x202020 background). Generated points get more
     // presence than the ticks' 0.45 for the same thin-glyph reason.
     const float alpha = marker.manual ? 1.0f : 0.6f;
-    brush->SetColor(m_dark ? D2D1::ColorF(0x4CC2FF, alpha) : D2D1::ColorF(0x00529B, alpha));
+    brush->SetColor(m_highContrast
+                        ? SysColor(marker.manual ? COLOR_HIGHLIGHT : COLOR_GRAYTEXT)
+                        : D2D1::ColorF(m_dark ? 0x4CC2FF : 0x00529B, alpha));
     m_d2dContext->DrawText(L"⚓", 1, m_markerFormat.Get(), rect, brush);
 }
 
@@ -2030,6 +2166,120 @@ void PaneWindow::HideAnchorTip() {
     SendMessageW(m_anchorTip, TTM_TRACKACTIVATE, FALSE, reinterpret_cast<LPARAM>(&ti));
 }
 
+void PaneWindow::EnsureHeaderTip() {
+    if (m_headerTip)
+        return;
+    m_headerTip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr,
+                                  WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0, m_hwnd,
+                                  nullptr, nullptr, nullptr);
+    if (!m_headerTip)
+        return;
+    TOOLINFOW ti{};
+    ti.cbSize = sizeof(ti);
+    // TTF_TRACK WITHOUT TTF_ABSOLUTE, unlike the two tips above. TTF_ABSOLUTE
+    // means "put the window exactly at the TTM_TRACKPOSITION point", which is
+    // right when the anchor is a small glyph to sit under, and wrong here: the
+    // strip is a band the width of the pane, so a fixed corner of it is nowhere
+    // near the pointer. Without the flag the control places the tip itself,
+    // "beside the tool" and clear of the cursor (TTM_TRACKPOSITION docs), which
+    // is also what keeps a long path on screen near an edge.
+    ti.uFlags = TTF_TRACK;
+    ti.hwnd = m_hwnd;
+    ti.uId = 3; // 1 is the scrollbar-drag tip, 2 the anchor tip
+    ti.lpszText = const_cast<wchar_t*>(L"");
+    SendMessageW(m_headerTip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+}
+
+void PaneWindow::UpdateHeaderTip(POINT client) {
+    // The strip trades the path away for room (file name mode) or shortens it
+    // (path mode); either way the tip is worth showing exactly when what the
+    // strip DRAWS is not the path itself. That comparison also covers the case
+    // where it adds nothing: a document opened by a bare file name.
+    // Not covered, and not detectable without an IDWriteTextLayout: DirectWrite's
+    // own tail ellipsis on a strip too narrow even for the compacted text.
+    if (!InHeaderStrip(client) || HeaderStripText() == m_docPath) {
+        HideHeaderTip();
+        return;
+    }
+    if (m_headerTipUp)
+        return; // already showing: re-tracking it on every move makes it flicker
+    // NOT shown on contact. A TTF_TRACK tooltip appears the moment the owner
+    // says so, and this strip spans the whole pane width: the pointer crosses
+    // it on the way to the toolbar, to the other pane, to anywhere above, and a
+    // tip on every crossing is noise. WM_MOUSEHOVER supplies the system's own
+    // rest-to-show delay (SPI_GETMOUSEHOVERTIME, what comctl32's ordinary
+    // tooltips use) with no timer of ours, and every move re-arms it, so the
+    // countdown starts over while the pointer is still travelling.
+    TRACKMOUSEEVENT tme{sizeof(tme), TME_HOVER | TME_LEAVE, m_hwnd, HOVER_DEFAULT};
+    TrackMouseEvent(&tme);
+}
+
+void PaneWindow::ShowHeaderTip(POINT client) {
+    // The hover can land after the pointer left the strip, after the document
+    // changed or after the header was switched off: everything is re-checked.
+    if (!InHeaderStrip(client) || HeaderStripText() == m_docPath) {
+        HideHeaderTip();
+        return;
+    }
+    if (m_headerTipUp)
+        return;
+    EnsureHeaderTip();
+    if (!m_headerTip)
+        return;
+    m_headerTipUp = true;
+    TOOLINFOW ti{};
+    ti.cbSize = sizeof(ti);
+    ti.hwnd = m_hwnd;
+    ti.uId = 3;
+    ti.lpszText = const_cast<wchar_t*>(m_docPath.c_str());
+    SendMessageW(m_headerTip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
+    // X from the POINTER, Y clear of both the band and the pointer itself. Both
+    // halves are the Windows UX guide (Tooltips and Infotips): "place the tip
+    // near the object being hovered, usually at the pointer's tail or head",
+    // and "avoid covering the object the user is about to view or interact with
+    // - always place the tip on the side of the object, even if that requires
+    // separation between the pointer and the tip". Following the cursor
+    // horizontally is what makes the relationship obvious; dropping below the
+    // band is what keeps the truncated text being explained on screen.
+    //
+    // The band alone is not enough to clear the POINTER: its hotspot is inside
+    // the strip, but the arrow hangs DOWN from there and would cover the tip's
+    // first line. SM_CYCURSOR is the whole cursor box, and over the strip the
+    // cursor is always the standard arrow (the WM_SETCURSOR guard falls through
+    // to the class cursor), whose hotspot is its top-left corner - so one cursor
+    // height below the hotspot clears the glyph, and keeps clearing it when the
+    // accessibility cursor-size setting makes it bigger.
+    //
+    // The control places its own top-left at this point (measured), so the
+    // offset has to be ours, but TTF_ABSOLUTE stays off so it can still pull a
+    // long path back inside the monitor. No removal timeout: by that guide's
+    // taxonomy this is an INFOTIP, supplemental detail rather than a label, and
+    // those are told to keep the tip up.
+    const int belowBand = static_cast<int>(HeaderPx() + DipToPx(4.0f));
+    const int belowCursor = client.y + GetSystemMetricsForDpi(SM_CYCURSOR, m_dpi);
+    POINT at{client.x, std::max(belowBand, belowCursor)};
+    ClientToScreen(m_hwnd, &at);
+    SendMessageW(m_headerTip, TTM_TRACKPOSITION, 0, MAKELPARAM(at.x, at.y));
+    SendMessageW(m_headerTip, TTM_TRACKACTIVATE, TRUE, reinterpret_cast<LPARAM>(&ti));
+    // Leaving the pane without another WM_MOUSEMOVE (straight off the top edge,
+    // which the strip makes easy) must still drop it.
+    TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, m_hwnd, 0};
+    TrackMouseEvent(&tme);
+}
+
+void PaneWindow::HideHeaderTip() {
+    if (!m_headerTipUp)
+        return;
+    m_headerTipUp = false;
+    if (!m_headerTip)
+        return;
+    TOOLINFOW ti{};
+    ti.cbSize = sizeof(ti);
+    ti.hwnd = m_hwnd;
+    ti.uId = 3;
+    SendMessageW(m_headerTip, TTM_TRACKACTIVATE, FALSE, reinterpret_cast<LPARAM>(&ti));
+}
+
 void PaneWindow::OnScrollMessage(UINT msg, WPARAM wParam) {
     const bool vertical = msg == WM_VSCROLL;
     const SIZE vp = ViewportPx();
@@ -2141,6 +2391,11 @@ void PaneWindow::OnMouseWheel(WPARAM wParam, LPARAM lParam, bool horizontal) {
     if (!horizontal && (keys & MK_CONTROL)) {
         // Continuous zoom: fractional deltas from precision touchpads work too.
         const float factor = std::pow(1.1f, static_cast<float>(delta) / WHEEL_DELTA);
+        // Never anchor inside the header band: the point under it is content
+        // the viewport has scrolled out of sight, so the zoom would hold a row
+        // nobody can see still and slide the visible page instead. Clamped to
+        // the top of the content, the gesture keeps working over the strip.
+        pt.y = std::max(pt.y, static_cast<LONG>(HeaderPx()));
         ZoomAt(pt, m_zoom * factor);
         return;
     }
@@ -2743,7 +2998,13 @@ void PaneWindow::DrawOverlays(ID2D1SolidColorBrush* brush, int page, const D2D1_
         if (page >= lo.page && page <= hi.page) {
             const auto it = m_textPages.find(page);
             if (it != m_textPages.end()) {
-                brush->SetColor(D2D1::ColorF(0x3390FF, 0.30f));
+                // These three overlays are the ONE place where high contrast
+                // keeps its alpha: they lie on the page slab, whose glyphs are
+                // a rendered bitmap we cannot recolor, so an opaque HC fill
+                // would not emphasize the text - it would erase it. Only the
+                // hue follows the system.
+                brush->SetColor(m_highContrast ? SysColor(COLOR_HIGHLIGHT, 0.30f)
+                                               : D2D1::ColorF(0x3390FF, 0.30f));
                 const auto& lines = it->second;
                 const int lineStart = page == lo.page ? std::max(lo.line, 0) : 0;
                 const int lineEnd =
@@ -2786,9 +3047,13 @@ void PaneWindow::DrawOverlays(ID2D1SolidColorBrush* brush, int page, const D2D1_
             const Document::SearchMatch& match = m_matches[mi];
             if (match.pageIndex != page)
                 continue;
-            brush->SetColor(static_cast<int>(mi) == m_activeMatch
-                                ? D2D1::ColorF(0xFF8C00, 0.55f)
-                                : D2D1::ColorF(0xFFD400, 0.35f));
+            const bool activeHit = static_cast<int>(mi) == m_activeMatch;
+            if (m_highContrast) // active/other as HIGHLIGHT/GRAYTEXT, like the ticks
+                brush->SetColor(SysColor(activeHit ? COLOR_HIGHLIGHT : COLOR_GRAYTEXT,
+                                         activeHit ? 0.55f : 0.35f));
+            else
+                brush->SetColor(activeHit ? D2D1::ColorF(0xFF8C00, 0.55f)
+                                          : D2D1::ColorF(0xFFD400, 0.35f));
             for (const Document::RectPt& r : match.rects) {
                 m_d2dContext->FillRectangle(
                     D2D1::RectF(dest.left + r.x0 * scale, dest.top + r.y0 * scale,
@@ -2801,9 +3066,12 @@ void PaneWindow::DrawOverlays(ID2D1SolidColorBrush* brush, int page, const D2D1_
     // SyncTeX forward-search flash: transient (kSyncFlashTimer clears it),
     // drawn last so it wins over a coincident search match. Green: distinct
     // from the blue selection and the orange/yellow matches. The ±1.5 pt
-    // vertical inflation keeps thin hboxes visible.
+    // vertical inflation keeps thin hboxes visible. HOTLIGHT in high contrast:
+    // the fourth distinct color an HC theme guarantees, so the flash still
+    // reads apart from a selection and a match underneath it.
     if (m_syncMark.pageIndex == page) {
-        brush->SetColor(D2D1::ColorF(0x00A550, 0.40f));
+        brush->SetColor(m_highContrast ? SysColor(COLOR_HOTLIGHT, 0.40f)
+                                       : D2D1::ColorF(0x00A550, 0.40f));
         for (const Document::RectPt& r : m_syncMark.rects) {
             m_d2dContext->FillRectangle(
                 D2D1::RectF(dest.left + r.x0 * scale, dest.top + (r.y0 - 1.5f) * scale,

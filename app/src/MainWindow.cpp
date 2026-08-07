@@ -151,6 +151,13 @@ constexpr GlyphSpec kToolbarGlyphs[] = {
     // open-left/right arrows next to it, which is what makes the trio read as
     // one control (chosen by rendering the candidates side by side).
     {0xE8AE}, // 18 open centre
+    // The pane-count pair is ONE glyph and its mirror, the same trick E740
+    // uses: E90C is a frame with a single vertical divider, and overlaying its
+    // mirror image puts a second divider in - two columns and three columns,
+    // told apart by divider count at 16 px. A separate three-column glyph does
+    // not exist in MDL2 (the whole PUA was rendered to check).
+    {0xE90C},       // 19 two panes
+    {0xE90C, true}, // 20 three panes
 };
 
 // Per-slot user-visible strings, indexed by PaneSlot.
@@ -350,7 +357,7 @@ MainWindow::~MainWindow() {
 }
 
 bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> files,
-                        std::optional<ForwardSearchRequest> forward) {
+                        std::optional<ForwardSearchRequest> forward, bool startEmpty) {
     m_dx.EnsureCreated(); // fail fast in wWinMain if graphics init is impossible
 
     // Loaded before any UI is built: the language drives the menu and the
@@ -364,6 +371,10 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> fil
     m_outlineVisible = session.outline;
     m_synctexInverse = session.synctexInverse;
     m_restoreSession = session.restoreSession;
+    // The PREFERENCE stays as loaded (SaveSession writes it back); this is the
+    // launch's effective answer, which -new-window forces to false so a second
+    // window does not reopen the documents the first one is showing.
+    const bool restore = m_restoreSession && !startEmpty;
     m_wheelLines = session.wheelLines;
     m_outlineWidthDip = session.outlineWidth;
     m_rebarLocked = session.rebarLocked;
@@ -387,7 +398,7 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> fil
     // its layout either. A third positional argument overrides both (and gets
     // persisted, like every other implicit activation). Both are in range by
     // construction: AppSettings normalizes them.
-    m_paneCount = m_restoreSession ? session.paneCount : m_defaults.paneCount;
+    m_paneCount = restore ? session.paneCount : m_defaults.paneCount;
     if (!files[kSlotCenter].empty())
         m_paneCount = 3;
 
@@ -549,8 +560,11 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> fil
         UpdateStatusBar();
         if (&p == m_activePane)
             UpdatePageBox(); // cheap: change-guarded, skipped while it has focus
-        // Scroll ticks are too frequent for menu/toolbar churn; the checked
-        // state only depends on zoom mode and focus anyway.
+        // Scroll ticks are too frequent for menu/toolbar churn; every other
+        // checked state depends on zoom mode, focus or a command. The sync-point
+        // button is the exception - it answers "are these pages a point of the
+        // map" - so it gets its own change-guarded updater.
+        UpdateSyncPointButton();
         if (e != PaneWindow::ViewEvent::Scrolled)
             UpdateCommandUi();
         else if (GetKeyState(VK_MENU) < 0)
@@ -588,8 +602,8 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> fil
     // Applied before any document opens (panes are still closed: only the
     // flag lands); the restore path then adopts the saved page under it.
     // Session restore off = the configured DEFAULTS drive the launch state.
-    m_scrollMode = (m_restoreSession ? session.scrollMode != 0
-                                     : m_defaults.scrollMode == PaneWindow::ScrollMode::Paged)
+    m_scrollMode = (restore ? session.scrollMode != 0
+                            : m_defaults.scrollMode == PaneWindow::ScrollMode::Paged)
                        ? PaneWindow::ScrollMode::Paged
                        : PaneWindow::ScrollMode::Continuous;
     for (int slot = 0; slot < kPaneSlots; ++slot)
@@ -613,13 +627,13 @@ bool MainWindow::Create(HINSTANCE hinst, int nCmdShow, PerPane<std::wstring> fil
         // Explicit command line wins over the saved session for the DOCUMENTS
         // only; the sync preference applies to every launch path (same order
         // as ApplySession: anchors recapture when the opens complete).
-        m_sync->SetZoomSync(m_restoreSession ? session.zoomSync : m_defaults.zoomSync);
+        m_sync->SetZoomSync(restore ? session.zoomSync : m_defaults.zoomSync);
         for (int slot = 0; slot < kPaneSlots; ++slot)
             if (SlotOn(slot) && !files[static_cast<size_t>(slot)].empty())
                 Pane(slot)->OpenDocument(std::move(files[static_cast<size_t>(slot)]));
-        m_sync->SetScrollSync(m_restoreSession ? session.scrollSync : m_defaults.scrollSync);
+        m_sync->SetScrollSync(restore ? session.scrollSync : m_defaults.scrollSync);
     } else {
-        ApplySession(session);
+        ApplySession(session, restore, startEmpty);
     }
     UpdateTitle();
     UpdateCommandUi();
@@ -658,6 +672,7 @@ void MainWindow::ConfigurePane(int slot) {
     pane->SetMarkerVisibility(m_showAnchors, m_showTicks);
     pane->SetHeaderOptions(m_showHeader, m_headerShowPath);
     pane->SetDarkMode(m_dark);
+    pane->SetHighContrast(m_highContrast);
 }
 
 void MainWindow::SetPaneCount(int count) {
@@ -786,16 +801,16 @@ bool MainWindow::AllPanesHaveOutlines() const {
     return true;
 }
 
-void MainWindow::ApplySession(const AppSettings& session) {
+void MainWindow::ApplySession(const AppSettings& session, bool restore, bool startEmpty) {
     m_splitRatio = session.splitRatio;
     m_splitRatio3Left = session.splitRatio3Left;
     m_splitRatio3Center = session.splitRatio3Center;
-    m_sync->SetZoomSync(m_restoreSession ? session.zoomSync : m_defaults.zoomSync);
+    m_sync->SetZoomSync(restore ? session.zoomSync : m_defaults.zoomSync);
     // Session restore off: chrome, placement and splitter still restore, but
     // the panes start empty and the sync locks come from the defaults. The
     // fallbacks stay seeded from the session either way, so a restore-less
     // launch does not wipe the stored panes at the next SaveSession.
-    if (m_restoreSession) {
+    if (restore) {
         // m_fallback already holds the DPI-rescaled offsets; a later
         // WM_DPICHANGED (e.g. from the placement below) rescales the panes'
         // pending restores.
@@ -811,12 +826,19 @@ void MainWindow::ApplySession(const AppSettings& session) {
     }
     // After the restored positions land, DocumentOpened events recapture the
     // anchor, so enabling scroll sync here preserves the saved alignment.
-    m_sync->SetScrollSync(m_restoreSession ? session.scrollSync : m_defaults.scrollSync);
+    m_sync->SetScrollSync(restore ? session.scrollSync : m_defaults.scrollSync);
     // Apply the placement only if the rect still touches a live monitor
     // (after a monitor disconnect the window would come up fully off-screen),
     // and without showing: Create issues the single ShowWindow, honoring the
     // maximized flag (a second ShowWindow(SW_SHOWNORMAL) would un-maximize).
-    if (session.hasPlacement &&
+    //
+    // A NEW WINDOW skips it entirely, and on startEmpty rather than on restore:
+    // even a launch whose restore preference is already off applies the saved
+    // rect today, so without this the second window would come up exactly on
+    // top of the first - same size, same maximized state, in front - and read
+    // as "New Window closed my documents". Its position comes from the parent's
+    // cascade offset (SpawnNewWindow) or from CW_USEDEFAULT.
+    if (!startEmpty && session.hasPlacement &&
         MonitorFromRect(&session.normalRect, MONITOR_DEFAULTTONULL) != nullptr) {
         WINDOWPLACEMENT wp{};
         wp.length = sizeof(wp);
@@ -915,6 +937,8 @@ HMENU MainWindow::BuildMenuBar() {
     m_mruFilesMenu = CreatePopupMenu();
     m_mruSessionsMenu = CreatePopupMenu();
     HMENU file = CreatePopupMenu();
+    append(file, IDC_NEW_WINDOW, StrId::MenuNewWindow);
+    AppendMenuW(file, MF_SEPARATOR, 0, nullptr);
     // VISUAL order (left, centre, right), like the toolbar trio: the entries
     // name places on screen, so listing them in any other order reads wrong.
     // The centre is always present, two panes or three, because opening it is
@@ -1004,7 +1028,7 @@ HMENU MainWindow::BuildMenuBar() {
     append(sync, IDC_TOGGLE_SCROLL_SYNC, StrId::MenuScrollSync);
     append(sync, IDC_TOGGLE_ZOOM_SYNC, StrId::MenuZoomSync);
     AppendMenuW(sync, MF_SEPARATOR, 0, nullptr);
-    append(sync, IDC_ADD_SYNC_POINT, StrId::MenuAddSyncPoint);
+    append(sync, IDC_ADD_SYNC_POINT, StrId::MenuSyncPointHere);
     append(sync, IDC_SYNC_FROM_BOOKMARKS, StrId::MenuSyncFromBookmarks);
     append(sync, IDC_SYNC_POINTS, StrId::MenuSyncPoints);
     append(sync, IDC_CLEAR_SYNC_POINTS, StrId::MenuClearSyncPoints);
@@ -1198,12 +1222,19 @@ void MainWindow::CreateToolbar(HINSTANCE hinst) {
         button(2, IDC_TOGGLE_SCROLL_SYNC, BTNS_CHECK, StrId::LblScrollSync),
         button(3, IDC_TOGGLE_ZOOM_SYNC, BTNS_CHECK, StrId::LblZoomSync),
         separator(),
-        button(12, IDC_ADD_SYNC_POINT, BTNS_BUTTON, StrId::LblAddSyncPoint),
+        // Pressed while the panes already sit on a point of the map, and a
+        // click there REMOVES it: the state is what makes the toggle readable.
+        button(12, IDC_ADD_SYNC_POINT, BTNS_CHECK, StrId::LblSyncPoint),
         button(13, IDC_SYNC_FROM_BOOKMARKS, BTNS_BUTTON, StrId::LblSyncFromBookmarks, true),
         button(14, IDC_SYNC_POINTS, BTNS_BUTTON, StrId::LblSyncPoints),
         button(15, IDC_CLEAR_SYNC_POINTS, BTNS_BUTTON, StrId::LblClearSyncPoints),
         button(16, IDC_TOGGLE_ALIGNMENT_GAPS, BTNS_CHECK, StrId::LblAlignmentGaps),
         separator(),
+        // Pane arrangement: how many, then the operation on them. Another
+        // manual check pair (the View menu holds the same two as a radio
+        // group), pressed from UpdateCommandUi.
+        button(19, IDC_PANES_TWO, BTNS_CHECK, StrId::LblPanesTwo),
+        button(20, IDC_PANES_THREE, BTNS_CHECK, StrId::LblPanesThree),
         button(17, IDC_SWAP_PANES, BTNS_BUTTON, StrId::LblSwapPanes, true),
         separator(),
         button(11, IDC_ZOOM_ACTUAL, BTNS_BUTTON, StrId::LblActualSize), // momentary
@@ -1218,7 +1249,11 @@ void MainWindow::CreateToolbar(HINSTANCE hinst) {
         separator(),
         button(6, IDC_FIND_SHOW, BTNS_BUTTON, StrId::LblFind),
         separator(),
-        button(8, IDC_FULLSCREEN, BTNS_BUTTON, StrId::LblFullScreen),
+        // Pressed while full screen is on, like the View menu item is checked.
+        // The floating escape hatch (EnsureFsBar) stays a plain button: it is
+        // the ONE control that leaves full screen, and a pressed state there
+        // would read as "click me to stay".
+        button(8, IDC_FULLSCREEN, BTNS_CHECK, StrId::LblFullScreen),
     };
     SendMessageW(m_toolbar, TB_ADDBUTTONSW, std::size(buttons),
                  reinterpret_cast<LPARAM>(buttons));
@@ -1698,10 +1733,22 @@ void MainWindow::ResetRebarLayout() {
 void MainWindow::ShowRebarContextMenu(POINT screenPt) {
     // IE-style bar context menu: the toolbar toggle plus the lock. No
     // TPM_RETURNCMD: the picked item posts an ordinary WM_COMMAND.
+    //
+    // Full screen keeps only the text options, because the other three cannot
+    // do there what they say. The bar is locked unconditionally, so the lock
+    // records a setting nobody can see applied (SetRebarLocked) and the reset
+    // only rewrites the restore snapshot (ResetRebarLayout). The toolbar toggle
+    // is worse than inert, it is a ONE-WAY door: hiding the bar takes this menu
+    // with it (the menu band is gone in full screen and IDC_TOGGLE_TOOLBAR has
+    // no accelerator), and m_toolbarVisible is persisted, so the bar would also
+    // be missing at the next launch. Whether the toolbar shows in full screen
+    // at all belongs to the Options dialog, which is where it stays.
     HMENU menu = CreatePopupMenu();
-    AppendMenuW(menu, MF_STRING | (m_toolbarVisible ? MF_CHECKED : 0u), IDC_TOGGLE_TOOLBAR,
-                Str(StrId::MenuToolbar));
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    if (!m_fullscreen) {
+        AppendMenuW(menu, MF_STRING | (m_toolbarVisible ? MF_CHECKED : 0u), IDC_TOGGLE_TOOLBAR,
+                    Str(StrId::MenuToolbar));
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
     // IE's toolbar text options, verbatim (its Customize dialog's "Text
     // options" values), as a radio group.
     AppendMenuW(menu, MF_STRING, IDC_TOOLBAR_TEXT_BELOW, Str(StrId::MenuToolbarTextBelow));
@@ -1712,11 +1759,13 @@ void MainWindow::ShowRebarContextMenu(POINT screenPt) {
                                               : IDC_TOOLBAR_TEXT_NONE;
     CheckMenuRadioItem(menu, IDC_TOOLBAR_TEXT_BELOW, IDC_TOOLBAR_TEXT_NONE, textSel,
                        MF_BYCOMMAND);
-    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | (m_rebarLocked ? MF_CHECKED : 0u), IDC_LOCK_TOOLBARS,
-                Str(StrId::MenuLockToolbars));
-    AppendMenuW(menu, MF_STRING, IDC_RESET_TOOLBAR_LAYOUT,
-                Str(StrId::MenuResetToolbarLayout));
+    if (!m_fullscreen) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(menu, MF_STRING | (m_rebarLocked ? MF_CHECKED : 0u), IDC_LOCK_TOOLBARS,
+                    Str(StrId::MenuLockToolbars));
+        AppendMenuW(menu, MF_STRING, IDC_RESET_TOOLBAR_LAYOUT,
+                    Str(StrId::MenuResetToolbarLayout));
+    }
     TrackPopupMenu(menu, TPM_LEFTALIGN | TPM_TOPALIGN | TPM_RIGHTBUTTON, screenPt.x, screenPt.y,
                    0, m_hwnd, nullptr);
     DestroyMenu(menu);
@@ -1777,7 +1826,7 @@ StrId MainWindow::CommandTipId(UINT id) {
     case IDC_TOGGLE_OUTLINE:
         return StrId::TipOutline;
     case IDC_ADD_SYNC_POINT:
-        return StrId::TipAddSyncPoint;
+        return StrId::TipSyncPointHere;
     case IDC_SYNC_FROM_BOOKMARKS:
         return StrId::TipSyncFromBookmarks;
     case IDC_SYNC_POINTS:
@@ -1788,6 +1837,10 @@ StrId MainWindow::CommandTipId(UINT id) {
         return StrId::TipAlignmentGaps;
     case IDC_SWAP_PANES:
         return StrId::TipSwapPanes;
+    case IDC_PANES_TWO:
+        return StrId::PanesTwo;
+    case IDC_PANES_THREE:
+        return StrId::PanesThree;
     case IDC_FIND_MATCH_CASE:
         return StrId::TipMatchCase;
     case IDC_FIND_WHOLE_WORD:
@@ -1987,9 +2040,9 @@ INT_PTR CALLBACK MainWindow::OptionsDlgProc(HWND dlg, UINT msg, WPARAM wParam, L
                        self->m_restoreSession ? BST_CHECKED : BST_UNCHECKED);
         const HWND panesCombo = GetDlgItem(dlg, kOptPaneCountId);
         SendMessageW(panesCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(Str(StrId::OptPanesTwo)));
+                     reinterpret_cast<LPARAM>(Str(StrId::PanesTwo)));
         SendMessageW(panesCombo, CB_ADDSTRING, 0,
-                     reinterpret_cast<LPARAM>(Str(StrId::OptPanesThree)));
+                     reinterpret_cast<LPARAM>(Str(StrId::PanesThree)));
         SendMessageW(panesCombo, CB_SETCURSEL, self->m_defaults.paneCount >= 3 ? 1 : 0, 0);
         const HWND scrollCombo = GetDlgItem(dlg, kOptScrollModeId);
         SendMessageW(scrollCombo, CB_ADDSTRING, 0,
@@ -2160,6 +2213,39 @@ LRESULT CALLBACK MainWindow::PageBoxProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         break;
     }
     return DefSubclassProc(hwnd, msg, wParam, lParam);
+}
+
+void MainWindow::RebuildSystemColorAssets() {
+    // Every glyph imagelist BAKES GetSysColor(COLOR_BTNTEXT) into premultiplied
+    // pixels (util/GlyphIcons), and each cache is keyed on the DPI alone, so
+    // without this the icons keep the old ink after a HIGH CONTRAST switch -
+    // black glyphs on a black bar, or the reverse - until a DPI, language or
+    // text-mode change happens to rebuild them. Ordinary light/dark switching
+    // does not come through here: the classic system colours do not follow it.
+    UpdateHighContrast(); // the panes paint their own chrome from these colors
+    RebuildToolbarIcons();
+    m_findBarDpi = 0; // the DPI-keyed cache's only invalidation hook
+    EnsureFindBarToolbars();
+    if (m_fsBar) { // lazy: dropped here, rebuilt by EnsureFsBar when needed
+        DestroyWindow(m_fsBar);
+        m_fsBar = nullptr;
+    }
+    if (m_fsBarIcons) {
+        ImageList_Destroy(m_fsBarIcons);
+        m_fsBarIcons = nullptr;
+    }
+    // "Top level windows that use common controls must forward the
+    // WM_SYSCOLORCHANGE message to the controls; otherwise, the controls will
+    // not be notified of the color change" - the message reaches top-level
+    // windows only, so every one of ours is named here (a toolbar draws its
+    // buttons with the 3D Objects colour and would otherwise stay behind).
+    for (HWND child : {m_rebar, m_toolbar, m_menuBand.Toolbar(), m_status, m_outlineTree,
+                       m_pageBox, m_findBar, m_findEdit, m_findCount, m_findOptsBar,
+                       m_findNavBar, m_findCloseBar}) {
+        if (child)
+            SendMessageW(child, WM_SYSCOLORCHANGE, 0, 0);
+    }
+    InvalidateRect(m_hwnd, nullptr, TRUE);
 }
 
 void MainWindow::RebuildToolbarIcons() {
@@ -2358,6 +2444,7 @@ void MainWindow::UpdateCommandUi() {
     const bool bothDocs = AllPanesHaveDocuments();
     const bool canGenerate = AllPanesHaveOutlines();
     const bool hasPoints = m_sync->HasPoints();
+    const bool atPoint = m_sync->PointIndexHere() >= 0;
     if (m_menu) {
         const auto check = [this](UINT id, bool on) {
             CheckMenuItem(m_menu, id, MF_BYCOMMAND | (on ? MF_CHECKED : MF_UNCHECKED));
@@ -2370,6 +2457,9 @@ void MainWindow::UpdateCommandUi() {
         check(IDC_TOGGLE_SCROLL_SYNC, m_sync->ScrollSync());
         check(IDC_TOGGLE_ZOOM_SYNC, m_sync->ZoomSync());
         check(IDC_TOGGLE_ALIGNMENT_GAPS, m_showAlignmentGaps);
+        // Checked = the pages on screen already carry a point, so the command
+        // is a removal. Same reading as the toolbar button.
+        check(IDC_ADD_SYNC_POINT, atPoint);
         check(IDC_FIND_MATCH_CASE, m_findOptions.matchCase);
         check(IDC_FIND_WHOLE_WORD, m_findOptions.wholeWord);
         check(IDC_FIND_REGEX, m_findOptions.regex);
@@ -2425,6 +2515,14 @@ void MainWindow::UpdateCommandUi() {
         press(IDC_FIT_PAGE, mode == PaneWindow::ZoomMode::FitPage);
         press(IDC_SCROLL_CONTINUOUS, m_scrollMode == PaneWindow::ScrollMode::Continuous);
         press(IDC_SCROLL_PAGED, m_scrollMode == PaneWindow::ScrollMode::Paged);
+        press(IDC_PANES_TWO, m_paneCount < 3);
+        press(IDC_PANES_THREE, m_paneCount >= 3);
+        press(IDC_FULLSCREEN, m_fullscreen);
+        // Written unconditionally here, so the cache is simply told what the
+        // button now shows: a fresh toolbar comes up unpressed and a click
+        // auto-toggles a BTNS_CHECK behind our back, and both paths end here.
+        press(IDC_ADD_SYNC_POINT, atPoint);
+        m_atSyncPoint = atPoint ? 1 : 0;
         const auto tbEnable = [this](WORD id, bool on) {
             SendMessageW(m_toolbar, TB_ENABLEBUTTON, id, MAKELPARAM(on ? TRUE : FALSE, 0));
         };
@@ -2441,6 +2539,17 @@ void MainWindow::UpdateCommandUi() {
         SendMessageW(m_findOptsBar, TB_CHECKBUTTON, IDC_FIND_REGEX,
                      MAKELPARAM(m_findOptions.regex ? TRUE : FALSE, 0));
     }
+}
+
+void MainWindow::UpdateSyncPointButton() {
+    if (!m_sync || !m_toolbar)
+        return;
+    const int state = m_sync->PointIndexHere() >= 0 ? 1 : 0;
+    if (state == m_atSyncPoint)
+        return;
+    m_atSyncPoint = state;
+    SendMessageW(m_toolbar, TB_CHECKBUTTON, IDC_ADD_SYNC_POINT,
+                 MAKELPARAM(state ? TRUE : FALSE, 0));
 }
 
 void MainWindow::UpdateStatusBar() {
@@ -3066,6 +3175,82 @@ void MainWindow::LaunchInverseSearch(const SyncTexIndex::InverseHit& hit) {
     }
 }
 
+void MainWindow::SpawnNewWindow() {
+    // A second PROCESS, not a second frame: the frame is a stack local of
+    // wWinMain, WM_DESTROY posts the quit, the accelerator table is bound to one
+    // HWND, and two frames would have to agree on who owns SaveSession. Separate
+    // processes need none of that - the settings file is written whole and
+    // swapped atomically, last close wins.
+    wchar_t exe[MAX_PATH];
+    const DWORD len = GetModuleFileNameW(nullptr, exe, ARRAYSIZE(exe));
+    if (len == 0 || len >= ARRAYSIZE(exe)) { // truncation reports the same way
+        ShowStatusMessage(StrId::NewWindowFailed);
+        return;
+    }
+    // The child reads settings.ini from DISK: without this it would come up with
+    // the language and options of the last close, not the ones on screen now.
+    // It writes exactly what this window would write when closed anyway.
+    SaveSession();
+    // CreateProcessW, never ShellExecuteW: that one honors the per-user
+    // RunAsAdmin compatibility layer and would silently produce an ELEVATED
+    // sibling, which refuses inverse search and (by UIPI) can no longer receive
+    // a handoff from Explorer or an editor.
+    //
+    // The first token MUST be the quoted exe: the child reads argv[1], so a
+    // command line starting with the switch would make -new-window its argv[0]
+    // and the window would restore the session - the very thing this avoids.
+    std::wstring cmd = L"\"";
+    cmd += exe;
+    cmd += L"\" -new-window";
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    // SW_SHOWNORMAL explicitly: inherited, SW_SHOWDEFAULT resolves from OUR
+    // startup info, so a parent launched minimized would spawn a minimized
+    // window. Create feeds nCmdShow straight into its single ShowWindow.
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_SHOWNORMAL;
+    // Cascade: the child skips the saved placement (see ApplySession), but
+    // CW_USEDEFAULT cascades PER PROCESS, so two fresh processes would still
+    // land on the same spot. Offset from OUR normal rect (not the maximized
+    // one), one title-bar step per window already spawned from here, and only
+    // while the result stays inside this monitor's work area.
+    WINDOWPLACEMENT wp{};
+    wp.length = sizeof(wp);
+    MONITORINFO mi{};
+    mi.cbSize = sizeof(mi);
+    if (GetWindowPlacement(m_hwnd, &wp) &&
+        GetMonitorInfoW(MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST), &mi)) {
+        const int step = (static_cast<int>(m_spawnCount) + 1) *
+                         (GetSystemMetricsForDpi(SM_CYCAPTION, m_dpi) +
+                          GetSystemMetricsForDpi(SM_CYSIZEFRAME, m_dpi));
+        const int x = wp.rcNormalPosition.left + step;
+        const int y = wp.rcNormalPosition.top + step;
+        const int w = wp.rcNormalPosition.right - wp.rcNormalPosition.left;
+        const int h = wp.rcNormalPosition.bottom - wp.rcNormalPosition.top;
+        if (x >= mi.rcWork.left && y >= mi.rcWork.top && x + w <= mi.rcWork.right &&
+            y + h <= mi.rcWork.bottom) {
+            si.dwFlags |= STARTF_USEPOSITION;
+            si.dwX = static_cast<DWORD>(x);
+            si.dwY = static_cast<DWORD>(y);
+        }
+    }
+    PROCESS_INFORMATION pi{};
+    // Application name AND command line: no unquoted-path search ambiguity, and
+    // the child still gets an argv. The environment is inherited on purpose -
+    // wWinMain already cleared ELECTRON_RUN_AS_NODE out of it, and
+    // PSV_SETTINGS_DIR must travel so an E2E child stays in the sandbox.
+    if (!CreateProcessW(exe, cmd.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        // ERROR_ELEVATION_REQUIRED lands here and is NOT retried with runas:
+        // an elevated sibling is exactly what CreateProcessW was chosen to avoid.
+        ShowStatusMessage(StrId::NewWindowFailed);
+        return;
+    }
+    ++m_spawnCount;
+    AllowSetForegroundWindow(pi.dwProcessId);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+}
+
 BOOL MainWindow::HandleCopyData(const COPYDATASTRUCT& cds) {
     // Requests from short-lived second instances (Explorer-verb opens, SyncTeX
     // forward search), one versioned XML payload for both. The message crosses
@@ -3122,10 +3307,35 @@ BOOL MainWindow::HandleCopyData(const COPYDATASTRUCT& cds) {
             return FALSE;
         ForwardSearchRequest req{std::move(cmd->forward->tex), cmd->forward->line,
                                  std::move(cmd->forward->pdf)};
+        // A probe is a CLAIM, answered before anything is visible: declining
+        // must leave no trace, or the wrong window would flash on every build.
+        if (cmd->forward->onlyIfOpen && !PaneShowingDocument(req.pdf))
+            return FALSE;
         RouteForwardSearch(std::move(req));
         return TRUE;
     }
     return FALSE;
+}
+
+// HasPersistableDocument, not HasDocument: a pane in the middle of an
+// auto-reload still owns its path, which is the LaTeX loop's normal state and
+// exactly when a forward search arrives.
+//
+// BOTH sides are normalized. A pane keeps the path it was handed, and the
+// command line's POSITIONAL arguments are not absolutized (only the verbs'
+// operands are), so a viewer launched as `PdfSideViewer.exe a.pdf b.pdf` holds
+// "a.pdf" while every request carries a rooted path. Comparing raw, that window
+// would deny holding its own document: the claim probe would decline it and the
+// fallback would then retarget a pane in some other window.
+PaneWindow* MainWindow::PaneShowingDocument(const std::wstring& path) const {
+    const std::wstring wanted = NormalizePath(path);
+    for (int slot = 0; slot < kPaneSlots; ++slot) {
+        PaneWindow* pane = SlotOn(slot) ? Pane(slot) : nullptr;
+        if (pane && pane->HasPersistableDocument() &&
+            lstrcmpiW(NormalizePath(pane->DocumentPath()).c_str(), wanted.c_str()) == 0)
+            return pane; // first match in visual order
+    }
+    return nullptr;
 }
 
 void MainWindow::RouteForwardSearch(ForwardSearchRequest req) {
@@ -3137,14 +3347,11 @@ void MainWindow::RouteForwardSearch(ForwardSearchRequest req) {
         FLASHWINFO fi{sizeof(fi), m_hwnd, FLASHW_TRAY | FLASHW_TIMERNOFG, 3, 0};
         FlashWindowEx(&fi);
     }
-    const auto matches = [&](PaneWindow& pane) {
+    const auto matches = [&](PaneWindow& pane) { // same normalization as the helper
         return pane.HasPersistableDocument() &&
-               lstrcmpiW(pane.DocumentPath().c_str(), req.pdf.c_str()) == 0;
+               lstrcmpiW(NormalizePath(pane.DocumentPath()).c_str(), req.pdf.c_str()) == 0;
     };
-    PaneWindow* target = nullptr;
-    for (int slot = 0; slot < kPaneSlots && !target; ++slot)
-        if (SlotOn(slot) && matches(*Pane(slot)))
-            target = Pane(slot); // first match in visual order
+    PaneWindow* target = PaneShowingDocument(req.pdf);
     // The same pdf open in several panes: follow user attention.
     if (target && matches(*FocusedPane()))
         target = FocusedPane();
@@ -3483,11 +3690,18 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             // must not rearrange the window).
             OpenDocumentDialog(kSlotCenter);
             return 0;
+        // UpdateCommandUi AFTER, not only inside SetPaneCount: clicking the
+        // count that is already active is a no-op there (it early-returns), but
+        // comctl32 has already toggled the BTNS_CHECK button OFF on its way to
+        // this command, so without a re-assert the pair would show neither
+        // pressed. Idempotent on the path that did change the count.
         case IDC_PANES_TWO:
             SetPaneCount(2);
+            UpdateCommandUi();
             return 0;
         case IDC_PANES_THREE:
             SetPaneCount(3);
+            UpdateCommandUi();
             return 0;
         case IDC_CLOSE_DOC: {
             // Only when a pane really has focus: FocusedPane() falls back to
@@ -3564,13 +3778,22 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
         // The sync-point handlers re-check their preconditions: accelerators
         // fire regardless of the menu items' greyed state.
-        case IDC_ADD_SYNC_POINT:
-            if (m_sync->AddPointHere()) {
-                RememberSyncPoints();
-                UpdateCommandUi();
-                UpdateStatusBar();
-            }
+        case IDC_ADD_SYNC_POINT: {
+            // A toggle, which is what the pressed button promises: on pages that
+            // already carry a point the command removes it instead of replacing
+            // it with an identical manual one. PointIndexHere answers -1
+            // whenever AddPointHere would refuse, so the precondition re-check
+            // survives (accelerators fire regardless of the greyed state).
+            const int here = m_sync->PointIndexHere();
+            if (here >= 0)
+                m_sync->RemovePoint(static_cast<size_t>(here));
+            else if (!m_sync->AddPointHere())
+                return 0;
+            RememberSyncPoints(); // an emptied map forgets the pair
+            UpdateCommandUi();
+            UpdateStatusBar();
             return 0;
+        }
         case IDC_SYNC_FROM_BOOKMARKS:
             GenerateSyncPointsFromBookmarks(true);
             return 0;
@@ -3737,6 +3960,9 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         case IDC_SWAP_PANES_BACK:
             SwapPanes(true); // identical to F8 with two panes
             return 0;
+        case IDC_NEW_WINDOW:
+            SpawnNewWindow();
+            return 0;
         case IDC_FULLSCREEN:
             ToggleFullScreen();
             return 0;
@@ -3899,6 +4125,16 @@ LRESULT MainWindow::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     case WM_SETTINGCHANGE:
         if (lParam && wcscmp(reinterpret_cast<PCWSTR>(lParam), L"ImmersiveColorSet") == 0)
             UpdateTheme();
+        break;
+
+    case WM_SYSCOLORCHANGE:
+    case WM_THEMECHANGED:
+        // Both, on purpose: WM_SYSCOLORCHANGE is the colour-metric change, and
+        // WM_THEMECHANGED is what the accessibility guidance names for anything
+        // that CACHES colours (our imagelists bake them into pixels). Doing the
+        // work twice on an HC switch is cheap and idempotent; missing one is
+        // a bar full of invisible glyphs.
+        RebuildSystemColorAssets();
         break;
 
     case WM_CLOSE:
@@ -4626,6 +4862,26 @@ void MainWindow::FitOutlineToContent() {
 
 void MainWindow::OpenDocumentDialog(int slot) {
     wchar_t buffer[MAX_PATH] = L"";
+    // Start in the folder of the document THIS slot already holds: replacing one
+    // of two compared documents almost always means picking a sibling of it. An
+    // EMPTY pane substitutes nothing and leaves the folder to the shell.
+    //
+    // The fallback is read only when the pane does not EXIST, which is the
+    // parked centre: in two-pane mode its slot still owns that session and Open
+    // Centre is about to bring it back. Reading it for a live-but-empty pane
+    // would be a different thing entirely - m_fallback is seeded from the saved
+    // session at every launch, so a brand-new empty window (File > New Window)
+    // would open its picker in the folder of a session it deliberately did not
+    // restore.
+    const std::wstring& held = Pane(slot) ? Pane(slot)->DocumentPath()
+                                          : m_fallback[static_cast<size_t>(slot)].path;
+    std::wstring initialDir;
+    if (!held.empty()) {
+        std::error_code ec;
+        const fs::path parent = fs::path(held).parent_path();
+        if (!parent.empty() && fs::is_directory(parent, ec))
+            initialDir = parent.wstring();
+    }
     OPENFILENAMEW ofn{};
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = m_hwnd;
@@ -4633,6 +4889,9 @@ void MainWindow::OpenDocumentDialog(int slot) {
     ofn.lpstrFile = buffer;
     ofn.nMaxFile = MAX_PATH;
     ofn.lpstrTitle = Str(kSlotOpenDlgTitle[slot]);
+    // Only a hint: comdlg32 prefers its own per-application last-visited entry
+    // once the user has navigated away in a previous run.
+    ofn.lpstrInitialDir = initialDir.empty() ? nullptr : initialDir.c_str();
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_HIDEREADONLY;
     if (!GetOpenFileNameW(&ofn))
         return;
@@ -4644,6 +4903,14 @@ void MainWindow::OpenDocumentDialog(int slot) {
         SetPaneCount(3);
     if (Pane(slot))
         Pane(slot)->OpenDocument(buffer);
+}
+
+bool MainWindow::IsHighContrast() {
+    HIGHCONTRASTW hc{};
+    hc.cbSize = sizeof(hc);
+    if (!SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0))
+        return false;
+    return (hc.dwFlags & HCF_HIGHCONTRASTON) != 0;
 }
 
 bool MainWindow::IsSystemDark() {
@@ -4667,5 +4934,12 @@ void MainWindow::UpdateTheme() {
     if (Pane(kSlotLeft)) {
         ForEachPane([this](PaneWindow& p) { p.SetDarkMode(m_dark); });
     }
+    UpdateHighContrast();
     InvalidateRect(m_hwnd, nullptr, TRUE);
+}
+
+void MainWindow::UpdateHighContrast() {
+    m_highContrast = IsHighContrast();
+    if (Pane(kSlotLeft))
+        ForEachPane([this](PaneWindow& p) { p.SetHighContrast(m_highContrast); });
 }

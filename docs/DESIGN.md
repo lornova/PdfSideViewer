@@ -216,9 +216,13 @@ insert; the break survives lock toggles via SetRebarLocked's per-band snapshot a
 overridden by a saved `rebarBands` layout). "Reset the Toolbar Layout" (View menu and rebar
 context menu, next to the lock) rebuilds that default through ApplyRebarLayout; invoked while
 full screen it retargets the exit snapshot instead, since the forced full-screen row is not
-the user's arrangement. The full-screen icon is COMPOSED: MDL2 ships no
-single 4-corner-arrows glyph, so `GlyphSpec::mirrorOverlay` draws E740 plus its horizontal
-mirror (GM_ADVANCED world transform; the cell rect maps onto itself). Full screen normally
+the user's arrangement. Two toolbar icons are COMPOSED by `GlyphSpec::mirrorOverlay`, which
+draws a glyph plus its horizontal mirror (GM_ADVANCED world transform; the cell rect maps onto
+itself): the full-screen one, because MDL2 ships no single 4-corner-arrows glyph, and the
+THREE-panes one, because it ships no three-column frame either - E90C is a frame with one
+vertical divider, and its mirror adds the second, so the pane-count pair is one glyph told
+apart by divider count (the pair is a manual `BTNS_CHECK` couple like the scroll modes, pressed
+from `UpdateCommandUi`, mirroring the View menu's radio group). Full screen normally
 hides all chrome, but two Options ([window] fsToolbar / fsStatusbar) keep the COMMAND toolbar
 bands and/or the status bar on screen - never the menu band, which full screen always hides
 (Alt/F10 still track the popups): the rebar therefore shows only while the kept toolbar band
@@ -226,9 +230,15 @@ is itself visible per View > Toolbar. The kept chrome uses a FORCED layout
 (ApplyFullscreenBandLayout), overriding the user's lock setting and arrangement: one locked row
 (no grippers, no dragging), toolbar stretched, page box right-aligned via RBBS_FIXEDSIZE at the
 row end - without the override, an unlocked page box band kept its own row and stretched to the
-full screen width. "Lock the toolbars" stays reachable in full screen (Alt menu, rebar context
-menu): SetRebarLocked then only records the setting and refreshes the checkmark, and the exit
-path applies it. Hiding a band makes comctl32 MERGE its row into the next
+full screen width. Because that layout is forced, the rebar CONTEXT MENU drops to the three text
+options while full screen: the lock and the reset would only record intentions (SetRebarLocked
+records the setting and refreshes the checkmark, ResetRebarLayout retargets the exit snapshot,
+and the exit path applies both), and the toolbar toggle would be a ONE-WAY door - hiding the bar
+takes the context menu with it, the menu band is gone, IDC_TOGGLE_TOOLBAR has no accelerator,
+and `[window] toolbar` is persisted, so the bar would still be missing at the next launch.
+Whether the toolbar shows in full screen at all is `[window] fsToolbar`, an Options checkbox.
+Both commands stay reachable through the Alt menu, which still tracks. Hiding a band makes
+comctl32 MERGE its row into the next
 one - the following band's RBBS_BREAK is cleared for good, re-showing does not restore it - so
 ToggleFullScreen snapshots the band layout at entry, restores it at exit (SetRebarLocked for
 the real gripper styles FIRST, then ApplyRebarLayout: the snapshot's cx values were captured in
@@ -325,6 +335,23 @@ new window even though the hung receiver may still serve the original request la
 occasional duplicate is accepted over deduplication machinery. Default UIPI is the channel's
 authorization boundary (no `ChangeWindowMessageFilterEx` exception): an ELEVATED viewer simply
 never receives handoffs from medium-integrity senders, which then cold-start.
+
+With **File ▸ New Window** several viewers can be up at once, and `FindWindowW(kClassName)`
+answers with exactly one of them (the first in z-order). For the Explorer verbs that is the
+right convention — the window the user was last in — but a forward search RETARGETS a pane, so
+handing it to a window that is not showing that pdf replaces the document it IS showing, and
+because the delivery raises that window the next build finds it first again: the mistake sticks
+instead of self-correcting. So forward search runs a CLAIM round first. The sender walks the
+frames in z-order offering `<forwardprobe .../>`, which a receiver takes only when one of its
+panes already holds that pdf (`MainWindow::PaneShowingDocument`, the same predicate
+`RouteForwardSearch` picks its target with) and otherwise declines BEFORE any foregrounding, so
+a refusal is invisible; if nobody claims it, the ordinary `<forward/>` goes to the topmost frame
+exactly as before. It is a new ELEMENT rather than an attribute on `<forward>` on purpose:
+unknown attributes are the protocol's designated extension point and are IGNORED, so an older
+receiver would mistake the probe for a real request and hijack it, while an unknown element is
+rejected and the sender falls through. With a single window the behaviour is unchanged either
+way. The probe uses a 1 s timeout rather than the send's 5 s: it is a query, and N windows must
+not multiply into N times the editor's patience.
 
 **Auto-reload**: each pane owns a `util/FileWatcher.*` — a thread that watches the open
 document's PARENT DIRECTORY (`ReadDirectoryChangesW`; a handle to the file itself would go stale
@@ -488,9 +515,20 @@ Design:
   Invariants: points strictly increase in EVERY active coordinate; a newly added manual point
   wins (conflicting points are removed); the map is cleared on every (re)open; emptying the map
   recaptures the plain anchor at the current positions; the EMPTY map degenerates to the plain
-  anchor, bit-identical to the modes above. Commands: Add Sync Point Here (Shift+F7, captures
-  every active pane's current page), Sync Points... (list/remove dialog), Clear Sync Points
-  (Ctrl+Shift+F7).
+  anchor, bit-identical to the modes above. Commands: Add/Remove Sync Point Here (Shift+F7),
+  Sync Points... (list/remove dialog), Clear Sync Points (Ctrl+Shift+F7). The first is a
+  TOGGLE around `PointIndexHere()`, which answers with the index of the point whose tuple is
+  exactly the pages in view (-1 when there is none, and whenever `AddPointHere` would refuse,
+  so one call decides both the direction and the button state): on a hit the command removes
+  that point, otherwise it captures every active pane's current page. Without the toggle the
+  command was a no-op-looking replacement there (the conflict rule erases the duplicate and
+  reinserts it as manual), and removal existed only inside the dialog. The toolbar button is
+  the state made visible - a `BTNS_CHECK` pressed while the panes sit on a point - and it is
+  the ONE checked state that follows the SCROLL, so it cannot ride on `UpdateCommandUi` (which
+  is deliberately skipped on `Scrolled` ticks): `UpdateSyncPointButton` re-evaluates the query
+  per tick against a cached 0/1 and touches comctl32 only when it flips, while UpdateCommandUi
+  writes the state unconditionally and simply refreshes the cache (a fresh toolbar comes up
+  unpressed, and a click auto-toggles a check button behind the code's back).
 - **Bookmark generation**: "Sync Points from Bookmarks" parses a hierarchical key from each
   outline title (`util/OutlineNumbering`: multi-level prefix like "1.2.3", with an optional
   verbal intro word across fourteen languages - IT/EN "Capitolo/Cap/Chapter/Ch/Sezione/Sez/
@@ -585,14 +623,15 @@ Design:
   position. The ticks use the focus-ring accent (manual opaque, generated 0.45 alpha); the
   anchor glyph goes darker in light mode (0x00529B, generated 0.6 alpha) because the thin
   glyph needs more weight than a 2px ring, while dark mode keeps the light accent (darker
-  would sink into the background). Markers show whenever a map exists, gaps toggle
-  notwithstanding; each rendering has its own Options checkbox ([sync] showAnchors /
-  showTicks, default on). Hovering an anchor shows a tracking tooltip with the point's
-  numbering key (or "manual"): strict monotonicity in every coordinate guarantees at most one
-  point per page per pane, so the tip is always a single entry. The Sync Points dialog uses a
-  report-mode ListView with column headers (#, Numbering, Pages, Origin; DialogTemplate
-  gained a class-by-name AddControl overload because comctl32 classes have no
-  DLGITEMTEMPLATE atom).
+  would sink into the background); under high contrast both become flat system colours
+  (`COLOR_HIGHLIGHT` manual, `COLOR_GRAYTEXT` generated). Markers show whenever a map
+  exists, gaps toggle notwithstanding; each rendering has its own Options checkbox
+  ([sync] showAnchors / showTicks, default on). Hovering an anchor shows a tracking tooltip
+  with the point's numbering key (or "manual"): strict monotonicity in every coordinate
+  guarantees at most one point per page per pane, so the tip is always a single entry.
+  The Sync Points dialog uses a report-mode ListView with column headers (#, Numbering,
+  Pages, Origin; DialogTemplate gained a class-by-name AddControl overload because comctl32
+  classes have no DLGITEMTEMPLATE atom).
 - **Swap mirroring**: F8 is a ROTATION of the active slots — each pane adopts what its
   predecessor in visual order held, so left content moves to centre, centre to right and right
   wraps back to left; Shift+F8 rotates the other way (each pane adopts its successor, the
@@ -779,6 +818,38 @@ why it survived to 0.9.1.
 - Dark title bar via `DwmSetWindowAttribute(DWMWA_USE_IMMERSIVE_DARK_MODE)`; page background aside,
   chrome colors follow the system light/dark setting. MuPDF-rendered dark mode (color inversion)
   is out of scope for v1.
+- Every glyph imagelist BAKES `GetSysColor(COLOR_BTNTEXT)` into premultiplied pixels, and each
+  cache is keyed on the DPI alone, so a HIGH CONTRAST switch would otherwise leave the icons in
+  the old ink until a DPI, language or text-mode change happened to rebuild them.
+  `WM_SYSCOLORCHANGE` re-bakes all three sets (`RebuildSystemColorAssets`) and forwards the
+  message to the common controls, which the message's own contract requires: it reaches top-level
+  windows only, and a toolbar left unnotified keeps drawing its buttons in the old 3D Objects
+  colour. `WM_THEMECHANGED` runs the same handler, as the accessibility guidance asks of anything
+  that CACHES colours. Ordinary light/dark switching does NOT arrive here (the classic system
+  colours do not follow it, which is also why the chrome stays light in dark mode); that one comes
+  as `WM_SETTINGCHANGE`/`ImmersiveColorSet` and only retints the title bar and the panes.
+- HIGH CONTRAST reaches the pane canvas too, which is drawn by hand and therefore has no theme
+  part to hand to uxtheme: the documented fallback for an owner-drawn surface is `GetSysColor`,
+  and `PaneWindow::Themed(sysIndex, dark, light)` returns the system metric when high contrast is
+  on and the built-in palette otherwise. The condition is not optional - the classic colours do
+  not follow the light/dark personalization, so using them unconditionally would flatten the dark
+  theme to Windows 95 grey. Detection is `SPI_GETHIGHCONTRAST` (the only supported probe: there is
+  no registry key, and guessing from `COLOR_WINDOW` is wrong for the HC-white themes); MainWindow
+  owns it and pushes it into the panes (`SetHighContrast`, which repaints UNCONDITIONALLY, because
+  switching between two HC themes changes the colours without changing the on/off answer).
+  The mapping keeps the documented PAIRS: canvas `COLOR_WINDOW` with the placeholder text and the
+  page border in `COLOR_WINDOWTEXT`, header strip `COLOR_BTNFACE` with `COLOR_BTNTEXT`,
+  `COLOR_GRAYTEXT` for everything de-emphasized (inactive pane name, generated points, non-active
+  search hits, alignment-gap silhouettes), `COLOR_HIGHLIGHT` for every accent (focus ring, active
+  pane underline, manual points, anchor glyph, selection, active hit) and `COLOR_HOTLIGHT` for the
+  SyncTeX flash, which has to stay distinguishable from both. Three consequences worth knowing:
+  the PAGE stays white (it is content, and inverting it is the post-1.0 dark reading mode), so the
+  three overlays that sit on it keep their alpha and only change hue - an opaque HC fill would
+  erase the glyphs it is meant to emphasize; both stock HC themes give `COLOR_BTNFACE` and
+  `COLOR_WINDOW` the SAME value, so the header strip and the tick strip gain a `COLOR_BTNTEXT`
+  hairline (Windows separates HC regions the same way) and the page border is inset half a pixel,
+  since a 1px stroke centred on an integral edge is 50% blending on two columns; and the alpha
+  washes that carry meaning elsewhere (6% tick backing, 45% generated ticks) become flat colours.
 - Drag & drop: one file dropped on a pane opens there; extra files land in the OTHER panes in
   visual order, and two extra files switch three-pane mode on first (three files always mean a
   three-pane arrangement).
@@ -825,6 +896,15 @@ why it survived to 0.9.1.
   lose wholesale. The lock does not merge: two instances that loaded the same state are
   last-close-wins, as they always were. Accepted trade-off: a downgrade round-trip drops keys the
   older build does not know (versionless safe-default keys by contract).
+  File ▸ New Window turns that from a rarity into a normal state, so what it costs is worth
+  stating. Safe by construction: the per-slot DOCUMENTS (an empty window seeds `m_fallback` from
+  the session it loaded and `SaveSession` writes those back untouched, so it never blanks the
+  stored panes), the atomic swap, the per-pid temp sweep and the HKCU verb lock. Genuinely lost,
+  rolled back to what the other window loaded at ITS start: the sync-point memory
+  (`[sync-points]`, hand-placed work with no other copy), the MRU lists, and every Options value
+  including the language - which also visibly DIFFERS between two live windows, `g_lang` being
+  per process with no cross-process notification. Documented, not synchronized: a broadcast would
+  reopen "which live state travels" for every setting.
 - `AppSettings` is a class rather than an aggregate for one reason: the declared range of each
   field, and the two rules that span more than one (`normalRect` exists only with `hasPlacement`;
   two of the three-pane shares must leave room for the third), are an invariant of the TYPE, not a
@@ -942,7 +1022,39 @@ PdfSideViewer/
   the outline sidebar refers to that pane, so losing the marker when the window blurs loses that
   association. The sync-sampling center (`SyncCenterY`) subtracts the band at the four sites that
   pair it with raw scroll offsets rather than routing through `ContentOrigin`, or the sync
-  round-trip drifts by the band height.
+  round-trip drifts by the band height. The strip is drawn LAST, as an opaque band over content
+  the viewport has already scrolled under it, and the hit tests know nothing about that: a client
+  point inside the band maps through `ContentOrigin` to real page content hidden beneath. So every
+  input entry point (`WM_LBUTTONDOWN`, the word-select `WM_LBUTTONDBLCLK` after its placeholder
+  branch, `WM_LBUTTONUP`, `WM_SETCURSOR`) tests `InHeaderStrip` first and does nothing there;
+  only an in-flight selection drag still reads the band, as its auto-scroll-up area. The one
+  gesture the strip DOES own is the double click, which fires the pane's `m_onOpenRequest` - the
+  same handler the empty pane's placeholder uses, so the strip that names the document is also
+  how you replace it, and the frame's dialog opens in that document's own folder. Hovering it
+  raises a tracking tooltip with the full path (`m_headerTip`, uId 3 beside the scrollbar tip's 1
+  and the anchor tip's 2), shown exactly when `HeaderStripText()` - the ONE function both the
+  draw and the tip go through - differs from `m_docPath`: the file name always does, a compacted
+  path does, an already-short path does not. A `TTF_TRACK` tip appears the instant its owner says
+  so, which is wrong for a band spanning the full pane width - the pointer crosses it on the way
+  to everything above - so the show is deferred to `WM_MOUSEHOVER`: `WM_MOUSEMOVE` only arms
+  `TrackMouseEvent(TME_HOVER)` and every move re-arms it, which buys the system's own
+  rest-to-show delay (`SPI_GETMOUSEHOVERTIME`, 400 ms by default, the same one ordinary comctl32
+  tooltips obey) without a timer of the app's own. Hover tracking answers to REAL mouse input:
+  a synthetic `WM_MOUSEMOVE` arms it but never produces the hover, so a test has to move the
+  physical pointer and let it rest. Placement follows the pointer in X and drops clear of both
+  the band and the CURSOR in Y (`max(HeaderPx + gap, client.y + SM_CYCURSOR)`), which is the UX
+  guide's two rules together ("near the object being hovered, usually at the pointer's tail or
+  head" and "avoid covering the object... even if that requires separation between the pointer
+  and the tip"): a tip pinned to a corner of a full-width band is nowhere near the pointer, one
+  placed AT the pointer covers the truncated text it exists to reveal, and one placed just under
+  the band still ends up beneath the arrow, whose hotspot is in the strip while its body hangs
+  below. The strip forces the standard arrow (the `WM_SETCURSOR` guard falls through to the class
+  cursor), so its hotspot is the top-left corner and one cursor box below it clears the glyph at
+  any DPI and at any accessibility cursor size. Unlike the scrollbar and anchor tips this one
+  omits `TTF_ABSOLUTE`, so the control still pulls a long path back inside the monitor near a
+  screen edge; the offset itself has to be ours, since the control otherwise puts its own
+  top-left exactly on the point given. DirectWrite's own tail ellipsis stays undetectable (no
+  `IDWriteTextLayout` exists in the app), which is the one truncation the tip cannot answer for.
 - Render results that can fail must ALWAYS reach the pane (ok flag), and every latch the pane
   keeps (`pendingId`, `failedScale`) must be reset on device loss; any silent drop or surviving
   latch turns into a permanently blank page at that zoom.
